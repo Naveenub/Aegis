@@ -8,6 +8,6 @@ If code change needed:
 
 PATCH:
 {
-  "file": "path",
+  "file": "src/app.js",
   "content": "FULL updated file"
 }
