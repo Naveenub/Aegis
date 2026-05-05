@@ -4,7 +4,7 @@ import { runSystem } from '../engine/orchestrator.js';
 const task = process.argv.slice(2).join(' ');
 
 if (!task) {
-  console.log('Usage: claude "task"');
+  console.log('Usage: aegis "task"');
   process.exit(1);
 }
 
