@@ -1,0 +1,13 @@
+{
+  "mode": "approval",
+  "maxRetries": 3,
+  "allowedPaths": ["src/", "services/", "utils/"],
+  "blockedPaths": [".env", "secrets/", ".git/"],
+  "agentPriority": [
+    "security-editor",
+    "review-guard",
+    "debugger",
+    "refactorer",
+    "test-writer"
+  ]
+}
