@@ -1,6 +1,7 @@
 {
   "name": "aegis",
   "version": "1.0.0",
+  "description": "Enterprise-grade autonomous AI engineering platform with multi-agent orchestration, guardrails, and self-healing capabilities",
   "type": "module",
   "scripts": {
     "start": "node cli/claude.js",
