@@ -42,16 +42,102 @@ Learning (memory)
 
 ---
 
+## 🧠 ASCII Architecture
+
+```
+                    ┌──────────────────────┐
+                    │        USER          │
+                    │ CLI / API / Script   │
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │   ORCHESTRATOR       │
+                    │ (Task Controller)    │
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │      PLANNER         │
+                    │  (Task Breakdown)    │
+                    └──────────┬───────────┘
+                               ↓
+        ┌───────────────────────────────────────────┐
+        │              AGENT LAYER                  │
+        │                                           │
+        │ debugger | refactorer | test-writer       │
+        │ feature-builder | security-editor         │
+        └───────────────────────────────────────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │   REVIEW GUARD       │
+                    │  (Approval Gate)     │
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │   CODE WRITER        │
+                    │ (Patch Apply + Backup)
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │    TEST / VERIFY     │
+                    │ (Optional pipeline)  │
+                    └──────────┬───────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │       GIT            │
+                    │ (Commit Changes)     │
+                    └──────────┬───────────┘
+                               ↓
+        ┌───────────────────────────────────────────┐
+        │         MEMORY + OBSERVABILITY            │
+        │                                           │
+        │ memory.json | decisions.log | logger      │
+        └───────────────────────────────────────────┘
+                               ↓
+                    ┌──────────────────────┐
+                    │    META-REVIEWER     │
+                    │ (Self Improvement)   │
+                    └──────────────────────┘     
+```
+
+---
+
 ## 📁 Project Structure
 
 ```
 aegis/
-├── .claude/ # agents, rules, memory
-├── cli/ # CLI interface
-├── engine/ # orchestration logic
-├── workers/ # background processing
-├── scripts/ # automation scripts
-├── server.js # API server
+├── .claude/                         # AI system brain (agents + rules + memory)
+│   ├── agents/                      # All AI agents (modular roles)
+│   │   ├── planner.md               # Breaks tasks into steps
+│   │   ├── debugger.md              # Finds & fixes bugs
+│   │   ├── refactorer.md            # Improves code quality
+│   │   ├── test-writer.md           # Generates tests
+│   │   ├── review-guard.md          # Safety + approval gate
+│   │   ├── security-editor.md       # Security validation
+│   │   ├── feature-builder.md       # Builds new features
+│   │   └── meta-reviewer.md         # Learns & improves system
+│   ├── context/                     # Persistent system memory
+│   │   ├── memory.json              # Long-term learnings (RAG-lite)
+│   │   └── decisions.log            # Execution logs / audit trail
+│   └── settings.json                # System config (modes, guardrails)
+├── cli/                             # Command line interface
+│   └── claude.js                    # Entry point (runs Aegis tasks)
+├── engine/                          # Core execution engine
+│   ├── orchestrator.js              # Main controller (runs pipeline)
+│   ├── agent-runner.js              # Calls Claude API per agent
+│   ├── repo-scanner.js              # Reads codebase context
+│   ├── code-writer.js               # Applies patches safely
+│   ├── memory.js                    # Stores learnings
+│   ├── queue.js                     # Task queue (scalability)
+│   ├── logger.js                    # Logging (observability)
+│   └── git.js                       # Git automation (commit changes)
+├── workers/                         # Background processing (scalable)
+│   └── agent-worker.js              # Executes agents via queue
+├── scripts/                         # Automation scripts
+│   └── pipeline.sh                  # CI-like local pipeline
+├── server.js                        # API server (external access)
+├── package.json                     # Dependencies + scripts
+├── .env                             # Secrets / API keys
+└── README.md                        # Documentation
 ```
 
 ---
