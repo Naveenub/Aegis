@@ -25,7 +25,7 @@ Aegis operates as a distributed AI engineering system with:
 
 ```bash
 npm install
-node cli/claude.js "Fix login bug"0
+node cli/claude.js "Fix login bug"
 ```
 
 ## 🌐 API
