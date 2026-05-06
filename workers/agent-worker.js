@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
-import { applyPatch } from '../engine/code-writer.js';
+import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { runTests } from '../engine/test-runner.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
 import { backupFile, restoreFile, cleanupBackup } from '../engine/backup.js';
@@ -14,7 +14,7 @@ new Worker(
   async (job) => {
     const { step } = job.data;
 
-    // ✅ mark running
+    // ✅ mark job as running
     updateJob(job.id, { status: 'running' });
 
     let attempt = 0;
@@ -23,8 +23,6 @@ new Worker(
 
     while (attempt < 3 && !success) {
       attempt++;
-
-      // ✅ track retry
       incrementRetries(job.id);
 
       const result = await runAgent(
@@ -33,35 +31,69 @@ new Worker(
         {}
       );
 
-      if (!result.includes('PATCH:')) return;
+      // ❌ handle no patch case properly
+      if (!result.includes('PATCH:')) {
+        updateJob(job.id, {
+          status: 'failed',
+          result: 'No patch generated'
+        });
+        throw new Error('No patch generated');
+      }
 
       const patch = result.split('PATCH:')[1].trim();
 
+      // ✅ system review
       const review = runReviewPipeline(patch);
-      if (!review.ok) return;
+      if (!review.ok) {
+        updateJob(job.id, {
+          status: 'failed',
+          result: review.message
+        });
+        throw new Error('System review failed');
+      }
 
+      // ✅ AI review
       const aiReview = await runAgent('review-guard', patch, {});
-      if (!aiReview.includes('APPROVED')) return;
+      if (!aiReview.includes('APPROVED')) {
+        updateJob(job.id, {
+          status: 'failed',
+          result: 'AI review rejected'
+        });
+        throw new Error('AI review rejected');
+      }
 
-      applyPatch(patch);
+      // ✅ parse patch
+      const { file, content } = parsePatch(patch);
 
+      // 1️⃣ backup
+      backupFile(file);
+
+      // 2️⃣ apply patch
+      applyPatch({ file, content });
+
+      // 3️⃣ run tests
       const testResult = runTests();
 
       if (testResult.success) {
         success = true;
 
-        // ✅ success tracking
+        // ✅ cleanup backup after success
+        cleanupBackup(file);
+
         updateJob(job.id, {
           status: 'completed',
           result: 'success'
         });
+
       } else {
         lastError = testResult.output;
+
+        // ❌ rollback on failure
+        restoreFile(file);
       }
     }
 
     if (!success) {
-      // ✅ failure tracking
       updateJob(job.id, {
         status: 'failed',
         result: lastError
