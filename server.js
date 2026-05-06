@@ -27,12 +27,12 @@ app.post('/task', async (req, res) => {
 app.post('/resume/:id', async (req, res) => {
   const { id } = req.params;
 
-  const wf = getWorkflow(id);
+  const wf = await getWorkflow(id);
   if (!wf) {
     return res.status(404).json({ error: 'Workflow not found' });
   }
 
-  const steps = getRunnableSteps(id);
+  const steps = await getRunnableSteps(id);
 
   for (const step of steps) {
     await taskQueue.add('step', {
