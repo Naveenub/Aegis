@@ -122,58 +122,59 @@ const worker = new Worker(
       // 🔒 distributed lock
       const lock = await acquireLock(file);
 
-try {
-  // 🌿 ensure workflow branch (CRITICAL)
-  ensureWorkflowBranch(workflowId);
+      try {
+        // 🌿 ensure workflow branch (CRITICAL)
+        ensureWorkflowBranch(workflowId);
 
-  // apply patch
-  applyPatch({ file, content });
+        // apply patch
+        applyPatch(file, content);
 
-  // commit change
-  commitChanges(`Aegis: ${step.id}`);
+        // commit change
+        commitChanges(`Aegis: ${step.id}`);
 
-  // run tests
-  const testResult = runTests();
+        // run tests
+        const testResult = runTests();
 
-  if (testResult.success) {
-    success = true;
+        if (testResult.success) {
+          success = true;
 
-    await storeMemory(step.description, patch);
+          await storeMemory(step.description, patch);
 
-    // ✅ idempotency mark
-    await markApplied(opId);
+          // ✅ idempotency mark
+          await markApplied(opId);
 
-    updateJob(job.id, {
-      status: 'completed',
-      result: 'success'
-    });
+          updateJob(job.id, {
+            status: 'completed',
+            result: 'success'
+          });
 
-    recordSuccess(job.id);
+          recordSuccess(job.id);
 
-    // ✅ mark step completed
-    await updateStep(workflowId, step.id, 'completed');
+          // ✅ mark step completed
+          await updateStep(workflowId, step.id, 'completed');
 
-    // 🚀 DAG progression
-    const nextSteps = await getRunnableSteps(workflowId);
+          // 🚀 DAG progression
+          const nextSteps = await getRunnableSteps(workflowId);
 
-    for (const next of nextSteps) {
-      await taskQueue.add('step', {
-        workflowId,
-        step: next
-      });
-    }
+          for (const next of nextSteps) {
+            await taskQueue.add('step', {
+              workflowId,
+              step: next
+            });
+          }
 
-  } else {
-    lastError = testResult.output;
+        } else {
+          lastError = testResult.output;
 
-    // 🔁 rollback ONLY last commit (safe)
-    rollbackLastCommit();
-  }
+          // 🔁 rollback ONLY last commit (safe)
+          rollbackLastCommit();
+        }
 
-} finally {
-  await releaseLock(lock);
-}
-      
+      } finally {
+        await releaseLock(lock);
+      }
+    } // end while
+
     if (!success) {
       recordFailure(job.id);
 
