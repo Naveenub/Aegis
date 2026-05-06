@@ -1,7 +1,9 @@
 import { runAgent } from './agent-runner.js';
 import { applyPatch } from './code-writer.js';
+import { runTests } from './test-runner.js';
 import { logger } from './logger.js';
-import fs from 'fs';
+
+const MAX_RETRIES = 3;
 
 export async function runSystem(task) {
   logger.info({ task }, 'Start');
@@ -9,37 +11,55 @@ export async function runSystem(task) {
   const planRaw = await runAgent('planner', task, {});
   const plan = JSON.parse(planRaw);
 
-  for (const step of plan.tasks.sort((a,b)=>a.priority-b.priority)) {
-    logger.info(`Running ${step.agent}`);
+  for (const step of plan.tasks) {
+    let attempt = 0;
+    let success = false;
+    let lastError = '';
 
-    const result = await runAgent(step.agent, step.description, {});
+    while (attempt < MAX_RETRIES && !success) {
+      attempt++;
 
-    logDecision(step.agent, result);
+      logger.info(`Running ${step.agent} (Attempt ${attempt})`);
 
-    if (result.includes('PATCH:')) {
-      const patch = extractPatch(result);
+      const result = await runAgent(
+        attempt === 1 ? step.agent : 'debugger',
+        attempt === 1
+          ? step.description
+          : `Fix this failing test:\n${lastError}`,
+        {}
+      );
+
+      if (!result.includes('PATCH:')) {
+        logger.warn('No patch returned');
+        break;
+      }
+
+      const patch = result.split('PATCH:')[1].trim();
 
       const review = await runAgent('review-guard', patch, {});
 
       if (!review.includes('APPROVED')) {
         logger.warn('Patch rejected');
-        continue;
+        break;
       }
 
       applyPatch(patch);
+
+      const testResult = runTests();
+
+      if (testResult.success) {
+        logger.info('Tests passed ✅');
+        success = true;
+      } else {
+        logger.warn('Tests failed ❌');
+        lastError = testResult.output;
+      }
+    }
+
+    if (!success) {
+      logger.error(`Step failed after ${MAX_RETRIES} attempts`);
     }
   }
 
-  logger.info('Done');
-}
-
-function extractPatch(result) {
-  return result.split('PATCH:')[1].trim();
-}
-
-function logDecision(agent, result) {
-  fs.appendFileSync(
-    '.claude/context/decisions.log',
-    `[${new Date().toISOString()}] ${agent}\n${result}\n\n`
-  );
+  logger.info('System completed');
 }
