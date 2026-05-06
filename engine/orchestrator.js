@@ -13,11 +13,11 @@ export async function runSystem(task) {
   const planRaw = await runAgent('planner', task, {});
   const plan = JSON.parse(planRaw);
 
-  // 2️⃣ Persist workflow (CRITICAL)
-  createWorkflow(workflowId, plan.tasks);
+  // 2️⃣ Persist workflow (CRITICAL - must await)
+  await createWorkflow(workflowId, plan.tasks);
 
-  // 3️⃣ Get initial runnable steps (no dependencies)
-  const steps = getRunnableSteps(workflowId);
+  // 3️⃣ Get initial runnable steps (must await)
+  const steps = await getRunnableSteps(workflowId);
 
   // 4️⃣ Schedule ONLY (no execution here)
   for (const step of steps) {
@@ -27,7 +27,7 @@ export async function runSystem(task) {
     });
   }
 
-  logger.info({ workflowId }, 'Scheduled');
+  logger.info({ workflowId, steps: steps.length }, 'Scheduled');
 
   return workflowId;
 }
