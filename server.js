@@ -1,8 +1,10 @@
 import express from 'express';
 import fs from 'fs';
 import { getMetrics } from './engine/metrics.js';
+import { getWorkflow, getRunnableSteps } from './engine/workflow-store.js';
 import { initVectorIndex } from './engine/vector-memory.js';
 import { runSystem } from './engine/orchestrator.js';
+import { taskQueue } from './engine/queue.js';
 
 const app = express();
 app.use(express.json());
@@ -20,6 +22,26 @@ app.post('/task', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.post('/resume/:id', async (req, res) => {
+  const { id } = req.params;
+
+  const wf = getWorkflow(id);
+  if (!wf) {
+    return res.status(404).json({ error: 'Workflow not found' });
+  }
+
+  const steps = getRunnableSteps(id);
+
+  for (const step of steps) {
+    await taskQueue.add('step', {
+      workflowId: id,
+      step
+    });
+  }
+
+  res.json({ status: 'resumed', workflowId: id });
 });
 
 /**
