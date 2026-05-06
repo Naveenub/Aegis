@@ -1,30 +1,38 @@
-import fs from 'fs';
 import OpenAI from 'openai';
+import IORedis from 'ioredis';
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const PATH = '.claude/context/vector-memory.json';
+const redis = new IORedis();
 
-function load() {
-  if (!fs.existsSync(PATH)) return [];
-  return JSON.parse(fs.readFileSync(PATH));
+// embedding model size = 1536
+const VECTOR_DIM = 1536;
+const INDEX_NAME = 'aegis_memory';
+
+// 🔧 create index (run once)
+export async function initVectorIndex() {
+  try {
+    await redis.call(
+      'FT.CREATE',
+      INDEX_NAME,
+      'ON', 'HASH',
+      'PREFIX', '1', 'memory:',
+      'SCHEMA',
+      'text', 'TEXT',
+      'patch', 'TEXT',
+      'vector', 'VECTOR', 'HNSW', '6',
+      'TYPE', 'FLOAT32',
+      'DIM', VECTOR_DIM,
+      'DISTANCE_METRIC', 'COSINE'
+    );
+  } catch (err) {
+    // index already exists
+  }
 }
 
-function save(data) {
-  fs.writeFileSync(PATH, JSON.stringify(data, null, 2));
-}
-
-// 🔢 cosine similarity
-function cosine(a, b) {
-  const dot = a.reduce((sum, v, i) => sum + v * b[i], 0);
-  const magA = Math.sqrt(a.reduce((sum, v) => sum + v * v, 0));
-  const magB = Math.sqrt(b.reduce((sum, v) => sum + v * v, 0));
-  return dot / (magA * magB);
-}
-
-// 🧠 create embedding
+// 🧠 embedding
 async function embed(text) {
   const res = await client.embeddings.create({
     model: 'text-embedding-3-small',
@@ -34,35 +42,46 @@ async function embed(text) {
   return res.data[0].embedding;
 }
 
-// ➕ store memory
+// ➕ store
 export async function storeMemory(text, patch) {
-  const data = load();
-
   const vector = await embed(text);
 
-  data.push({
+  const id = `memory:${Date.now()}`;
+
+  await redis.hset(id, {
     text,
     patch,
-    vector,
-    createdAt: new Date().toISOString()
+    vector: Buffer.from(new Float32Array(vector).buffer)
   });
-
-  save(data);
 }
 
-// 🔍 search similar
+// 🔍 search
 export async function searchMemory(query, topK = 3) {
-  const data = load();
-  if (data.length === 0) return [];
-
   const queryVec = await embed(query);
 
-  const scored = data.map(item => ({
-    ...item,
-    score: cosine(queryVec, item.vector)
-  }));
+  const res = await redis.call(
+    'FT.SEARCH',
+    INDEX_NAME,
+    `*=>[KNN ${topK} @vector $vec AS score]`,
+    'PARAMS', '2', 'vec',
+    Buffer.from(new Float32Array(queryVec).buffer),
+    'SORTBY', 'score',
+    'RETURN', '3', 'text', 'patch', 'score',
+    'DIALECT', '2'
+  );
 
-  return scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+  const results = [];
+
+  for (let i = 1; i < res.length; i += 2) {
+    const doc = res[i + 1];
+
+    const item = {};
+    for (let j = 0; j < doc.length; j += 2) {
+      item[doc[j]] = doc[j + 1];
+    }
+
+    results.push(item);
+  }
+
+  return results;
 }
