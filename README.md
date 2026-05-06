@@ -35,7 +35,8 @@ Memory (learning from past fixes)
 
 ### 2. Self-Healing System
 
-- ~run → test → fail → fix → retry (max 3)~
+`run → test → fail → fix → retry (max 3)`
+
 - Automatic debugging
 - Error-aware retries
 - Continuous improvement loop
