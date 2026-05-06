@@ -114,3 +114,11 @@ new Worker(
   },
   { connection }
 );
+
+worker.on('failed', async (job, err) => {
+  await deadLetterQueue.add('failed-step', {
+    originalJobId: job.id,
+    step: job.data.step,
+    error: err.message
+  });
+});
