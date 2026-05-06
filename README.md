@@ -1,21 +1,68 @@
-# Aegis
+# 🛡️ AEGIS
 
-Aegis is an autonomous AI engineering system designed to function as a multi-agent software development team.
+> Autonomous Execution & Governance Intelligence System
 
-It can plan, build, debug, test, and improve software using coordinated AI agents with built-in safety guardrails.
+AEGIS is a **distributed, self-healing AI-driven workflow engine** designed to plan, execute, validate, and repair software tasks autonomously using multi-agent intelligence.
 
 ---
 
-## 🚀 Features
+# 🚀 What AEGIS Does
 
-- 🧠 Multi-agent architecture (planner, debugger, reviewer, etc.)
-- ⚙️ Autonomous code generation and fixing
-- 🛡 Guardrail-based safety system
-- 🔁 Review + approval pipeline
-- 📊 Logging and decision tracking
-- 🌐 API + CLI interface
-- 🧪 Test-aware workflows
+AEGIS takes a task and executes it end-to-end:
 
+```text
+plan → execute → test → fail → fix → retry → complete
+```
+
+It combines:
+
+AI agents (planner, debugger, reviewer)
+Workflow orchestration (DAG-based execution)
+Self-correcting loops
+Distributed workers
+Git-based transactional safety
+Memory (learning from past fixes)
+
+---
+
+## 🧠 Core Capabilities
+
+1. Autonomous Execution
+Multi-agent system (planner, debugger, reviewer)
+Task decomposition into executable steps
+Agent-driven patch generation
+2. Self-Healing System
+run → test → fail → fix → retry (max 3)
+Automatic debugging
+Error-aware retries
+Continuous improvement loop
+3. Workflow Engine (DAG)
+Step dependency tracking (dependsOn)
+State transitions:
+pending → running → completed / failed
+Dynamic scheduling of next steps
+Resumable workflows
+4. Distributed Architecture
+Queue-based execution (BullMQ)
+Worker-based processing
+Horizontal scaling ready
+5. Transaction Safety (Git-Based)
+checkpoint → apply → test → rollback (if fail)
+Atomic rollback using Git
+Full repository state recovery
+Multi-file consistency
+6. Distributed Locking
+Redis-based Redlock
+Prevents race conditions
+Safe multi-worker execution
+7. Memory System (RAG)
+Stores past fixes
+Retrieves similar issues
+Improves agent decisions over time
+8. Observability (Basic)
+Success / failure tracking
+Retry metrics
+Structured logging hooks
 ---
 
 ## 🧱 Architecture Overview
@@ -150,103 +197,132 @@ aegis/
 npm install
 ```
 
-### 2. Configure environment
-
-Create ```.env``` file:
-
-```env
-ANTHROPIC_API_KEY=your_api_key
-CLAUDE_AUTONOMY=true
-MODE=approval
-```
-
----
-
-## 🧠 Usage
-
-### CLI
+### 2. Start Redis
 
 ```bash
-node cli/claude.js "Fix login bug"
+docker run -p 6379:6379 redis
 ```
 
-👉 Optional (recommended):
-Rename CLI to ```aegis``` for cleaner usage.
+### 3. Initialize Git (REQUIRED)
 
-### API
+```bash
+git init
+git add .
+git commit -m "initial"
+```
 
-```http
+### 4. Start Worker
+
+```bash
+node workers/agent-worker.js
+```
+
+### 5. Start Server
+
+```bash
+node server.js
+```
+
+---
+
+## ▶️ Usage
+
+### Run a task
+
+```bash
 POST /task
-Content-Type: application/json
+```
 
+```json
 {
-  "task": "Build authentication system"
+  "task": "Fix failing tests in authentication module"
 }
 ```
----
 
-## 🤖 Agents
+### Resume workflow
 
-Core agents:
-
-- planner → breaks tasks into steps
-- debugger → finds and fixes bugs
-- refactorer → improves code quality
-- test-writer → generates tests
-- review-guard → validates safety
-- security-editor → detects vulnerabilities
-- feature-builder → builds features
-- meta-reviewer → improves system over time
+```bash
+POST /resume/:workflowId
+```
 
 ---
 
-## 🛡 Safety & Guardrails
+## Current State
 
-Aegis includes multiple protection layers:
+## ✅ What’s Solid
 
-- restricted file access (```.env```, secrets)
-- patch validation before applying changes
-- mandatory review-guard approval
-- automatic file backup before overwrite
+- Distributed execution (queue + workers)
+- Self-healing loop
+- Workflow engine (DAG + state)
+- Git-based rollback (atomic safety)
+- Distributed locking (Redlock)
+- Memory system (RAG foundation)
 
----
+## ⚠️ Honest Gaps
 
-## 📊 Observability
-
-- logs via ```pino```
-- decisions stored in:
-```.claude/context/decisions.log```
-- memory stored in:
-```.claude/context/memory.json```
-
----
-
-## ⚠️ Limitations
-
-- Not a zero-error system
-- Requires human oversight for critical systems
-- Performance depends heavily on prompt quality
-
----
+- Workflow storage uses JSON (not production-safe)
+- Git strategy lacks branch isolation
+- No pause/cancel controls
+- Limited observability (no dashboard yet)
+- No multi-tenant isolation
+- Memory system is basic (needs better ranking)
 
 ## 🧭 Roadmap
 
-- vector memory (RAG)
-- GitHub PR automation
-- UI dashboard
-- multi-repo coordination
-- SaaS platform
+# 🔜 v1.0 Production Hardening
+
+- Database-backed workflow store (Postgres/Redis)
+- Branch-based Git execution
+- Workflow controls (pause / cancel)
+- Observability dashboard
+- Idempotency & retry policies
+- Security sandboxing
+
+## ⚠️ Reality Check
+
+AEGIS is:
+
+✅ Autonomous execution engine
+✅ Self-healing workflow system
+✅ Distributed orchestration platform
+
+AEGIS is NOT:
+
+❌ Fully autonomous company
+❌ Zero-error system
+❌ Replacement for human engineers
+
+---
+
+## 🤝 Contributing
+
+This project is experimental but structured.
+
+Areas to contribute:
+
+- workflow engine improvements
+- memory ranking (RAG)
+- observability dashboard
+- git execution strategies
+- agent quality improvements
+
 
 ---
 
 ## 📜 License
 
-MIT (recommended)
+MIT License
 
 ---
 
-## 💡 Philosophy
+## 🧠 Final Note
 
-Aegis is not built to replace engineers.
+AEGIS is not a script.
 
-It is built to amplify engineering capability, allowing small teams to operate with the output of much larger organizations.
+It is an early-stage autonomous execution platform.
+
+The difference is:
+
+`automation → orchestration → intelligence`
+
+AEGIS is now entering the intelligence layer.
