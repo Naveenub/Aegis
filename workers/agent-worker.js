@@ -1,7 +1,7 @@
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
-import { createCheckpoint, rollbackTo } from '../engine/git.js';
 import { deadLetterQueue } from '../engine/queue.js';
+import { ensureWorkflowBranch, commitChanges, rollbackLastCommit } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure } from '../engine/metrics.js';
 import { runAgent } from '../engine/agent-runner.js';
@@ -122,53 +122,58 @@ const worker = new Worker(
       // 🔒 distributed lock
       const lock = await acquireLock(file);
 
-      try {
-        const checkpoint = createCheckpoint(`aegis: before patch ${file}`);
+try {
+  // 🌿 ensure workflow branch (CRITICAL)
+  ensureWorkflowBranch(workflowId);
 
-        applyPatch({ file, content });
+  // apply patch
+  applyPatch({ file, content });
 
-        const testResult = runTests();
+  // commit change
+  commitChanges(`Aegis: ${step.id}`);
 
-        if (testResult.success) {
-          success = true;
+  // run tests
+  const testResult = runTests();
 
-          await storeMemory(step.description, patch);
+  if (testResult.success) {
+    success = true;
 
-          // ✅ mark idempotent success
-          await markApplied(opId);
+    await storeMemory(step.description, patch);
 
-          updateJob(job.id, {
-            status: 'completed',
-            result: 'success'
-          });
+    // ✅ idempotency mark
+    await markApplied(opId);
 
-          recordSuccess(job.id);
+    updateJob(job.id, {
+      status: 'completed',
+      result: 'success'
+    });
 
-          // ✅ mark step completed
-          await updateStep(workflowId, step.id, 'completed');
+    recordSuccess(job.id);
 
-          // 🚀 trigger next steps (await REQUIRED)
-          const nextSteps = await getRunnableSteps(workflowId);
+    // ✅ mark step completed
+    await updateStep(workflowId, step.id, 'completed');
 
-          for (const next of nextSteps) {
-            await taskQueue.add('step', {
-              workflowId,
-              step: next
-            });
-          }
+    // 🚀 DAG progression
+    const nextSteps = await getRunnableSteps(workflowId);
 
-        } else {
-          lastError = testResult.output;
-
-          // 🔁 rollback
-          rollbackTo(checkpoint);
-        }
-
-      } finally {
-        await releaseLock(lock);
-      }
+    for (const next of nextSteps) {
+      await taskQueue.add('step', {
+        workflowId,
+        step: next
+      });
     }
 
+  } else {
+    lastError = testResult.output;
+
+    // 🔁 rollback ONLY last commit (safe)
+    rollbackLastCommit();
+  }
+
+} finally {
+  await releaseLock(lock);
+}
+      
     if (!success) {
       recordFailure(job.id);
 
