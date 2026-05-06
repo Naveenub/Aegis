@@ -8,6 +8,8 @@ import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
 import { storeMemory, searchMemory } from '../engine/vector-memory.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
+import { updateStep, getRunnableSteps } from '../engine/workflow-store.js';
+import { taskQueue } from '../engine/queue.js';
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 
@@ -16,11 +18,13 @@ const connection = new IORedis();
 const worker = new Worker(
   'aegis-tasks',
   async (job) => {
-    const { step } = job.data;
+    const { step, workflowId } = job.data;
 
-    // ✅ job start tracking
+    // 🆕 mark step running (CRITICAL)
+    updateStep(workflowId, step.id, 'running');
+
+    // metrics
     recordStart(job.id);
-
     updateJob(job.id, { status: 'running' });
 
     let attempt = 0;
@@ -30,7 +34,6 @@ const worker = new Worker(
     while (attempt < 3 && !success) {
       attempt++;
 
-      // ✅ retry tracking
       incrementRetries(job.id);
       recordRetry();
 
@@ -51,7 +54,6 @@ const worker = new Worker(
         {}
       );
 
-      // ❌ no patch
       if (!result.includes('PATCH:')) {
         recordFailure(job.id);
 
@@ -60,12 +62,14 @@ const worker = new Worker(
           result: 'No patch generated'
         });
 
+        // 🆕 mark workflow failure
+        updateStep(workflowId, step.id, 'failed');
+
         throw new Error('No patch generated');
       }
 
       const patch = result.split('PATCH:')[1].trim();
 
-      // ✅ system review
       const review = runReviewPipeline(patch);
       if (!review.ok) {
         recordFailure(job.id);
@@ -75,10 +79,11 @@ const worker = new Worker(
           result: review.message
         });
 
+        updateStep(workflowId, step.id, 'failed');
+
         throw new Error('System review failed');
       }
 
-      // ✅ AI review
       const aiReview = await runAgent('review-guard', patch, {});
       if (!aiReview.includes('APPROVED')) {
         recordFailure(job.id);
@@ -88,23 +93,20 @@ const worker = new Worker(
           result: 'AI review rejected'
         });
 
+        updateStep(workflowId, step.id, 'failed');
+
         throw new Error('AI review rejected');
       }
 
-      // ✅ parse patch
       const { file, content } = parsePatch(patch);
 
-      // 🔒 distributed lock
       const lock = await acquireLock(file);
 
       try {
-        // 📸 create checkpoint (CRITICAL)
         const checkpoint = createCheckpoint(`aegis: before patch ${file}`);
 
-        // apply patch
         applyPatch({ file, content });
 
-        // run tests
         const testResult = runTests();
 
         if (testResult.success) {
@@ -119,10 +121,22 @@ const worker = new Worker(
 
           recordSuccess(job.id);
 
+          // 🆕 mark step completed
+          updateStep(workflowId, step.id, 'completed');
+
+          // 🚀 trigger next steps (DAG progression)
+          const nextSteps = getRunnableSteps(workflowId);
+
+          for (const next of nextSteps) {
+            await taskQueue.add('step', {
+              workflowId,
+              step: next
+            });
+          }
+
         } else {
           lastError = testResult.output;
 
-          // 🔁 git rollback
           rollbackTo(checkpoint);
         }
 
@@ -139,6 +153,9 @@ const worker = new Worker(
         result: lastError
       });
 
+      // 🆕 mark workflow failure
+      updateStep(workflowId, step.id, 'failed');
+
       await deadLetterQueue.add('failed-step', {
         originalJobId: job.id,
         step,
@@ -153,7 +170,7 @@ const worker = new Worker(
   { connection }
 );
 
-// ✅ queue-level failure safety
+// queue-level failure safety
 worker.on('failed', async (job, err) => {
   await deadLetterQueue.add('failed-step', {
     originalJobId: job.id,
