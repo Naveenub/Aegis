@@ -27,123 +27,165 @@ Memory (learning from past fixes)
 
 ## 🧠 Core Capabilities
 
-1. Autonomous Execution
-Multi-agent system (planner, debugger, reviewer)
-Task decomposition into executable steps
-Agent-driven patch generation
-2. Self-Healing System
-run → test → fail → fix → retry (max 3)
-Automatic debugging
-Error-aware retries
-Continuous improvement loop
-3. Workflow Engine (DAG)
-Step dependency tracking (dependsOn)
-State transitions:
-pending → running → completed / failed
-Dynamic scheduling of next steps
-Resumable workflows
-4. Distributed Architecture
-Queue-based execution (BullMQ)
-Worker-based processing
-Horizontal scaling ready
-5. Transaction Safety (Git-Based)
-checkpoint → apply → test → rollback (if fail)
-Atomic rollback using Git
-Full repository state recovery
-Multi-file consistency
-6. Distributed Locking
-Redis-based Redlock
-Prevents race conditions
-Safe multi-worker execution
-7. Memory System (RAG)
-Stores past fixes
-Retrieves similar issues
-Improves agent decisions over time
-8. Observability (Basic)
-Success / failure tracking
-Retry metrics
-Structured logging hooks
+### 1. Autonomous Execution
+
+- Multi-agent system (planner, debugger, reviewer)
+- Task decomposition into executable steps
+- Agent-driven patch generation
+
+### 2. Self-Healing System
+
+- ~run → test → fail → fix → retry (max 3)~
+- Automatic debugging
+- Error-aware retries
+- Continuous improvement loop
+
+### 3. Workflow Engine (DAG)
+
+- Step dependency tracking (dependsOn)
+- State transitions:
+  - pending → running → completed / failed
+- Dynamic scheduling of next steps
+- Resumable workflows
+
+### 4. Distributed Architecture
+
+- Queue-based execution (BullMQ)
+- Worker-based processing
+- Horizontal scaling ready
+
+### 5. Transaction Safety (Git-Based)
+
+- checkpoint → apply → test → rollback (if fail)
+- Atomic rollback using Git
+- Full repository state recovery
+- Multi-file consistency
+
+### 6. Distributed Locking
+
+- Redis-based Redlock
+- Prevents race conditions
+- Safe multi-worker execution
+
+### 7. Memory System (RAG)
+
+- Stores past fixes
+- Retrieves similar issues
+- Improves agent decisions over time
+
+### 8. Observability (Basic)
+
+- Success / failure tracking
+- Retry metrics
+- Structured logging hooks
+
 ---
 
 ## 🧱 Architecture Overview
 
-Aegis operates in the following flow:
+AEGIS is a distributed, state-driven workflow orchestration engine that combines AI agents with reliable execution primitives.
 
+### Core Flow
+
+```Plain text
+Client/API → Orchestrator → Workflow Store → Queue → Workers → Agents → Git/Test Systems → Next Steps
 ```
-Task  
-↓  
-Planner  
-↓  
-Agents (parallel / sequential)  
-↓  
-Review Guard  
-↓  
-Patch Apply  
-↓  
-Test Gate  
-↓  
-Commit  
-↓  
-Learning (memory)
+
+### Execution Model
+
+# 1. Task Intake
+    
+- API receives task request
+
+# 2. Planning
+
+- planner agent generates DAG (steps + dependencies)
+
+# 3. Workflow Initialization
+
+- Stored in workflow-store
+- Steps marked as pending
+
+# 4. Scheduling
+
+- Runnable steps pushed to queue
+
+# 5. Execution (Workers)
+
+- Workers pick jobs
+- Execute self-healing loop:
+
+```Code
+run → test → fail → fix → retry
 ```
+
+# 6. State Transition
+
+- Step marked completed or failed
+- Next steps unlocked dynamically
+
+# 7. Failure Handling
+
+- Retries (max 3)
+- Git rollback
+- Dead Letter Queue (DLQ)
 
 ---
 
 ## 🧠 ASCII Architecture
 
 ```
-                    ┌──────────────────────┐
-                    │        USER          │
-                    │  CLI / API / Script  │
-                    └──────────┬───────────┘
-                               ↓
-                    ┌──────────────────────┐
-                    │     ORCHESTRATOR     │
-                    │   (Task Controller)  │
-                    └──────────┬───────────┘
-                               ↓
-                    ┌──────────────────────┐
-                    │        PLANNER       │
-                    │    (Task Breakdown)  │
-                    └──────────┬───────────┘
-                               ↓
-        ┌───────────────────────────────────────────┐
-        │              AGENT LAYER                  │
-        │                                           │
-        │    debugger | refactorer | test-writer    │
-        │     feature-builder | security-editor     │
-        └───────────────────────────────────────────┘
-                               ↓
-                    ┌──────────────────────┐
-                    │     REVIEW GUARD     │
-                    │    (Approval Gate)   │
-                    └──────────┬───────────┘
-                               ↓
-                    ┌────────────────────────┐
-                    │   CODE WRITER          │
-                    │ (Patch Apply + Backup) │
-                    └──────────┬─────────────┘
-                               ↓
-                    ┌──────────────────────┐
-                    │    TEST / VERIFY     │
-                    │ (Optional pipeline)  │
-                    └──────────┬───────────┘
-                               ↓
-                    ┌──────────────────────┐
-                    │          GIT         │
-                    │   (Commit Changes)   │
-                    └──────────┬───────────┘
-                               ↓
-        ┌───────────────────────────────────────────┐
-        │         MEMORY + OBSERVABILITY            │
-        │                                           │
-        │    memory.json | decisions.log | logger   │
-        └───────────────────────────────────────────┘
-                               ↓
-                    ┌──────────────────────┐
-                    │    META-REVIEWER     │
-                    │  (Self Improvement)  │
-                    └──────────────────────┘     
+                          ┌─────────────────────────┐
+                           │        Client/API        │
+                           │       (server.js)        │
+                           └────────────┬─────────────┘
+                                        │
+                                        ▼
+                           ┌──────────────────────────┐
+                           │      Orchestrator        │
+                           │  (planner + scheduler)   │
+                           └────────────┬─────────────┘
+                                        │
+                                        ▼
+                           ┌──────────────────────────┐
+                           │     Workflow Store       │
+                           │ (state + dependencies)   │
+                           └────────────┬─────────────┘
+                                        │
+                                        ▼
+                           ┌──────────────────────────┐
+                           │         Queue            │
+                           │        (BullMQ)          │
+                           └───────┬────────┬─────────┘
+                                   │        │
+                  ┌────────────────┘        └────────────────┐
+                  ▼                                          ▼
+        ┌──────────────────────┐                  ┌──────────────────────┐
+        │        Worker        │                  │        Worker        │
+        │   (agent-worker.js)  │                  │   (agent-worker.js)  │
+        └──────────┬───────────┘                  └──────────┬───────────┘
+                   │                                         │
+                   ▼                                         ▼
+        ┌──────────────────────┐                  ┌──────────────────────┐
+        │    Agent Runner      │                  │    Agent Runner      │
+        │ (planner/debug/etc.) │                  │ (review/debug/etc.)  │
+        └──────────┬───────────┘                  └──────────┬───────────┘
+                   │                                         │
+        ┌──────────▼──────────┐                  ┌────────────▼──────────┐
+        │   Vector Memory     │                  │      Git Engine       │
+        │ (semantic search)   │                  │ (checkpoint/rollback) │
+        └──────────┬──────────┘                  └────────────┬──────────┘
+                   │                                          │
+                   ▼                                          ▼
+             ┌──────────────┐                         ┌──────────────┐
+             │ Test Runner  │                         │ Lock System  │
+             │              │                         │  (Redlock)   │
+             └──────────────┘                         └──────────────┘
+
+                           ┌──────────────────────────┐
+                           │   Dead Letter Queue      │
+                           │   (failed isolation)     │
+                           └──────────────────────────┘
 ```
 
 ---
@@ -152,39 +194,45 @@ Learning (memory)
 
 ```
 aegis/
-├── .claude/                         # AI system brain (agents + rules + memory)
-│   ├── agents/                      # All AI agents (modular roles)
-│   │   ├── planner.md               # Breaks tasks into steps
-│   │   ├── debugger.md              # Finds & fixes bugs
-│   │   ├── refactorer.md            # Improves code quality
-│   │   ├── test-writer.md           # Generates tests
-│   │   ├── review-guard.md          # Safety + approval gate
-│   │   ├── security-editor.md       # Security validation
-│   │   ├── feature-builder.md       # Builds new features
-│   │   └── meta-reviewer.md         # Learns & improves system
-│   ├── context/                     # Persistent system memory
-│   │   ├── memory.json              # Long-term learnings (RAG-lite)
-│   │   └── decisions.log            # Execution logs / audit trail
-│   └── settings.json                # System config (modes, guardrails)
-├── cli/                             # Command line interface
-│   └── claude.js                    # Entry point (runs Aegis tasks)
-├── engine/                          # Core execution engine
-│   ├── orchestrator.js              # Main controller (runs pipeline)
-│   ├── agent-runner.js              # Calls Claude API per agent
-│   ├── repo-scanner.js              # Reads codebase context
-│   ├── code-writer.js               # Applies patches safely
-│   ├── memory.js                    # Stores learnings
-│   ├── queue.js                     # Task queue (scalability)
-│   ├── logger.js                    # Logging (observability)
-│   └── git.js                       # Git automation (commit changes)
-├── workers/                         # Background processing (scalable)
-│   └── agent-worker.js              # Executes agents via queue
-├── scripts/                         # Automation scripts
-│   └── pipeline.sh                  # CI-like local pipeline
-├── server.js                        # API server (external access)
-├── package.json                     # Dependencies + scripts
-├── .env                             # Secrets / API keys
-└── README.md                        # Documentation
+├── .claude/                          # AI system configuration
+│   ├── agents/                       # Agent role definitions
+│   │   ├── planner.md
+│   │   ├── debugger.md
+│   │   ├── refactorer.md
+│   │   ├── test-writer.md
+│   │   ├── review-guard.md
+│   │   ├── security-editor.md
+│   │   ├── feature-builder.md
+│   │   └── meta-reviewer.md
+│   ├── context/                      # Persistent context
+│   │   ├── memory.json               # Basic memory store (legacy)
+│   │   └── decisions.log             # Decision history
+│   └── settings.json                 # Agent/system setting
+├── cli/                              # CLI interface
+│   └── claude.js
+├── engine/                           # Core system (brain)
+│   ├── orchestrator.js               # Scheduler (no execution)
+│   ├── agent-runner.js               # Runs AI agents
+│   ├── workflow-store.js             # Workflow state engine (DAG + status)
+│   ├── job-store.js                  # Job tracking (status, retries)
+│   ├── queue.js                      # BullMQ queues + DLQ
+│   ├── dag-executor.js               # (legacy execution helper)
+│   ├── code-writer.js                # Patch parser + applier
+│   ├── git.js                        # Checkpoint + rollback (git-based)
+│   ├── lock.js                       # Distributed locking (Redlock)
+│   ├── vector-memory.js              # RAG memory (embeddings + search)
+│   ├── memory.js                     # Legacy memory (JSON-based)
+│   ├── metrics.js                    # Metrics (success, retry, latency)
+│   ├── logger.js                     # Structured logging
+│   └── test-runner.js                # Test execution engine
+├── workers/                          # Execution layer
+│   └── agent-worker.js               # Core worker (self-healing loop)
+├── scripts/                          # Automation / CI pipelines
+│   └── pipeline.sh
+├── server.js                         # API server + dashboard endpoints
+├── package.json                      # Dependencies & scripts
+├── .env                              # Environment variables
+└── README.md                         # Project documentation
 ```
 
 ---
