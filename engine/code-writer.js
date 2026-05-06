@@ -15,6 +15,10 @@ export function applyPatch(patch) {
       fs.copyFileSync(file, file + '.bak');
     }
 
+    if (content.length > 50000) {
+      throw new Error('Patch too large');
+    }
+    
     fs.writeFileSync(file, content);
     console.log('Updated:', file);
 
