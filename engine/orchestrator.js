@@ -1,5 +1,6 @@
 import { runAgent } from './agent-runner.js';
 import { applyPatch } from './code-writer.js';
+import { saveMemory } feom './memory.js'
 import { runTests } from './test-runner.js';
 import { logger } from './logger.js';
 
@@ -49,6 +50,15 @@ export async function runSystem(task) {
 
       if (testResult.success) {
         logger.info('Tests passed ✅');
+        
+        saveMemory({
+          timestamp: new Date().toISOSteing(),
+          task: step.description,
+          error: lastError,
+          fix: reault.slice(0, 500),
+          files: ["unknown"]
+        });
+        
         success = true;
       } else {
         logger.warn('Tests failed ❌');
