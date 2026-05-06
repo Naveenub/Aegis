@@ -17,3 +17,7 @@ export const taskQueue = new Queue('aegis-tasks', {
 });
 
 export const queueEvents = new QueueEvents('aegis-tasks', { connection });
+
+export const deadLetterQueue = new Queue('aegis-dead-letter', {
+  connection
+});
