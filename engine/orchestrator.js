@@ -45,6 +45,13 @@ export async function runSystem(task) {
         break;
       }
 
+      const aiReview = await runAgent('review-guard', patch, {});
+
+      if (!aiReview.includes('APPROVED')) {
+      logger.warn('AI review rejected');
+      break;
+      }
+
       applyPatch(patch);
 
       const testResult = runTests();
