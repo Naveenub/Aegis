@@ -1,6 +1,6 @@
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
-import { backupFile, restoreFile, cleanupBackup } from '../engine/backup.js';
+import { createCheckpoint, rollbackTo } from '../engine/git.js';
 import { deadLetterQueue } from '../engine/queue.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure } from '../engine/metrics.js';
 import { runAgent } from '../engine/agent-runner.js';
@@ -94,17 +94,17 @@ const worker = new Worker(
       // ✅ parse patch
       const { file, content } = parsePatch(patch);
 
-      // 🔒 ✅ FIX: distributed lock (await REQUIRED)
+      // 🔒 distributed lock
       const lock = await acquireLock(file);
 
       try {
-        // backup
-        backupFile(file);
+        // 📸 create checkpoint (CRITICAL)
+        const checkpoint = createCheckpoint(`aegis: before patch ${file}`);
 
-        // apply
+        // apply patch
         applyPatch({ file, content });
 
-        // test
+        // run tests
         const testResult = runTests();
 
         if (testResult.success) {
@@ -112,25 +112,21 @@ const worker = new Worker(
 
           await storeMemory(step.description, patch);
 
-          cleanupBackup(file);
-
           updateJob(job.id, {
             status: 'completed',
             result: 'success'
           });
 
-          // ✅ success metrics
           recordSuccess(job.id);
 
         } else {
           lastError = testResult.output;
 
-          // rollback
-          restoreFile(file);
+          // 🔁 git rollback
+          rollbackTo(checkpoint);
         }
 
       } finally {
-        // 🔓 ✅ FIX: await release
         await releaseLock(lock);
       }
     }
