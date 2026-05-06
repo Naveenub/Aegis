@@ -1,3 +1,5 @@
+import { taskQueue } from './queue.js';
+
 export async function runDAG(tasks, runStep) {
   const completed = new Set();
   const taskMap = new Map(tasks.map(t => [t.id, t]));
