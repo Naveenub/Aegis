@@ -15,7 +15,7 @@ export async function runAgent(agent, task, context = {}) {
   const memory = searchMemory(task);
   
   const memoryContext = memory.length
-  ? `\nRelevant past fixes:\n$(JSON.stringify(memory, null, 2)}`
+  ? `\nRelevant past fixes:\n${JSON.stringify(memory, null, 2)}`
   : '';
 
   const response = await client.messages.create({
