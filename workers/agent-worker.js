@@ -2,6 +2,7 @@ import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { createCheckpoint, rollbackTo } from '../engine/git.js';
 import { deadLetterQueue } from '../engine/queue.js';
+import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure } from '../engine/metrics.js';
 import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
@@ -20,10 +21,9 @@ const worker = new Worker(
   async (job) => {
     const { step, workflowId } = job.data;
 
-    // 🆕 mark step running (CRITICAL)
-    updateStep(workflowId, step.id, 'running');
+    // ✅ mark step running (await REQUIRED)
+    await updateStep(workflowId, step.id, 'running');
 
-    // metrics
     recordStart(job.id);
     updateJob(job.id, { status: 'running' });
 
@@ -54,6 +54,7 @@ const worker = new Worker(
         {}
       );
 
+      // ❌ no patch
       if (!result.includes('PATCH:')) {
         recordFailure(job.id);
 
@@ -62,14 +63,14 @@ const worker = new Worker(
           result: 'No patch generated'
         });
 
-        // 🆕 mark workflow failure
-        updateStep(workflowId, step.id, 'failed');
+        await updateStep(workflowId, step.id, 'failed');
 
         throw new Error('No patch generated');
       }
 
       const patch = result.split('PATCH:')[1].trim();
 
+      // ✅ system review
       const review = runReviewPipeline(patch);
       if (!review.ok) {
         recordFailure(job.id);
@@ -79,11 +80,12 @@ const worker = new Worker(
           result: review.message
         });
 
-        updateStep(workflowId, step.id, 'failed');
+        await updateStep(workflowId, step.id, 'failed');
 
         throw new Error('System review failed');
       }
 
+      // ✅ AI review
       const aiReview = await runAgent('review-guard', patch, {});
       if (!aiReview.includes('APPROVED')) {
         recordFailure(job.id);
@@ -93,13 +95,31 @@ const worker = new Worker(
           result: 'AI review rejected'
         });
 
-        updateStep(workflowId, step.id, 'failed');
+        await updateStep(workflowId, step.id, 'failed');
 
         throw new Error('AI review rejected');
       }
 
       const { file, content } = parsePatch(patch);
 
+      // 🧠 idempotency key
+      const opId = getOperationId(workflowId, step.id, patch);
+
+      // 🔁 skip if already applied
+      if (await isApplied(opId)) {
+        updateJob(job.id, {
+          status: 'completed',
+          result: 'skipped (already applied)'
+        });
+
+        recordSuccess(job.id);
+        await updateStep(workflowId, step.id, 'completed');
+
+        success = true;
+        break;
+      }
+
+      // 🔒 distributed lock
       const lock = await acquireLock(file);
 
       try {
@@ -114,6 +134,9 @@ const worker = new Worker(
 
           await storeMemory(step.description, patch);
 
+          // ✅ mark idempotent success
+          await markApplied(opId);
+
           updateJob(job.id, {
             status: 'completed',
             result: 'success'
@@ -121,11 +144,11 @@ const worker = new Worker(
 
           recordSuccess(job.id);
 
-          // 🆕 mark step completed
-          updateStep(workflowId, step.id, 'completed');
+          // ✅ mark step completed
+          await updateStep(workflowId, step.id, 'completed');
 
-          // 🚀 trigger next steps (DAG progression)
-          const nextSteps = getRunnableSteps(workflowId);
+          // 🚀 trigger next steps (await REQUIRED)
+          const nextSteps = await getRunnableSteps(workflowId);
 
           for (const next of nextSteps) {
             await taskQueue.add('step', {
@@ -137,6 +160,7 @@ const worker = new Worker(
         } else {
           lastError = testResult.output;
 
+          // 🔁 rollback
           rollbackTo(checkpoint);
         }
 
@@ -153,8 +177,7 @@ const worker = new Worker(
         result: lastError
       });
 
-      // 🆕 mark workflow failure
-      updateStep(workflowId, step.id, 'failed');
+      await updateStep(workflowId, step.id, 'failed');
 
       await deadLetterQueue.add('failed-step', {
         originalJobId: job.id,
@@ -170,7 +193,7 @@ const worker = new Worker(
   { connection }
 );
 
-// queue-level failure safety
+// ✅ queue-level failure safety
 worker.on('failed', async (job, err) => {
   await deadLetterQueue.add('failed-step', {
     originalJobId: job.id,
