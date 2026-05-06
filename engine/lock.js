@@ -1,33 +1,32 @@
-import fs from 'fs';
+import IORedis from 'ioredis';
+import Redlock from 'redlock';
 
-const LOCK_DIR = '.aegis-locks';
+const redis = new IORedis();
 
-if (!fs.existsSync(LOCK_DIR)) {
-  fs.mkdirSync(LOCK_DIR);
-}
-
-function getLockPath(file) {
-  return `${LOCK_DIR}/${file.replace(/\//g, '_')}.lock`;
-}
-
-export function acquireLock(file, timeout = 10000) {
-  const lockPath = getLockPath(file);
-  const start = Date.now();
-
-  while (true) {
-    try {
-      fs.writeFileSync(lockPath, process.pid.toString(), { flag: 'wx' });
-      return lockPath;
-    } catch {
-      if (Date.now() - start > timeout) {
-        throw new Error(`Timeout acquiring lock for ${file}`);
-      }
-    }
+// Redlock setup
+const redlock = new Redlock(
+  [redis],
+  {
+    retryCount: 5,
+    retryDelay: 200, // ms
+    retryJitter: 100
   }
+);
+
+// 🔒 acquire distributed lock
+export async function acquireLock(file) {
+  const resource = `locks:${file}`;
+
+  const lock = await redlock.acquire([resource], 10000); // 10s TTL
+
+  return lock;
 }
 
-export function releaseLock(lockPath) {
-  if (fs.existsSync(lockPath)) {
-    fs.unlinkSync(lockPath);
+// 🔓 release lock
+export async function releaseLock(lock) {
+  try {
+    await lock.release();
+  } catch (err) {
+    // lock might already be released/expired
   }
 }
