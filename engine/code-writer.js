@@ -2,6 +2,10 @@ import fs from 'fs';
 
 const BLOCKED = ['.env', 'secrets'];
 
+export function parsePatch(patch) {
+  return JSON.parse(patch);
+}
+
 export function applyPatch(patch) {
   try {
     const { file, content } = JSON.parse(patch);
