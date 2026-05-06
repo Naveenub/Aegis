@@ -3,6 +3,7 @@ import { applyPatch } from './code-writer.js';
 import { saveMemory } feom './memory.js'
 import { runTests } from './test-runner.js';
 import { logger } from './logger.js';
+import { runReviewPipeline } from './review-system.js';
 
 const MAX_RETRIES = 3;
 
@@ -37,10 +38,10 @@ export async function runSystem(task) {
 
       const patch = result.split('PATCH:')[1].trim();
 
-      const review = await runAgent('review-guard', patch, {});
+      const review = runReviewPipeline(patch);
 
-      if (!review.includes('APPROVED')) {
-        logger.warn('Patch rejected');
+      if (!review.ok) {
+        logger.warn('review.message');
         break;
       }
 
