@@ -6,10 +6,22 @@ Output JSON:
 {
   "tasks": [
     {
-      "id": "1",
-      "description": "",
-      "agent": "",
-      "priority": 1
+      "id": "A",
+      "agent": "feature-builder",
+      "description": "Create API",
+      "depends_on": []
+    },
+    {
+      "id": "B",
+      "agent": "test-writer",
+      "description": "Write tests",
+      "depends_on": ["A"]
+    },
+    {
+      "id": "C",
+      "agent": "refactorer",
+      "description": "Optimize code",
+      "depends_on": ["A"]
     }
   ]
 }
