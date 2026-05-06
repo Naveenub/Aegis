@@ -93,24 +93,24 @@ Client/API → Orchestrator → Workflow Store → Queue → Workers → Agents 
 
 ### Execution Model
 
-# 1. Task Intake
+1. Task Intake
     
 - API receives task request
 
-# 2. Planning
+2. Planning
 
 - planner agent generates DAG (steps + dependencies)
 
-# 3. Workflow Initialization
+3. Workflow Initialization
 
 - Stored in workflow-store
 - Steps marked as pending
 
-# 4. Scheduling
+4. Scheduling
 
 - Runnable steps pushed to queue
 
-# 5. Execution (Workers)
+5. Execution (Workers)
 
 - Workers pick jobs
 - Execute self-healing loop:
@@ -119,12 +119,12 @@ Client/API → Orchestrator → Workflow Store → Queue → Workers → Agents 
 run → test → fail → fix → retry
 ```
 
-# 6. State Transition
+6. State Transition
 
 - Step marked completed or failed
 - Next steps unlocked dynamically
 
-# 7. Failure Handling
+7. Failure Handling
 
 - Retries (max 3)
 - Git rollback
