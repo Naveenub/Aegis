@@ -1,11 +1,12 @@
+import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { backupFile, restoreFile, cleanupBackup } from '../engine/backup.js';
 import { deadLetterQueue } from '../engine/queue.js';
 import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
+import { storeMemory, searchMemory } from '../engine/vector-memory.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
-import { acquireLock, releaseLock } from '../engine/lock.js'; // ✅ NEW
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 
@@ -28,9 +29,20 @@ const worker = new Worker(
       attempt++;
       incrementRetries(job.id);
 
+      // 🔍 retrieve similar past fixes
+      const similar = await searchMemory(
+        attempt === 1 ? step.description : lastError
+      );
+
+      const memoryContext = similar
+        .map(s => `Past Fix:\n${s.text}\nPatch:\n${s.patch}`)
+        .join('\n\n');
+
       const result = await runAgent(
         attempt === 1 ? step.agent : 'debugger',
-        attempt === 1 ? step.description : lastError,
+        attempt === 1
+          ? `${step.description}\n\nRelevant fixes:\n${memoryContext}`
+          : `${lastError}\n\nRelevant fixes:\n${memoryContext}`,
         {}
       );
 
@@ -83,6 +95,7 @@ const worker = new Worker(
 
         if (testResult.success) {
           success = true;
+          await storeMemory(step.description, patch);
 
           // ✅ cleanup backup
           cleanupBackup(file);
