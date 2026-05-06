@@ -51,6 +51,9 @@ new Worker(
     }
 
     return { success: true };
+    else {
+      throw new Error('Step failed');
+    }
   },
   { connection }
 );
