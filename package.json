@@ -17,6 +17,7 @@
     "pino": "^8.0.0"
   },
   "scripts": {
+    "lint": "eslint .",
     "test": "jest"
   }
 }
