@@ -14,10 +14,8 @@ export async function runSystem(task) {
   await runDAG(plan.tasks, async (step) => {
     logger.info({ stepId: step.id, agent: step.agent }, 'Scheduling step');
 
-    await taskQueue.add('step', {
-      step
-    });
-  });
+  const job = await taskQueue.add('step', { step });
+  return job;
 
   logger.info('All tasks scheduled');
 }
