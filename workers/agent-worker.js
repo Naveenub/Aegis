@@ -1,11 +1,12 @@
-import { Worker } from 'bullmq';
-import IORedis from 'ioredis';
+import { applyPatch, parsePatch } from '../engine/code-writer.js';
+import { backupFile, restoreFile, cleanupBackup } from '../engine/backup.js';
+import { deadLetterQueue } from '../engine/queue.js';
 import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
-import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { runTests } from '../engine/test-runner.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
-import { backupFile, restoreFile, cleanupBackup } from '../engine/backup.js';
+import { Worker } from 'bullmq';
+import IORedis from 'ioredis';
 
 const connection = new IORedis();
 
@@ -94,13 +95,20 @@ new Worker(
     }
 
     if (!success) {
-      updateJob(job.id, {
-        status: 'failed',
-        result: lastError
-      });
+  updateJob(job.id, {
+    status: 'failed',
+    result: lastError
+  });
 
-      throw new Error('Step failed after retries');
-    }
+  // 🚨 send to DLQ
+  await deadLetterQueue.add('failed-step', {
+    originalJobId: job.id,
+    step,
+    error: lastError
+  });
+
+  throw new Error('Step failed after retries');
+}
 
     return { success: true };
   },
