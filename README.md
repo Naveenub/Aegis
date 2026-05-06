@@ -47,35 +47,35 @@ Learning (memory)
 ```
                     ┌──────────────────────┐
                     │        USER          │
-                    │ CLI / API / Script   │
+                    │  CLI / API / Script  │
                     └──────────┬───────────┘
                                ↓
                     ┌──────────────────────┐
-                    │   ORCHESTRATOR       │
-                    │ (Task Controller)    │
+                    │     ORCHESTRATOR     │
+                    │   (Task Controller)  │
                     └──────────┬───────────┘
                                ↓
                     ┌──────────────────────┐
-                    │      PLANNER         │
-                    │  (Task Breakdown)    │
+                    │        PLANNER       │
+                    │    (Task Breakdown)  │
                     └──────────┬───────────┘
                                ↓
         ┌───────────────────────────────────────────┐
         │              AGENT LAYER                  │
         │                                           │
-        │ debugger | refactorer | test-writer       │
-        │ feature-builder | security-editor         │
+        │    debugger | refactorer | test-writer    │
+        │     feature-builder | security-editor     │
         └───────────────────────────────────────────┘
                                ↓
                     ┌──────────────────────┐
-                    │   REVIEW GUARD       │
-                    │  (Approval Gate)     │
+                    │     REVIEW GUARD     │
+                    │    (Approval Gate)   │
                     └──────────┬───────────┘
                                ↓
-                    ┌──────────────────────┐
-                    │   CODE WRITER        │
-                    │ (Patch Apply + Backup)
-                    └──────────┬───────────┘
+                    ┌────────────────────────┐
+                    │   CODE WRITER          │
+                    │ (Patch Apply + Backup) │
+                    └──────────┬─────────────┘
                                ↓
                     ┌──────────────────────┐
                     │    TEST / VERIFY     │
@@ -83,19 +83,19 @@ Learning (memory)
                     └──────────┬───────────┘
                                ↓
                     ┌──────────────────────┐
-                    │       GIT            │
-                    │ (Commit Changes)     │
+                    │          GIT         │
+                    │   (Commit Changes)   │
                     └──────────┬───────────┘
                                ↓
         ┌───────────────────────────────────────────┐
         │         MEMORY + OBSERVABILITY            │
         │                                           │
-        │ memory.json | decisions.log | logger      │
+        │    memory.json | decisions.log | logger   │
         └───────────────────────────────────────────┘
                                ↓
                     ┌──────────────────────┐
                     │    META-REVIEWER     │
-                    │ (Self Improvement)   │
+                    │  (Self Improvement)  │
                     └──────────────────────┘     
 ```
 
