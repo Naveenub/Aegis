@@ -87,9 +87,9 @@ AEGIS is a distributed, state-driven workflow orchestration engine that combines
 
 ### Core Flow
 
-~
+```
 Client/API → Orchestrator → Workflow Store → Queue → Workers → Agents → Git/Test Systems → Next Steps
-~
+```
 
 ### Execution Model
 
@@ -115,9 +115,9 @@ Client/API → Orchestrator → Workflow Store → Queue → Workers → Agents 
 - Workers pick jobs
 - Execute self-healing loop:
 
-~
+```
 run → test → fail → fix → retry
-~
+```
 
 6. State Transition
 
