@@ -94,8 +94,8 @@ const worker = new Worker(
       // ✅ parse patch
       const { file, content } = parsePatch(patch);
 
-      // 🔒 lock
-      const lock = acquireLock(file);
+      // 🔒 ✅ FIX: distributed lock (await REQUIRED)
+      const lock = await acquireLock(file);
 
       try {
         // backup
@@ -119,7 +119,7 @@ const worker = new Worker(
             result: 'success'
           });
 
-          // ✅ success metrics (ONLY here)
+          // ✅ success metrics
           recordSuccess(job.id);
 
         } else {
@@ -130,7 +130,8 @@ const worker = new Worker(
         }
 
       } finally {
-        releaseLock(lock);
+        // 🔓 ✅ FIX: await release
+        await releaseLock(lock);
       }
     }
 
