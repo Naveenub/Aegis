@@ -5,6 +5,7 @@ import { runReviewPipeline } from '../engine/review-system.js';
 import { applyPatch } from '../engine/code-writer.js';
 import { runTests } from '../engine/test-runner.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
+import { backupFile, restoreFile, cleanupBackup } from '../engine/backup.js';
 
 const connection = new IORedis();
 
