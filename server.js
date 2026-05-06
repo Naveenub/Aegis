@@ -1,7 +1,8 @@
 import express from 'express';
 import fs from 'fs';
-import { runSystem } from './engine/orchestrator.js';
 import { getMetrics } from './engine/metrics.js';
+import { initVectorIndex } from './engine/vector-memory.js';
+import { runSystem } from './engine/orchestrator.js';
 
 const app = express();
 app.use(express.json());
@@ -59,6 +60,8 @@ app.get('/health', (req, res) => {
     uptime: process.uptime()
   });
 });
+
+await initVectorIndex();
 
 app.listen(3000, () => {
   console.log('🚀 Aegis server running on http://localhost:3000');
