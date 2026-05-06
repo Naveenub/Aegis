@@ -5,12 +5,14 @@ import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
+import { acquireLock, releaseLock } from '../engine/lock.js'; // ✅ NEW
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 
 const connection = new IORedis();
 
-new Worker(
+// ⚠️ FIX: assign worker to variable
+const worker = new Worker(
   'aegis-tasks',
   async (job) => {
     const { step } = job.data;
@@ -32,7 +34,7 @@ new Worker(
         {}
       );
 
-      // ❌ handle no patch case properly
+      // ❌ no patch
       if (!result.includes('PATCH:')) {
         updateJob(job.id, {
           status: 'failed',
@@ -66,55 +68,65 @@ new Worker(
       // ✅ parse patch
       const { file, content } = parsePatch(patch);
 
-      // 1️⃣ backup
-      backupFile(file);
+      // 🔒 acquire lock (CRITICAL)
+      const lock = acquireLock(file);
 
-      // 2️⃣ apply patch
-      applyPatch({ file, content });
+      try {
+        // 1️⃣ backup
+        backupFile(file);
 
-      // 3️⃣ run tests
-      const testResult = runTests();
+        // 2️⃣ apply patch
+        applyPatch({ file, content });
 
-      if (testResult.success) {
-        success = true;
+        // 3️⃣ run tests
+        const testResult = runTests();
 
-        // ✅ cleanup backup after success
-        cleanupBackup(file);
+        if (testResult.success) {
+          success = true;
 
-        updateJob(job.id, {
-          status: 'completed',
-          result: 'success'
-        });
+          // ✅ cleanup backup
+          cleanupBackup(file);
 
-      } else {
-        lastError = testResult.output;
+          updateJob(job.id, {
+            status: 'completed',
+            result: 'success'
+          });
 
-        // ❌ rollback on failure
-        restoreFile(file);
+        } else {
+          lastError = testResult.output;
+
+          // ❌ rollback
+          restoreFile(file);
+        }
+
+      } finally {
+        // 🔓 always release lock
+        releaseLock(lock);
       }
     }
 
     if (!success) {
-  updateJob(job.id, {
-    status: 'failed',
-    result: lastError
-  });
+      updateJob(job.id, {
+        status: 'failed',
+        result: lastError
+      });
 
-  // 🚨 send to DLQ
-  await deadLetterQueue.add('failed-step', {
-    originalJobId: job.id,
-    step,
-    error: lastError
-  });
+      // 🚨 send to DLQ
+      await deadLetterQueue.add('failed-step', {
+        originalJobId: job.id,
+        step,
+        error: lastError
+      });
 
-  throw new Error('Step failed after retries');
-}
+      throw new Error('Step failed after retries');
+    }
 
     return { success: true };
   },
   { connection }
 );
 
+// ✅ queue-level failure handling
 worker.on('failed', async (job, err) => {
   await deadLetterQueue.add('failed-step', {
     originalJobId: job.id,
