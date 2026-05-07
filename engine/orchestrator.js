@@ -1,33 +1,41 @@
 import { runAgent } from './agent-runner.js';
 import { logger } from './logger.js';
-import { taskQueue } from './queue.js';
+import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
 import { v4 as uuidv4 } from 'uuid';
 
-export async function runSystem(task) {
+/**
+ * @param {string} task
+ * @param {object} opts
+ * @param {number} [opts.priority]   - Priority.* constant (default NORMAL)
+ * @param {number} [opts.timeoutMs]  - wall-clock timeout for the whole workflow
+ * @returns {string} workflowId
+ */
+export async function runSystem(task, opts = {}) {
   const workflowId = uuidv4();
+  const priority = opts.priority ?? Priority.NORMAL;
 
-  logger.info({ workflowId, task }, 'Start');
+  logger.info({ workflowId, task, priority }, 'Start');
 
   // 1️⃣ Plan
   const planRaw = await runAgent('planner', task, {});
   const plan = JSON.parse(planRaw);
 
-  // 2️⃣ Persist workflow (CRITICAL - must await)
-  await createWorkflow(workflowId, plan.tasks);
+  // 2️⃣ Persist workflow with control metadata
+  await createWorkflow(workflowId, plan.tasks, {
+    priority,
+    timeoutMs: opts.timeoutMs ?? null
+  });
 
-  // 3️⃣ Get initial runnable steps (must await)
+  // 3️⃣ Get initial runnable steps
   const steps = await getRunnableSteps(workflowId);
 
-  // 4️⃣ Schedule ONLY (no execution here)
+  // 4️⃣ Schedule with priority — no execution here
   for (const step of steps) {
-    await taskQueue.add('step', {
-      workflowId,
-      step
-    });
+    await addStep(workflowId, step, priority);
   }
 
-  logger.info({ workflowId, steps: steps.length }, 'Scheduled');
+  logger.info({ workflowId, steps: steps.length, priority }, 'Scheduled');
 
   return workflowId;
 }
