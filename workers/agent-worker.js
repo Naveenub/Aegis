@@ -1,6 +1,6 @@
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
-import { deadLetterQueue } from '../engine/queue.js';
+import { deadLetterQueue, addStep } from '../engine/queue.js';
 import { ensureWorkflowBranch, commitChanges, rollbackLastCommit } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure } from '../engine/metrics.js';
@@ -9,19 +9,62 @@ import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
 import { storeMemory, searchMemory } from '../engine/vector-memory.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
-import { updateStep, getRunnableSteps } from '../engine/workflow-store.js';
+import {
+  updateStep,
+  getRunnableSteps,
+  getWorkflowStatus,
+  isWorkflowTimedOut,
+  cancelWorkflow
+} from '../engine/workflow-store.js';
 import { taskQueue } from '../engine/queue.js';
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 
 const connection = new IORedis();
 
+// How long to wait (ms) while polling a paused workflow before giving up
+const PAUSE_POLL_INTERVAL = 3000;
+const PAUSE_POLL_MAX_WAIT = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Block until workflow is no longer paused, or until max wait exceeded.
+ * Returns false if we should abort (cancelled or timed out during wait).
+ */
+async function waitIfPaused(workflowId) {
+  let waited = 0;
+  while (true) {
+    const status = await getWorkflowStatus(workflowId);
+    if (status !== 'paused') return status !== 'cancelled';
+    if (waited >= PAUSE_POLL_MAX_WAIT) return false;
+    await new Promise(r => setTimeout(r, PAUSE_POLL_INTERVAL));
+    waited += PAUSE_POLL_INTERVAL;
+  }
+}
+
 const worker = new Worker(
   'aegis-tasks',
   async (job) => {
     const { step, workflowId } = job.data;
 
-    // ✅ mark step running (await REQUIRED)
+    // ─── Control check #1: entry gate ────────────────────────────────────────
+    const entryStatus = await getWorkflowStatus(workflowId);
+
+    if (entryStatus === 'cancelled') {
+      return { skipped: true, reason: 'workflow cancelled' };
+    }
+
+    if (entryStatus === 'paused') {
+      const shouldContinue = await waitIfPaused(workflowId);
+      if (!shouldContinue) return { skipped: true, reason: 'workflow cancelled during pause' };
+    }
+
+    // ─── Timeout check at entry ───────────────────────────────────────────────
+    if (await isWorkflowTimedOut(workflowId)) {
+      await cancelWorkflow(workflowId, 'timeout');
+      throw new Error(`Workflow ${workflowId} exceeded configured timeout`);
+    }
+
+    // ✅ mark step running
     await updateStep(workflowId, step.id, 'running');
 
     recordStart(job.id);
@@ -33,6 +76,29 @@ const worker = new Worker(
 
     while (attempt < 3 && !success) {
       attempt++;
+
+      // ─── Control check #2: per-retry gate ──────────────────────────────────
+      const loopStatus = await getWorkflowStatus(workflowId);
+
+      if (loopStatus === 'cancelled') {
+        await updateStep(workflowId, step.id, 'failed');
+        return { skipped: true, reason: 'workflow cancelled mid-retry' };
+      }
+
+      if (loopStatus === 'paused') {
+        const shouldContinue = await waitIfPaused(workflowId);
+        if (!shouldContinue) {
+          await updateStep(workflowId, step.id, 'failed');
+          return { skipped: true, reason: 'workflow cancelled during pause' };
+        }
+      }
+
+      // ─── Timeout check per retry ──────────────────────────────────────────
+      if (await isWorkflowTimedOut(workflowId)) {
+        await cancelWorkflow(workflowId, 'timeout');
+        await updateStep(workflowId, step.id, 'failed');
+        throw new Error(`Workflow ${workflowId} timed out during retry ${attempt}`);
+      }
 
       incrementRetries(job.id);
       recordRetry();
@@ -153,14 +219,11 @@ const worker = new Worker(
           // ✅ mark step completed
           await updateStep(workflowId, step.id, 'completed');
 
-          // 🚀 DAG progression
+          // 🚀 DAG progression — inherit workflow priority
           const nextSteps = await getRunnableSteps(workflowId);
 
           for (const next of nextSteps) {
-            await taskQueue.add('step', {
-              workflowId,
-              step: next
-            });
+            await addStep(workflowId, next, job.opts.priority ?? 5);
           }
 
         } else {
