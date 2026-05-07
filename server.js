@@ -7,7 +7,9 @@ import {
   pauseWorkflow,
   resumeWorkflow,
   cancelWorkflow,
-  getWorkflowStatus
+  getWorkflowStatus,
+  getReviewQueue,
+  resolveReview
 } from './engine/workflow-store.js';
 import { initVectorIndex } from './engine/vector-memory.js';
 import { runSystem } from './engine/orchestrator.js';
@@ -133,6 +135,68 @@ app.get('/jobs', (req, res) => {
 });
 
 /**
+ * 👁 Human review queue — steps that exhausted all retries
+ * Query params: ?status=pending|resolved|skipped|retrying  (default: pending)
+ *               ?limit=50
+ */
+app.get('/review-queue', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit ?? '50', 10);
+    const status = req.query.status ?? 'pending';
+    const items = await getReviewQueue({ limit, status });
+    res.json({ count: items.length, items });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * ✅ Resolve a review item
+ * Body: { resolution: 'resolved' | 'skipped' | 'retrying', note?: string }
+ *
+ * 'retrying'  → re-queue the step (you must also POST /resume/:workflowId
+ *               or the step will re-enter a paused/cancelled workflow)
+ * 'skipped'   → mark the step as skipped, allow DAG to continue if possible
+ * 'resolved'  → human fixed it externally, close the item
+ */
+app.post('/review/:workflowId/:stepId/resolve', async (req, res) => {
+  try {
+    const { workflowId, stepId } = req.params;
+    const { resolution, note = '' } = req.body ?? {};
+
+    const validResolutions = ['resolved', 'skipped', 'retrying'];
+    if (!validResolutions.includes(resolution)) {
+      return res.status(400).json({
+        error: `Invalid resolution. Must be one of: ${validResolutions.join(', ')}`
+      });
+    }
+
+    const record = await resolveReview(workflowId, stepId, resolution, note);
+    if (!record) {
+      return res.status(404).json({ error: 'Review item not found' });
+    }
+
+    // If retrying: re-queue the step so it gets another run
+    if (resolution === 'retrying') {
+      const wf = await getWorkflow(workflowId);
+      if (wf) {
+        const step = wf.steps.find(s => s.id === stepId);
+        if (step) {
+          // Reset step to pending so the worker processes it
+          const { updateStep } = await import('./engine/workflow-store.js');
+          await updateStep(workflowId, stepId, 'pending');
+          await addStep(workflowId, step);
+        }
+      }
+    }
+
+    res.json({ status: 'ok', record });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * ❤️ Health Check
  */
 app.get('/health', (req, res) => {
@@ -143,12 +207,14 @@ await initVectorIndex();
 
 app.listen(3000, () => {
   console.log('🚀 Aegis server running on http://localhost:3000');
-  console.log('  POST /task               – submit task');
-  console.log('  POST /pause/:id          – pause workflow');
-  console.log('  POST /resume/:id         – resume workflow');
-  console.log('  POST /cancel/:id         – cancel workflow');
-  console.log('  GET  /workflow/:id       – workflow state + steps');
-  console.log('  GET  /metrics            – system metrics');
-  console.log('  GET  /jobs               – job list');
-  console.log('  GET  /health             – health check');
+  console.log('  POST /task                          – submit task');
+  console.log('  POST /pause/:id                     – pause workflow');
+  console.log('  POST /resume/:id                    – resume workflow');
+  console.log('  POST /cancel/:id                    – cancel workflow');
+  console.log('  GET  /workflow/:id                  – workflow state + steps');
+  console.log('  GET  /review-queue                  – items pending human review');
+  console.log('  POST /review/:wfId/:stepId/resolve  – resolve a review item');
+  console.log('  GET  /metrics                       – system metrics');
+  console.log('  GET  /jobs                          – job list');
+  console.log('  GET  /health                        – health check');
 });

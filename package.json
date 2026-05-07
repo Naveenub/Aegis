@@ -8,7 +8,8 @@
     "worker": "node workers/agent-worker.js",
     "server": "node server.js",
     "lint": "eslint .",
-    "test": "jest"
+    "test": "jest",
+    "dlq-worker": "node workers/dlq-worker.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
