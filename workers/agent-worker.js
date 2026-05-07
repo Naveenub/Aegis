@@ -16,8 +16,8 @@ import {
   isWorkflowTimedOut,
   cancelWorkflow
 } from '../engine/workflow-store.js';
+import { resolvePolicy, calcDelay, agentForAttempt } from '../engine/retry-policy.js';
 import { taskQueue } from '../engine/queue.js';
-import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 
 const connection = new IORedis();
@@ -70,12 +70,19 @@ const worker = new Worker(
     recordStart(job.id);
     updateJob(job.id, { status: 'running' });
 
+    // ─── Resolve per-step retry policy ───────────────────────────────────────
+    const policy = resolvePolicy(step);
+
     let attempt = 0;
     let success = false;
     let lastError = '';
 
-    while (attempt < 3 && !success) {
+    while (attempt < policy.maxAttempts && !success) {
       attempt++;
+
+      // ─── Backoff delay before retry (no delay on first attempt) ──────────
+      const delay = calcDelay(policy, attempt);
+      if (delay > 0) await new Promise(r => setTimeout(r, delay));
 
       // ─── Control check #2: per-retry gate ──────────────────────────────────
       const loopStatus = await getWorkflowStatus(workflowId);
@@ -103,6 +110,9 @@ const worker = new Worker(
       incrementRetries(job.id);
       recordRetry();
 
+      // ─── Agent selection via escalation ladder ────────────────────────────
+      const activeAgent = agentForAttempt(step, policy, attempt);
+
       // 🔍 memory retrieval
       const similar = await searchMemory(
         attempt === 1 ? step.description : lastError
@@ -113,10 +123,10 @@ const worker = new Worker(
         .join('\n\n');
 
       const result = await runAgent(
-        attempt === 1 ? step.agent : 'debugger',
+        activeAgent,
         attempt === 1
           ? `${step.description}\n\nRelevant fixes:\n${memoryContext}`
-          : `${lastError}\n\nRelevant fixes:\n${memoryContext}`,
+          : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}\n\nRelevant fixes:\n${memoryContext}`,
         {}
       );
 
@@ -250,8 +260,11 @@ const worker = new Worker(
 
       await deadLetterQueue.add('failed-step', {
         originalJobId: job.id,
+        workflowId,
         step,
-        error: lastError
+        error: lastError,
+        attemptsExhausted: attempt,
+        policy
       });
 
       throw new Error('Step failed after retries');
@@ -262,11 +275,14 @@ const worker = new Worker(
   { connection }
 );
 
-// ✅ queue-level failure safety
+// ✅ queue-level failure safety — catches throws that bypass the inner handler
 worker.on('failed', async (job, err) => {
   await deadLetterQueue.add('failed-step', {
     originalJobId: job.id,
+    workflowId: job.data.workflowId,
     step: job.data.step,
-    error: err.message
+    error: err.message,
+    attemptsExhausted: job.attemptsMade,
+    policy: job.data.step ? resolvePolicy(job.data.step) : null
   });
 });
