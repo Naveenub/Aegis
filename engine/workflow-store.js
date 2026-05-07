@@ -6,7 +6,7 @@ const WORKFLOW_PREFIX = 'aegis:workflow:';
 const META_PREFIX = 'aegis:workflow:meta:';
 
 // ─── Control status values ────────────────────────────────────────────────────
-// running | paused | cancelled | completed | failed
+// running | paused | cancelled | completed | failed | needs-review
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -209,4 +209,87 @@ export async function isWorkflowTimedOut(workflowId) {
   if (!meta.timeoutMs) return false;
 
   return Date.now() - meta.startedAt > meta.timeoutMs;
+}
+
+// ─── Human-in-the-loop review queue ──────────────────────────────────────────
+
+const REVIEW_PREFIX = 'aegis:review:';
+const REVIEW_INDEX  = 'aegis:review:index';
+
+/**
+ * 🚩 Flag a step for human review.
+ * Called by the DLQ worker after all retries are exhausted.
+ *
+ * @param {string} workflowId
+ * @param {string} stepId
+ * @param {object} details  - error, agent, description, flaggedAt, alert, etc.
+ */
+export async function flagForReview(workflowId, stepId, details = {}) {
+  const reviewKey = `${REVIEW_PREFIX}${workflowId}:${stepId}`;
+
+  const record = {
+    workflowId,
+    stepId,
+    status: 'pending',        // pending | resolved | skipped | retrying
+    ...details,
+    flaggedAt: details.flaggedAt ?? Date.now()
+  };
+
+  const pipeline = redis.pipeline();
+
+  // Store the review record
+  pipeline.set(reviewKey, JSON.stringify(record));
+
+  // Add to the sorted index (score = flaggedAt for time-ordered retrieval)
+  pipeline.zadd(REVIEW_INDEX, record.flaggedAt, reviewKey);
+
+  await pipeline.exec();
+
+  return record;
+}
+
+/**
+ * 📋 Get all items currently pending human review, newest first.
+ *
+ * @param {object} opts
+ * @param {number} [opts.limit=50]   - max items to return
+ * @param {string} [opts.status]     - filter by status (default: 'pending')
+ * @returns {object[]} review records
+ */
+export async function getReviewQueue({ limit = 50, status = 'pending' } = {}) {
+  // Retrieve keys in reverse chronological order (highest score = most recent)
+  const keys = await redis.zrevrange(REVIEW_INDEX, 0, limit - 1);
+  if (!keys.length) return [];
+
+  const pipeline = redis.pipeline();
+  for (const key of keys) pipeline.get(key);
+  const results = await pipeline.exec();
+
+  return results
+    .map(([err, raw]) => (err || !raw ? null : JSON.parse(raw)))
+    .filter(r => r !== null && (!status || r.status === status));
+}
+
+/**
+ * ✅ Resolve a review item.
+ * resolution: 'resolved' | 'skipped' | 'retrying'
+ *
+ * @param {string} workflowId
+ * @param {string} stepId
+ * @param {string} resolution
+ * @param {string} [note]  - optional human note
+ */
+export async function resolveReview(workflowId, stepId, resolution, note = '') {
+  const reviewKey = `${REVIEW_PREFIX}${workflowId}:${stepId}`;
+
+  const raw = await redis.get(reviewKey);
+  if (!raw) return false;
+
+  const record = JSON.parse(raw);
+  record.status = resolution;
+  record.resolvedAt = Date.now();
+  record.note = note;
+
+  await redis.set(reviewKey, JSON.stringify(record));
+  return record;
 }
