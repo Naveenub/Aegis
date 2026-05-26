@@ -1,6 +1,6 @@
 import fs from 'fs';
 import Anthropic from '@anthropic-ai/sdk';
-import { searchMemory } from './memory.js';
+import { searchMemory } from './vector-memory.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -12,10 +12,10 @@ const client = new Anthropic({
 export async function runAgent(agent, task, context = {}) {
   const prompt = fs.readFileSync(`.claude/agents/${agent}.md`, 'utf-8');
 
-  const memory = searchMemory(task);
+  const memory = await searchMemory(task);
   
   const memoryContext = memory.length
-  ? `\nRelevant past fixes:\n${JSON.stringify(memory, null, 2)}`
+  ? `\nRelevant past fixes:\n${memory.map(m => `${m.text}\nPatch: ${m.patch}`).join('\n\n')}`
   : '';
 
   const response = await client.messages.create({
