@@ -3,7 +3,8 @@ import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { deadLetterQueue, addStep } from '../engine/queue.js';
 import { ensureWorkflowBranch, commitChanges, rollbackLastCommit } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
-import { recordStart, recordRetry, recordSuccess, recordFailure } from '../engine/metrics.js';
+import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from '../engine/metrics.js';
+import { startSpan, attachPatch, attachTestResult, endSpan } from '../engine/tracer.js';
 import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
@@ -70,6 +71,9 @@ const worker = new Worker(
     recordStart(job.id);
     updateJob(job.id, { status: 'running' });
 
+    // ── open trace span (traceId = workflowId, spanId = stepId) ──────────
+    startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
+
     // ─── Resolve per-step retry policy ───────────────────────────────────────
     const policy = resolvePolicy(step);
 
@@ -113,6 +117,10 @@ const worker = new Worker(
       // ─── Agent selection via escalation ladder ────────────────────────────
       const activeAgent = agentForAttempt(step, policy, attempt);
 
+      // ── update span + step-level metric with the active agent ────────────
+      recordStepStart(step.id, activeAgent);
+      startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
+
       // 🔍 memory retrieval
       const similar = await searchMemory(
         attempt === 1 ? step.description : lastError
@@ -145,6 +153,9 @@ const worker = new Worker(
       }
 
       const patch = result.split('PATCH:')[1].trim();
+
+      // ── attach patch to trace span ────────────────────────────────────────
+      attachPatch(workflowId, step.id, patch);
 
       // ✅ system review
       const review = runReviewPipeline(patch);
@@ -211,6 +222,9 @@ const worker = new Worker(
         // run tests
         const testResult = runTests();
 
+        // ── attach test result to trace span ──────────────────────────────
+        attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
+
         if (testResult.success) {
           success = true;
 
@@ -225,6 +239,8 @@ const worker = new Worker(
           });
 
           recordSuccess(job.id);
+          recordStepEnd(step.id, 'success');
+          endSpan(workflowId, step.id, 'success');
 
           // ✅ mark step completed
           await updateStep(workflowId, step.id, 'completed');
@@ -250,6 +266,8 @@ const worker = new Worker(
 
     if (!success) {
       recordFailure(job.id);
+      recordStepEnd(step.id, 'failure');
+      endSpan(workflowId, step.id, 'failure');
 
       updateJob(job.id, {
         status: 'failed',
