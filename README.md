@@ -213,12 +213,10 @@ aegis/
 │   ├── workflow-store.js             # Workflow state engine (DAG + status)
 │   ├── job-store.js                  # Job tracking (status, retries)
 │   ├── queue.js                      # BullMQ queues + DLQ
-│   ├── dag-executor.js               # (legacy execution helper)
 │   ├── code-writer.js                # Patch parser + applier
 │   ├── git.js                        # Checkpoint + rollback (git-based)
 │   ├── lock.js                       # Distributed locking (Redlock)
 │   ├── vector-memory.js              # RAG memory (embeddings + search)
-│   ├── memory.js                     # Legacy memory (JSON-based)
 │   ├── metrics.js                    # Metrics (success, retry, latency)
 │   ├── logger.js                     # Structured logging
 │   └── test-runner.js                # Test execution engine
