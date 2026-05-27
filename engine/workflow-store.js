@@ -1,9 +1,27 @@
 import IORedis from 'ioredis';
+import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
 const redis = new IORedis();
 
-const WORKFLOW_PREFIX = 'aegis:workflow:';
-const META_PREFIX = 'aegis:workflow:meta:';
+// ─── Tenant-scoped key helpers ────────────────────────────────────────────────
+// All keys are prefixed with "aegis:{tenantId}:" so two tenants never share
+// the same Redis keyspace even when running on the same instance.
+
+function workflowKey(tenantId, workflowId) {
+  return `aegis:${tenantId}:workflow:${workflowId}`;
+}
+
+function metaKey(tenantId, workflowId) {
+  return `aegis:${tenantId}:workflow:meta:${workflowId}`;
+}
+
+function reviewKey(tenantId, workflowId, stepId) {
+  return `aegis:${tenantId}:review:${workflowId}:${stepId}`;
+}
+
+function reviewIndexKey(tenantId) {
+  return `aegis:${tenantId}:review:index`;
+}
 
 // ─── Control status values ────────────────────────────────────────────────────
 // running | paused | cancelled | completed | failed | needs-review
@@ -11,40 +29,27 @@ const META_PREFIX = 'aegis:workflow:meta:';
 
 /**
  * 🆕 Create workflow
- * @param {string} workflowId
- * @param {object[]} steps
- * @param {object} opts
- * @param {number} [opts.timeoutMs]   - wall-clock timeout for the whole workflow
- * @param {number} [opts.priority]    - 0=CRITICAL 1=HIGH 5=NORMAL 10=LOW
  */
 export async function createWorkflow(workflowId, steps, opts = {}) {
-  const key = WORKFLOW_PREFIX + workflowId;
-  const metaKey = META_PREFIX + workflowId;
+  const tenantId = assertTenantId(opts.tenantId ?? DEFAULT_TENANT);
+  const wKey = workflowKey(tenantId, workflowId);
+  const mKey = metaKey(tenantId, workflowId);
 
   const pipeline = redis.pipeline();
 
   for (const step of steps) {
-    pipeline.hset(
-      key,
-      step.id,
-      JSON.stringify({
-        ...step,
-        status: 'pending'
-      })
-    );
+    pipeline.hset(wKey, step.id, JSON.stringify({ ...step, status: 'pending' }));
   }
 
-  pipeline.set(
-    metaKey,
-    JSON.stringify({
-      id: workflowId,
-      status: 'running',
-      priority: opts.priority ?? 5,
-      timeoutMs: opts.timeoutMs ?? null,
-      startedAt: Date.now(),
-      createdAt: Date.now()
-    })
-  );
+  pipeline.set(mKey, JSON.stringify({
+    id: workflowId,
+    tenantId,
+    status: 'running',
+    priority: opts.priority ?? 5,
+    timeoutMs: opts.timeoutMs ?? null,
+    startedAt: Date.now(),
+    createdAt: Date.now()
+  }));
 
   await pipeline.exec();
 }
@@ -52,56 +57,54 @@ export async function createWorkflow(workflowId, steps, opts = {}) {
 /**
  * 🔄 Update step status
  */
-export async function updateStep(workflowId, stepId, status) {
-  const key = WORKFLOW_PREFIX + workflowId;
+export async function updateStep(workflowId, stepId, status, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const wKey = workflowKey(tenantId, workflowId);
 
-  const stepRaw = await redis.hget(key, stepId);
+  const stepRaw = await redis.hget(wKey, stepId);
   if (!stepRaw) return;
 
   const step = JSON.parse(stepRaw);
   step.status = status;
   step.updatedAt = Date.now();
 
-  await redis.hset(key, stepId, JSON.stringify(step));
+  await redis.hset(wKey, stepId, JSON.stringify(step));
 }
 
 /**
  * 📊 Get full workflow
  */
-export async function getWorkflow(workflowId) {
-  const key = WORKFLOW_PREFIX + workflowId;
-  const metaKey = META_PREFIX + workflowId;
+export async function getWorkflow(workflowId, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const wKey = workflowKey(tenantId, workflowId);
+  const mKey = metaKey(tenantId, workflowId);
 
-  const [stepsRaw, metaRaw] = await Promise.all([
-    redis.hgetall(key),
-    redis.get(metaKey)
+  const [stepsRaw, mRaw] = await Promise.all([
+    redis.hgetall(wKey),
+    redis.get(mKey)
   ]);
 
-  if (!metaRaw) return null;
+  if (!mRaw) return null;
 
   const steps = Object.values(stepsRaw).map(JSON.parse);
-  const meta = JSON.parse(metaRaw);
+  const meta  = JSON.parse(mRaw);
 
-  return {
-    ...meta,
-    steps
-  };
+  return { ...meta, steps };
 }
 
 /**
  * 🔍 Get runnable steps (dependency-aware)
  */
-export async function getRunnableSteps(workflowId) {
-  const key = WORKFLOW_PREFIX + workflowId;
+export async function getRunnableSteps(workflowId, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const wKey = workflowKey(tenantId, workflowId);
 
-  const stepsRaw = await redis.hgetall(key);
+  const stepsRaw = await redis.hgetall(wKey);
   const steps = Object.values(stepsRaw).map(JSON.parse);
 
   return steps.filter(step => {
     if (step.status !== 'pending') return false;
-
     if (!step.dependsOn || step.dependsOn.length === 0) return true;
-
     return step.dependsOn.every(dep => {
       const depStep = steps.find(s => s.id === dep);
       return depStep && depStep.status === 'completed';
@@ -110,102 +113,103 @@ export async function getRunnableSteps(workflowId) {
 }
 
 /**
- * ❌ Mark entire workflow failed (optional helper)
+ * ❌ Mark entire workflow failed
  */
-export async function failWorkflow(workflowId, reason) {
-  const metaKey = META_PREFIX + workflowId;
+export async function failWorkflow(workflowId, reason, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const mKey = metaKey(tenantId, workflowId);
 
-  const metaRaw = await redis.get(metaKey);
-  if (!metaRaw) return;
+  const mRaw = await redis.get(mKey);
+  if (!mRaw) return;
 
-  const meta = JSON.parse(metaRaw);
+  const meta = JSON.parse(mRaw);
   meta.status = 'failed';
   meta.reason = reason;
   meta.failedAt = Date.now();
 
-  await redis.set(metaKey, JSON.stringify(meta));
+  await redis.set(mKey, JSON.stringify(meta));
 }
 
 /**
  * ⏸ Pause a running workflow.
- * In-flight steps finish their current attempt; no new steps are scheduled.
  */
-export async function pauseWorkflow(workflowId) {
-  const metaKey = META_PREFIX + workflowId;
-  const metaRaw = await redis.get(metaKey);
-  if (!metaRaw) return false;
+export async function pauseWorkflow(workflowId, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const mKey = metaKey(tenantId, workflowId);
+  const mRaw = await redis.get(mKey);
+  if (!mRaw) return false;
 
-  const meta = JSON.parse(metaRaw);
+  const meta = JSON.parse(mRaw);
   if (meta.status !== 'running') return false;
 
   meta.status = 'paused';
   meta.pausedAt = Date.now();
 
-  await redis.set(metaKey, JSON.stringify(meta));
+  await redis.set(mKey, JSON.stringify(meta));
   return true;
 }
 
 /**
  * ▶️ Resume a paused workflow.
- * Caller is responsible for re-scheduling runnable steps after this.
  */
-export async function resumeWorkflow(workflowId) {
-  const metaKey = META_PREFIX + workflowId;
-  const metaRaw = await redis.get(metaKey);
-  if (!metaRaw) return false;
+export async function resumeWorkflow(workflowId, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const mKey = metaKey(tenantId, workflowId);
+  const mRaw = await redis.get(mKey);
+  if (!mRaw) return false;
 
-  const meta = JSON.parse(metaRaw);
+  const meta = JSON.parse(mRaw);
   if (meta.status !== 'paused') return false;
 
   meta.status = 'running';
   meta.resumedAt = Date.now();
   delete meta.pausedAt;
 
-  await redis.set(metaKey, JSON.stringify(meta));
+  await redis.set(mKey, JSON.stringify(meta));
   return true;
 }
 
 /**
  * 🛑 Cancel a workflow.
- * Running steps detect this at their next control-check and abort.
- * No new steps are scheduled.
  */
-export async function cancelWorkflow(workflowId, reason = 'user request') {
-  const metaKey = META_PREFIX + workflowId;
-  const metaRaw = await redis.get(metaKey);
-  if (!metaRaw) return false;
+export async function cancelWorkflow(workflowId, reason = 'user request', tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const mKey = metaKey(tenantId, workflowId);
+  const mRaw = await redis.get(mKey);
+  if (!mRaw) return false;
 
-  const meta = JSON.parse(metaRaw);
+  const meta = JSON.parse(mRaw);
   if (meta.status === 'cancelled' || meta.status === 'completed') return false;
 
   meta.status = 'cancelled';
   meta.cancelReason = reason;
   meta.cancelledAt = Date.now();
 
-  await redis.set(metaKey, JSON.stringify(meta));
+  await redis.set(mKey, JSON.stringify(meta));
   return true;
 }
 
 /**
- * 📋 Get workflow control status (running | paused | cancelled | completed | failed)
+ * 📋 Get workflow control status
  */
-export async function getWorkflowStatus(workflowId) {
-  const metaKey = META_PREFIX + workflowId;
-  const metaRaw = await redis.get(metaKey);
-  if (!metaRaw) return null;
-  return JSON.parse(metaRaw).status ?? null;
+export async function getWorkflowStatus(workflowId, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const mKey = metaKey(tenantId, workflowId);
+  const mRaw = await redis.get(mKey);
+  if (!mRaw) return null;
+  return JSON.parse(mRaw).status ?? null;
 }
 
 /**
  * ⏱ Check if workflow has exceeded its configured timeoutMs.
- * Returns true if timed out, false otherwise.
  */
-export async function isWorkflowTimedOut(workflowId) {
-  const metaKey = META_PREFIX + workflowId;
-  const metaRaw = await redis.get(metaKey);
-  if (!metaRaw) return false;
+export async function isWorkflowTimedOut(workflowId, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const mKey = metaKey(tenantId, workflowId);
+  const mRaw = await redis.get(mKey);
+  if (!mRaw) return false;
 
-  const meta = JSON.parse(metaRaw);
+  const meta = JSON.parse(mRaw);
   if (!meta.timeoutMs) return false;
 
   return Date.now() - meta.startedAt > meta.timeoutMs;
@@ -213,36 +217,26 @@ export async function isWorkflowTimedOut(workflowId) {
 
 // ─── Human-in-the-loop review queue ──────────────────────────────────────────
 
-const REVIEW_PREFIX = 'aegis:review:';
-const REVIEW_INDEX  = 'aegis:review:index';
-
 /**
  * 🚩 Flag a step for human review.
- * Called by the DLQ worker after all retries are exhausted.
- *
- * @param {string} workflowId
- * @param {string} stepId
- * @param {object} details  - error, agent, description, flaggedAt, alert, etc.
  */
 export async function flagForReview(workflowId, stepId, details = {}) {
-  const reviewKey = `${REVIEW_PREFIX}${workflowId}:${stepId}`;
+  const tenantId = assertTenantId(details.tenantId ?? DEFAULT_TENANT);
+  const rKey  = reviewKey(tenantId, workflowId, stepId);
+  const riKey = reviewIndexKey(tenantId);
 
   const record = {
     workflowId,
     stepId,
-    status: 'pending',        // pending | resolved | skipped | retrying
+    tenantId,
+    status: 'pending',
     ...details,
     flaggedAt: details.flaggedAt ?? Date.now()
   };
 
   const pipeline = redis.pipeline();
-
-  // Store the review record
-  pipeline.set(reviewKey, JSON.stringify(record));
-
-  // Add to the sorted index (score = flaggedAt for time-ordered retrieval)
-  pipeline.zadd(REVIEW_INDEX, record.flaggedAt, reviewKey);
-
+  pipeline.set(rKey, JSON.stringify(record));
+  pipeline.zadd(riKey, record.flaggedAt, rKey);
   await pipeline.exec();
 
   return record;
@@ -250,15 +244,12 @@ export async function flagForReview(workflowId, stepId, details = {}) {
 
 /**
  * 📋 Get all items currently pending human review, newest first.
- *
- * @param {object} opts
- * @param {number} [opts.limit=50]   - max items to return
- * @param {string} [opts.status]     - filter by status (default: 'pending')
- * @returns {object[]} review records
  */
-export async function getReviewQueue({ limit = 50, status = 'pending' } = {}) {
-  // Retrieve keys in reverse chronological order (highest score = most recent)
-  const keys = await redis.zrevrange(REVIEW_INDEX, 0, limit - 1);
+export async function getReviewQueue({ limit = 50, status = 'pending', tenantId = DEFAULT_TENANT } = {}) {
+  assertTenantId(tenantId);
+  const riKey = reviewIndexKey(tenantId);
+
+  const keys = await redis.zrevrange(riKey, 0, limit - 1);
   if (!keys.length) return [];
 
   const pipeline = redis.pipeline();
@@ -272,24 +263,19 @@ export async function getReviewQueue({ limit = 50, status = 'pending' } = {}) {
 
 /**
  * ✅ Resolve a review item.
- * resolution: 'resolved' | 'skipped' | 'retrying'
- *
- * @param {string} workflowId
- * @param {string} stepId
- * @param {string} resolution
- * @param {string} [note]  - optional human note
  */
-export async function resolveReview(workflowId, stepId, resolution, note = '') {
-  const reviewKey = `${REVIEW_PREFIX}${workflowId}:${stepId}`;
+export async function resolveReview(workflowId, stepId, resolution, note = '', tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const rKey = reviewKey(tenantId, workflowId, stepId);
 
-  const raw = await redis.get(reviewKey);
+  const raw = await redis.get(rKey);
   if (!raw) return false;
 
   const record = JSON.parse(raw);
-  record.status = resolution;
+  record.status     = resolution;
   record.resolvedAt = Date.now();
-  record.note = note;
+  record.note       = note;
 
-  await redis.set(reviewKey, JSON.stringify(record));
+  await redis.set(rKey, JSON.stringify(record));
   return record;
 }
