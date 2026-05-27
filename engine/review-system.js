@@ -1,5 +1,7 @@
 import { runLint } from './lint-runner.js';
 import { runTests } from './test-runner.js';
+import { validateTargetPath } from './code-writer.js';
+import path from 'path';
 
 const MAX_PATCH_SIZE = 50000; // chars
 
@@ -9,6 +11,20 @@ export function validatePatch(patch) {
 
     if (!parsed.file || !parsed.content) {
       return reject('Invalid patch format');
+    }
+
+    if (typeof parsed.file !== 'string') {
+      return reject('Patch file must be a string');
+    }
+
+    // Validate the target path at review time — before the patch ever reaches
+    // applyPatch(). This is the earliest point we can catch a malicious file
+    // field (e.g. "/etc/passwd", "../../.env") and block it with a clear
+    // rejection reason rather than a silent no-op in code-writer.
+    const resolved = path.resolve(parsed.file);
+    const pathError = validateTargetPath(resolved);
+    if (pathError) {
+      return reject(`Unsafe file path: ${pathError}`);
     }
 
     if (parsed.content.length > MAX_PATCH_SIZE) {
@@ -22,7 +38,7 @@ export function validatePatch(patch) {
 }
 
 export function runReviewPipeline(patch) {
-  // 1. structural validation
+  // 1. structural + path validation
   const base = validatePatch(patch);
   if (!base.ok) return base;
 
