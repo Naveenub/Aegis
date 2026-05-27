@@ -9,7 +9,7 @@ import { startSpan, attachPatch, attachTestResult, endSpan } from '../engine/tra
 import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
-import { storeMemory, searchMemory } from '../engine/vector-memory.js';
+import { storeMemory } from '../engine/vector-memory.js';
 import { updateJob, incrementRetries } from '../engine/job-store.js';
 import {
   updateStep,
@@ -80,6 +80,7 @@ const worker = new Worker(
       let attempt   = 0;
       let success   = false;
       let lastError = '';
+      let lastPatch = '';
 
       while (attempt < policy.maxAttempts && !success) {
         attempt++;
@@ -116,21 +117,22 @@ const worker = new Worker(
         recordStepStart(step.id, activeAgent);
         startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
 
-        // 🔍 memory retrieval
-        const similar = await searchMemory(
-          attempt === 1 ? step.description : lastError
-        );
+        // 🔍 Structured context — agent-runner handles memory lookup internally
+        const agentContext = {
+          files: step.files ?? [],          // file paths relevant to this step
+          error: attempt > 1 ? lastError : undefined,
+          patch: attempt > 1 ? lastPatch  : undefined,
+        };
 
-        const memoryContext = similar
-          .map(s => `Past Fix:\n${s.text}\nPatch:\n${s.patch}`)
-          .join('\n\n');
+        const taskDescription =
+          attempt === 1
+            ? step.description
+            : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}`;
 
         const result = await runAgent(
           activeAgent,
-          attempt === 1
-            ? `${step.description}\n\nRelevant fixes:\n${memoryContext}`
-            : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}\n\nRelevant fixes:\n${memoryContext}`,
-          {}
+          taskDescription,
+          agentContext
         );
 
         if (!result.includes('PATCH:')) {
@@ -141,6 +143,7 @@ const worker = new Worker(
         }
 
         const patch = result.split('PATCH:')[1].trim();
+        lastPatch = patch;
         attachPatch(workflowId, step.id, patch);
 
         const review = runReviewPipeline(patch);
@@ -151,7 +154,7 @@ const worker = new Worker(
           throw new Error('System review failed');
         }
 
-        const aiReview = await runAgent('review-guard', patch, {});
+        const aiReview = await runAgent('review-guard', patch, { patch });
         if (!aiReview.includes('APPROVED')) {
           recordFailure(job.id);
           updateJob(job.id, { status: 'failed', result: 'AI review rejected' });
