@@ -1,6 +1,6 @@
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
-import { deadLetterQueue, addStep } from '../engine/queue.js';
+import { getDeadLetterQueue, addStep } from '../engine/queue.js';
 import { ensureWorkflowBranch, commitChanges, rollbackLastCommit } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from '../engine/metrics.js';
@@ -18,23 +18,19 @@ import {
   cancelWorkflow
 } from '../engine/workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from '../engine/retry-policy.js';
-import { taskQueue } from '../engine/queue.js';
+import { DEFAULT_TENANT, assertTenantId } from '../engine/tenant.js';
 import IORedis from 'ioredis';
+import { Worker } from 'bullmq';
 
 const connection = new IORedis();
 
-// How long to wait (ms) while polling a paused workflow before giving up
 const PAUSE_POLL_INTERVAL = 3000;
-const PAUSE_POLL_MAX_WAIT = 10 * 60 * 1000; // 10 minutes
+const PAUSE_POLL_MAX_WAIT = 10 * 60 * 1000;
 
-/**
- * Block until workflow is no longer paused, or until max wait exceeded.
- * Returns false if we should abort (cancelled or timed out during wait).
- */
-async function waitIfPaused(workflowId) {
+async function waitIfPaused(workflowId, tenantId) {
   let waited = 0;
   while (true) {
-    const status = await getWorkflowStatus(workflowId);
+    const status = await getWorkflowStatus(workflowId, tenantId);
     if (status !== 'paused') return status !== 'cancelled';
     if (waited >= PAUSE_POLL_MAX_WAIT) return false;
     await new Promise(r => setTimeout(r, PAUSE_POLL_INTERVAL));
@@ -42,265 +38,222 @@ async function waitIfPaused(workflowId) {
   }
 }
 
-const worker = new Worker(
-  'aegis-tasks',
-  async (job) => {
-    const { step, workflowId } = job.data;
+/**
+ * Build a worker for a specific tenant queue.
+ * Called once per tenant that is active in this process.
+ */
+export function createTenantWorker(tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+  const queueName = `aegis-tasks:${tenantId}`;
 
-    // ─── Control check #1: entry gate ────────────────────────────────────────
-    const entryStatus = await getWorkflowStatus(workflowId);
+  const worker = new Worker(
+    queueName,
+    async (job) => {
+      // tenantId is embedded in the job payload — trust it, but validate
+      const tid = assertTenantId(job.data.tenantId ?? tenantId);
+      const { step, workflowId } = job.data;
 
-    if (entryStatus === 'cancelled') {
-      return { skipped: true, reason: 'workflow cancelled' };
-    }
+      // ─── Control check #1: entry gate ──────────────────────────────────────
+      const entryStatus = await getWorkflowStatus(workflowId, tid);
 
-    if (entryStatus === 'paused') {
-      const shouldContinue = await waitIfPaused(workflowId);
-      if (!shouldContinue) return { skipped: true, reason: 'workflow cancelled during pause' };
-    }
-
-    // ─── Timeout check at entry ───────────────────────────────────────────────
-    if (await isWorkflowTimedOut(workflowId)) {
-      await cancelWorkflow(workflowId, 'timeout');
-      throw new Error(`Workflow ${workflowId} exceeded configured timeout`);
-    }
-
-    // ✅ mark step running
-    await updateStep(workflowId, step.id, 'running');
-
-    recordStart(job.id);
-    updateJob(job.id, { status: 'running' });
-
-    // ── open trace span (traceId = workflowId, spanId = stepId) ──────────
-    startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
-
-    // ─── Resolve per-step retry policy ───────────────────────────────────────
-    const policy = resolvePolicy(step);
-
-    let attempt = 0;
-    let success = false;
-    let lastError = '';
-
-    while (attempt < policy.maxAttempts && !success) {
-      attempt++;
-
-      // ─── Backoff delay before retry (no delay on first attempt) ──────────
-      const delay = calcDelay(policy, attempt);
-      if (delay > 0) await new Promise(r => setTimeout(r, delay));
-
-      // ─── Control check #2: per-retry gate ──────────────────────────────────
-      const loopStatus = await getWorkflowStatus(workflowId);
-
-      if (loopStatus === 'cancelled') {
-        await updateStep(workflowId, step.id, 'failed');
-        return { skipped: true, reason: 'workflow cancelled mid-retry' };
+      if (entryStatus === 'cancelled') {
+        return { skipped: true, reason: 'workflow cancelled' };
       }
 
-      if (loopStatus === 'paused') {
-        const shouldContinue = await waitIfPaused(workflowId);
-        if (!shouldContinue) {
-          await updateStep(workflowId, step.id, 'failed');
-          return { skipped: true, reason: 'workflow cancelled during pause' };
+      if (entryStatus === 'paused') {
+        const shouldContinue = await waitIfPaused(workflowId, tid);
+        if (!shouldContinue) return { skipped: true, reason: 'workflow cancelled during pause' };
+      }
+
+      if (await isWorkflowTimedOut(workflowId, tid)) {
+        await cancelWorkflow(workflowId, 'timeout', tid);
+        throw new Error(`Workflow ${workflowId} exceeded configured timeout`);
+      }
+
+      await updateStep(workflowId, step.id, 'running', tid);
+      recordStart(job.id);
+      updateJob(job.id, { status: 'running' }, tid);
+      startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
+
+      const policy     = resolvePolicy(step);
+      let attempt      = 0;
+      let success      = false;
+      let lastError    = '';
+
+      while (attempt < policy.maxAttempts && !success) {
+        attempt++;
+
+        const delay = calcDelay(policy, attempt);
+        if (delay > 0) await new Promise(r => setTimeout(r, delay));
+
+        // ─── Control check #2: per-retry gate ────────────────────────────────
+        const loopStatus = await getWorkflowStatus(workflowId, tid);
+
+        if (loopStatus === 'cancelled') {
+          await updateStep(workflowId, step.id, 'failed', tid);
+          return { skipped: true, reason: 'workflow cancelled mid-retry' };
         }
-      }
 
-      // ─── Timeout check per retry ──────────────────────────────────────────
-      if (await isWorkflowTimedOut(workflowId)) {
-        await cancelWorkflow(workflowId, 'timeout');
-        await updateStep(workflowId, step.id, 'failed');
-        throw new Error(`Workflow ${workflowId} timed out during retry ${attempt}`);
-      }
+        if (loopStatus === 'paused') {
+          const shouldContinue = await waitIfPaused(workflowId, tid);
+          if (!shouldContinue) {
+            await updateStep(workflowId, step.id, 'failed', tid);
+            return { skipped: true, reason: 'workflow cancelled during pause' };
+          }
+        }
 
-      incrementRetries(job.id);
-      recordRetry();
+        if (await isWorkflowTimedOut(workflowId, tid)) {
+          await cancelWorkflow(workflowId, 'timeout', tid);
+          await updateStep(workflowId, step.id, 'failed', tid);
+          throw new Error(`Workflow ${workflowId} timed out during retry ${attempt}`);
+        }
 
-      // ─── Agent selection via escalation ladder ────────────────────────────
-      const activeAgent = agentForAttempt(step, policy, attempt);
+        incrementRetries(job.id, tid);
+        recordRetry();
 
-      // ── update span + step-level metric with the active agent ────────────
-      recordStepStart(step.id, activeAgent);
-      startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
+        const activeAgent = agentForAttempt(step, policy, attempt);
+        recordStepStart(step.id, activeAgent);
+        startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
 
-      // 🔍 memory retrieval
-      const similar = await searchMemory(
-        attempt === 1 ? step.description : lastError
-      );
+        // 🔍 memory retrieval — tenant-scoped
+        const similar = await searchMemory(
+          attempt === 1 ? step.description : lastError,
+          3,
+          tid
+        );
 
-      const memoryContext = similar
-        .map(s => `Past Fix:\n${s.text}\nPatch:\n${s.patch}`)
-        .join('\n\n');
+        const memoryContext = similar
+          .map(s => `Past Fix:\n${s.text}\nPatch:\n${s.patch}`)
+          .join('\n\n');
 
-      const result = await runAgent(
-        activeAgent,
-        attempt === 1
-          ? `${step.description}\n\nRelevant fixes:\n${memoryContext}`
-          : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}\n\nRelevant fixes:\n${memoryContext}`,
-        {}
-      );
+        const result = await runAgent(
+          activeAgent,
+          attempt === 1
+            ? `${step.description}\n\nRelevant fixes:\n${memoryContext}`
+            : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}\n\nRelevant fixes:\n${memoryContext}`,
+          {},
+          tid
+        );
 
-      // ❌ no patch
-      if (!result.includes('PATCH:')) {
-        recordFailure(job.id);
+        if (!result.includes('PATCH:')) {
+          recordFailure(job.id);
+          updateJob(job.id, { status: 'failed', result: 'No patch generated' }, tid);
+          await updateStep(workflowId, step.id, 'failed', tid);
+          throw new Error('No patch generated');
+        }
 
-        updateJob(job.id, {
-          status: 'failed',
-          result: 'No patch generated'
-        });
+        const patch = result.split('PATCH:')[1].trim();
+        attachPatch(workflowId, step.id, patch);
 
-        await updateStep(workflowId, step.id, 'failed');
+        const review = runReviewPipeline(patch);
+        if (!review.ok) {
+          recordFailure(job.id);
+          updateJob(job.id, { status: 'failed', result: review.message }, tid);
+          await updateStep(workflowId, step.id, 'failed', tid);
+          throw new Error('System review failed');
+        }
 
-        throw new Error('No patch generated');
-      }
+        const aiReview = await runAgent('review-guard', patch, {}, tid);
+        if (!aiReview.includes('APPROVED')) {
+          recordFailure(job.id);
+          updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tid);
+          await updateStep(workflowId, step.id, 'failed', tid);
+          throw new Error('AI review rejected');
+        }
 
-      const patch = result.split('PATCH:')[1].trim();
+        const { file, content } = parsePatch(patch);
+        const opId = getOperationId(workflowId, step.id, patch);
 
-      // ── attach patch to trace span ────────────────────────────────────────
-      attachPatch(workflowId, step.id, patch);
-
-      // ✅ system review
-      const review = runReviewPipeline(patch);
-      if (!review.ok) {
-        recordFailure(job.id);
-
-        updateJob(job.id, {
-          status: 'failed',
-          result: review.message
-        });
-
-        await updateStep(workflowId, step.id, 'failed');
-
-        throw new Error('System review failed');
-      }
-
-      // ✅ AI review
-      const aiReview = await runAgent('review-guard', patch, {});
-      if (!aiReview.includes('APPROVED')) {
-        recordFailure(job.id);
-
-        updateJob(job.id, {
-          status: 'failed',
-          result: 'AI review rejected'
-        });
-
-        await updateStep(workflowId, step.id, 'failed');
-
-        throw new Error('AI review rejected');
-      }
-
-      const { file, content } = parsePatch(patch);
-
-      // 🧠 idempotency key
-      const opId = getOperationId(workflowId, step.id, patch);
-
-      // 🔁 skip if already applied
-      if (await isApplied(opId)) {
-        updateJob(job.id, {
-          status: 'completed',
-          result: 'skipped (already applied)'
-        });
-
-        recordSuccess(job.id);
-        await updateStep(workflowId, step.id, 'completed');
-
-        success = true;
-        break;
-      }
-
-      // 🔒 distributed lock
-      const lock = await acquireLock(file);
-
-      try {
-        // 🌿 ensure workflow branch (CRITICAL)
-        ensureWorkflowBranch(workflowId);
-
-        // apply patch
-        applyPatch(file, content);
-
-        // commit change
-        commitChanges(`Aegis: ${step.id}`);
-
-        // run tests
-        const testResult = runTests();
-
-        // ── attach test result to trace span ──────────────────────────────
-        attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
-
-        if (testResult.success) {
-          success = true;
-
-          await storeMemory(step.description, patch);
-
-          // ✅ idempotency mark
-          await markApplied(opId);
-
-          updateJob(job.id, {
-            status: 'completed',
-            result: 'success'
-          });
-
+        if (await isApplied(opId, tid)) {
+          updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tid);
           recordSuccess(job.id);
-          recordStepEnd(step.id, 'success');
-          endSpan(workflowId, step.id, 'success');
+          await updateStep(workflowId, step.id, 'completed', tid);
+          success = true;
+          break;
+        }
 
-          // ✅ mark step completed
-          await updateStep(workflowId, step.id, 'completed');
+        // 🔒 tenant-scoped distributed lock
+        const lock = await acquireLock(file, tid);
 
-          // 🚀 DAG progression — inherit workflow priority
-          const nextSteps = await getRunnableSteps(workflowId);
+        try {
+          // 🌿 tenant-isolated worktree
+          const { cwd } = ensureWorkflowBranch(workflowId, tid);
 
-          for (const next of nextSteps) {
-            await addStep(workflowId, next, job.opts.priority ?? 5);
+          applyPatch(file, content, cwd);
+          commitChanges(`Aegis: ${step.id}`, cwd);
+
+          const testResult = runTests(cwd);
+          attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
+
+          if (testResult.success) {
+            success = true;
+
+            await storeMemory(step.description, patch, tid);
+            await markApplied(opId, tid);
+
+            updateJob(job.id, { status: 'completed', result: 'success' }, tid);
+            recordSuccess(job.id);
+            recordStepEnd(step.id, 'success');
+            endSpan(workflowId, step.id, 'success');
+
+            await updateStep(workflowId, step.id, 'completed', tid);
+
+            const nextSteps = await getRunnableSteps(workflowId, tid);
+            for (const next of nextSteps) {
+              await addStep(workflowId, next, job.opts.priority ?? 5, tid);
+            }
+
+          } else {
+            lastError = testResult.output;
+            rollbackLastCommit(cwd);
           }
 
-        } else {
-          lastError = testResult.output;
-
-          // 🔁 rollback ONLY last commit (safe)
-          rollbackLastCommit();
+        } finally {
+          await releaseLock(lock);
         }
+      } // end while
 
-      } finally {
-        await releaseLock(lock);
+      if (!success) {
+        recordFailure(job.id);
+        recordStepEnd(step.id, 'failure');
+        endSpan(workflowId, step.id, 'failure');
+
+        updateJob(job.id, { status: 'failed', result: lastError }, tid);
+        await updateStep(workflowId, step.id, 'failed', tid);
+
+        await getDeadLetterQueue(tid).add('failed-step', {
+          originalJobId: job.id,
+          workflowId,
+          step,
+          tenantId: tid,
+          error: lastError,
+          attemptsExhausted: attempt,
+          policy
+        });
+
+        throw new Error('Step failed after retries');
       }
-    } // end while
 
-    if (!success) {
-      recordFailure(job.id);
-      recordStepEnd(step.id, 'failure');
-      endSpan(workflowId, step.id, 'failure');
+      return { success: true };
+    },
+    { connection }
+  );
 
-      updateJob(job.id, {
-        status: 'failed',
-        result: lastError
-      });
-
-      await updateStep(workflowId, step.id, 'failed');
-
-      await deadLetterQueue.add('failed-step', {
-        originalJobId: job.id,
-        workflowId,
-        step,
-        error: lastError,
-        attemptsExhausted: attempt,
-        policy
-      });
-
-      throw new Error('Step failed after retries');
-    }
-
-    return { success: true };
-  },
-  { connection }
-);
-
-// ✅ queue-level failure safety — catches throws that bypass the inner handler
-worker.on('failed', async (job, err) => {
-  await deadLetterQueue.add('failed-step', {
-    originalJobId: job.id,
-    workflowId: job.data.workflowId,
-    step: job.data.step,
-    error: err.message,
-    attemptsExhausted: job.attemptsMade,
-    policy: job.data.step ? resolvePolicy(job.data.step) : null
+  worker.on('failed', async (job, err) => {
+    const tid = job.data.tenantId ?? tenantId;
+    await getDeadLetterQueue(tid).add('failed-step', {
+      originalJobId: job.id,
+      workflowId: job.data.workflowId,
+      step: job.data.step,
+      tenantId: tid,
+      error: err.message,
+      attemptsExhausted: job.attemptsMade,
+      policy: job.data.step ? resolvePolicy(job.data.step) : null
+    });
   });
-});
+
+  return worker;
+}
+
+// ── Default single-tenant worker (keeps existing single-tenant deploys working)
+export default createTenantWorker(DEFAULT_TENANT);
