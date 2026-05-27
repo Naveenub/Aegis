@@ -8,7 +8,7 @@
     "worker": "node workers/agent-worker.js",
     "server": "node server.js",
     "lint": "eslint .",
-    "test": "jest",
+    "test": "vitest run",
     "dlq-worker": "node workers/dlq-worker.js"
   },
   "dependencies": {
@@ -19,5 +19,9 @@
     "express": "^4.18.0",
     "pino": "^8.0.0",
     "pino-pretty": "^10.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "vitest": "^1.6.0"
   }
 }
