@@ -71,9 +71,9 @@ const worker = new Worker(
       // ✅ mark step running — inside slot so count is accurate
       await updateStep(workflowId, step.id, 'running');
 
-      recordStart(job.id);
+      await recordStart(job.id);
       updateJob(job.id, { status: 'running' });
-      startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
+      await startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
 
       const policy = resolvePolicy(step);
 
@@ -111,11 +111,11 @@ const worker = new Worker(
         }
 
         incrementRetries(job.id);
-        recordRetry();
+        await recordRetry();
 
         const activeAgent = agentForAttempt(step, policy, attempt);
-        recordStepStart(step.id, activeAgent);
-        startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
+        await recordStepStart(step.id, activeAgent);
+        await startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
 
         // 🔍 Structured context — agent-runner handles memory lookup internally
         const agentContext = {
@@ -136,7 +136,7 @@ const worker = new Worker(
         );
 
         if (!result.includes('PATCH:')) {
-          recordFailure(job.id);
+          await recordFailure(job.id);
           updateJob(job.id, { status: 'failed', result: 'No patch generated' });
           await updateStep(workflowId, step.id, 'failed');
           throw new Error('No patch generated');
@@ -144,11 +144,11 @@ const worker = new Worker(
 
         const patch = result.split('PATCH:')[1].trim();
         lastPatch = patch;
-        attachPatch(workflowId, step.id, patch);
+        await attachPatch(workflowId, step.id, patch);
 
         const review = runReviewPipeline(patch);
         if (!review.ok) {
-          recordFailure(job.id);
+          await recordFailure(job.id);
           updateJob(job.id, { status: 'failed', result: review.message });
           await updateStep(workflowId, step.id, 'failed');
           throw new Error('System review failed');
@@ -156,7 +156,7 @@ const worker = new Worker(
 
         const aiReview = await runAgent('review-guard', patch, { patch });
         if (!aiReview.includes('APPROVED')) {
-          recordFailure(job.id);
+          await recordFailure(job.id);
           updateJob(job.id, { status: 'failed', result: 'AI review rejected' });
           await updateStep(workflowId, step.id, 'failed');
           throw new Error('AI review rejected');
@@ -167,7 +167,7 @@ const worker = new Worker(
 
         if (await isApplied(opId)) {
           updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' });
-          recordSuccess(job.id);
+          await recordSuccess(job.id);
           await updateStep(workflowId, step.id, 'completed');
           success = true;
           break;
@@ -181,7 +181,7 @@ const worker = new Worker(
           commitChanges(`Aegis: ${step.id}`);
 
           const testResult = runTests();
-          attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
+          await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
 
           if (testResult.success) {
             success = true;
@@ -190,9 +190,9 @@ const worker = new Worker(
             await markApplied(opId);
 
             updateJob(job.id, { status: 'completed', result: 'success' });
-            recordSuccess(job.id);
-            recordStepEnd(step.id, 'success');
-            endSpan(workflowId, step.id, 'success');
+            await recordSuccess(job.id);
+            await recordStepEnd(step.id, 'success');
+            await endSpan(workflowId, step.id, 'success');
 
             await updateStep(workflowId, step.id, 'completed');
 
@@ -213,9 +213,9 @@ const worker = new Worker(
       } // end while
 
       if (!success) {
-        recordFailure(job.id);
-        recordStepEnd(step.id, 'failure');
-        endSpan(workflowId, step.id, 'failure');
+        await recordFailure(job.id);
+        await recordStepEnd(step.id, 'failure');
+        await endSpan(workflowId, step.id, 'failure');
 
         updateJob(job.id, { status: 'failed', result: lastError });
         await updateStep(workflowId, step.id, 'failed');
