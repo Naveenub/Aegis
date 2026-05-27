@@ -13,14 +13,34 @@
  *           status      'running' | 'success' | 'failure'
  *
  * Persisted to .claude/context/traces.json (append-friendly object map).
+ *
+ * FIX: The original code did an unguarded load→mutate→save.
+ * Under concurrent BullMQ workers N workers could read the same stale snapshot,
+ * each write their span, and all but the last writer's span would be silently
+ * dropped.  Every write now holds an advisory lock via `proper-lockfile`.
+ * Reads remain lock-free — an eventually-consistent trace is fine for the UI.
  */
 
-import fs from 'fs';
+import fs   from 'fs';
+import path from 'path';
+import lock from 'proper-lockfile';
 
-const PATH = '.claude/context/traces.json';
+const PATH      = '.claude/context/traces.json';
+const LOCK_OPTS = {
+  retries : { retries: 10, minTimeout: 50, maxTimeout: 200, factor: 1.5 },
+  stale   : 15_000,
+};
+
+// ─── internal helpers ────────────────────────────────────────────────────────
+
+function ensureFile() {
+  if (!fs.existsSync(PATH)) {
+    fs.mkdirSync(path.dirname(PATH), { recursive: true });
+    fs.writeFileSync(PATH, '{}');
+  }
+}
 
 function load() {
-  if (!fs.existsSync(PATH)) return {};
   try {
     return JSON.parse(fs.readFileSync(PATH, 'utf-8'));
   } catch {
@@ -32,6 +52,18 @@ function save(traces) {
   fs.writeFileSync(PATH, JSON.stringify(traces, null, 2));
 }
 
+async function withLock(fn) {
+  ensureFile();
+  const release = await lock.lock(PATH, LOCK_OPTS);
+  try {
+    const traces  = load();
+    const updated = fn(traces);
+    save(updated);
+  } finally {
+    await release();
+  }
+}
+
 // ─── write ───────────────────────────────────────────────────────────────────
 
 /**
@@ -41,22 +73,21 @@ function save(traces) {
  * @param {string} stepDesc  - human-readable step description
  * @param {string} agent     - agent name executing this step
  */
-export function startSpan(traceId, spanId, stepDesc, agent) {
-  const traces = load();
-  if (!traces[traceId]) traces[traceId] = { traceId, spans: {} };
-
-  traces[traceId].spans[spanId] = {
-    spanId,
-    step: stepDesc,
-    agent,
-    patch: null,
-    testResult: null,
-    startMs: Date.now(),
-    endMs: null,
-    status: 'running',
-  };
-
-  save(traces);
+export async function startSpan(traceId, spanId, stepDesc, agent) {
+  await withLock(traces => {
+    if (!traces[traceId]) traces[traceId] = { traceId, spans: {} };
+    traces[traceId].spans[spanId] = {
+      spanId,
+      step       : stepDesc,
+      agent,
+      patch      : null,
+      testResult : null,
+      startMs    : Date.now(),
+      endMs      : null,
+      status     : 'running',
+    };
+    return traces;
+  });
 }
 
 /**
@@ -65,12 +96,12 @@ export function startSpan(traceId, spanId, stepDesc, agent) {
  * @param {string} spanId
  * @param {string} patch
  */
-export function attachPatch(traceId, spanId, patch) {
-  const traces = load();
-  const span = traces[traceId]?.spans[spanId];
-  if (!span) return;
-  span.patch = patch;
-  save(traces);
+export async function attachPatch(traceId, spanId, patch) {
+  await withLock(traces => {
+    const span = traces[traceId]?.spans[spanId];
+    if (span) span.patch = patch;
+    return traces;
+  });
 }
 
 /**
@@ -79,12 +110,12 @@ export function attachPatch(traceId, spanId, patch) {
  * @param {string} spanId
  * @param {{ success: boolean, output: string }} testResult
  */
-export function attachTestResult(traceId, spanId, testResult) {
-  const traces = load();
-  const span = traces[traceId]?.spans[spanId];
-  if (!span) return;
-  span.testResult = testResult;
-  save(traces);
+export async function attachTestResult(traceId, spanId, testResult) {
+  await withLock(traces => {
+    const span = traces[traceId]?.spans[spanId];
+    if (span) span.testResult = testResult;
+    return traces;
+  });
 }
 
 /**
@@ -93,16 +124,18 @@ export function attachTestResult(traceId, spanId, testResult) {
  * @param {string} spanId
  * @param {'success'|'failure'} status
  */
-export function endSpan(traceId, spanId, status) {
-  const traces = load();
-  const span = traces[traceId]?.spans[spanId];
-  if (!span) return;
-  span.endMs = Date.now();
-  span.status = status;
-  save(traces);
+export async function endSpan(traceId, spanId, status) {
+  await withLock(traces => {
+    const span = traces[traceId]?.spans[spanId];
+    if (span) {
+      span.endMs  = Date.now();
+      span.status = status;
+    }
+    return traces;
+  });
 }
 
-// ─── read ────────────────────────────────────────────────────────────────────
+// ─── read (lock-free — eventual consistency is fine for the UI) ──────────────
 
 /**
  * Return the full trace for a workflow.
@@ -110,6 +143,7 @@ export function endSpan(traceId, spanId, status) {
  * @returns {{ traceId, spans: object } | null}
  */
 export function getTrace(traceId) {
+  ensureFile();
   const traces = load();
   return traces[traceId] ?? null;
 }
@@ -120,6 +154,7 @@ export function getTrace(traceId) {
  * @returns {Array}
  */
 export function listTraces(limit = 100) {
+  ensureFile();
   const traces = load();
   return Object.values(traces)
     .sort((a, b) => {
