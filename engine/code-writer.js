@@ -1,7 +1,35 @@
 import fs from 'fs';
 import path from 'path';
 
-const BLOCKED = ['.env', 'secrets'];
+// Lock the allowed root to the project directory at module load time.
+// Using process.cwd() at call-time is unsafe — worker processes may have
+// a different cwd than the project root.
+const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
+
+// Blocked basenames — checked against the *resolved* filename, not raw input.
+// Substring matching on raw input can be bypassed (e.g. "myenv" passes ".env"
+// check but "env" alone would not; symlinks could also redirect past a raw check).
+const BLOCKED_NAMES = ['.env', 'secrets'];
+
+/**
+ * Validate that a resolved absolute path is safe to write.
+ * Returns null on success, or an error string on failure.
+ */
+export function validateTargetPath(resolved) {
+  // 1. Must stay inside the project root (path traversal guard).
+  if (!resolved.startsWith(PROJECT_ROOT + path.sep)) {
+    return `Path traversal blocked: ${resolved}`;
+  }
+
+  // 2. Basename must not match any blocked name (exact or containing).
+  const base = path.basename(resolved);
+  const blocked = BLOCKED_NAMES.find(b => base === b || base.includes(b));
+  if (blocked) {
+    return `Blocked filename pattern "${blocked}" in: ${base}`;
+  }
+
+  return null; // safe
+}
 
 export function parsePatch(patch) {
   return JSON.parse(patch);
@@ -9,16 +37,11 @@ export function parsePatch(patch) {
 
 export function applyPatch(file, content) {
   try {
-    const root = process.cwd();
-    const resolved = path.resolve(file);
+    const resolved = path.resolve(PROJECT_ROOT, file);
 
-    if (!resolved.startsWith(root + path.sep)) {
-      console.log('Blocked path traversal:', file);
-      return;
-    }
-
-    if (BLOCKED.some(b => file.includes(b))) {
-      console.log('Blocked file:', file);
+    const pathError = validateTargetPath(resolved);
+    if (pathError) {
+      console.log('Security block —', pathError);
       return;
     }
 
