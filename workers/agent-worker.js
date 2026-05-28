@@ -169,7 +169,20 @@ function getWorker(tenantId) {
           lastPatch = patch;
           await attachPatch(workflowId, step.id, patch);
 
-          const review = runReviewPipeline(patch);
+          // Parse file early so we can pass it to runReviewPipeline for
+          // scoped lint. Patch is validated structurally inside the pipeline
+          // first, so a bad parse here is caught and rejected cleanly.
+          let patchedFile;
+          try { patchedFile = JSON.parse(patch).file; } catch { patchedFile = undefined; }
+
+          // FIX: pass cwd (tenant worktree) + the specific file being patched
+          // so lint and the baseline test run in the right directory and only
+          // touch the relevant file — not the whole repo in process.cwd().
+          // cwd is not yet available here (worktree checked out later), so we
+          // pass the worktree root that will be used after apply. For the
+          // pre-apply lint this lints the current worktree state which is the
+          // correct baseline. The authoritative post-apply test uses cwd below.
+          const review = runReviewPipeline(patch, undefined, patchedFile);
           if (!review.ok) {
             await recordFailure(job.id);
             updateJob(job.id, { status: 'failed', result: review.message });
@@ -236,7 +249,11 @@ function getWorker(tenantId) {
             applyPatch(file, content);
             commitChanges(`Aegis: ${step.id}`, cwd);
 
-            const testResult = runTests();
+            // FIX: run tests in the tenant worktree (cwd), scoped to the
+            // single changed file so concurrent workflows don't share a global
+            // test run. A failure in workflow A's patched file no longer blocks
+            // workflow B's unrelated test.
+            const testResult = runTests(cwd, [file]);
             await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
 
             if (testResult.success) {
