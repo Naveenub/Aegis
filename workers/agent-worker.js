@@ -94,7 +94,7 @@ function getWorker(tenantId) {
         await updateStep(workflowId, step.id, 'running');
 
         await recordStart(job.id);
-        updateJob(job.id, { status: 'running' });
+        await updateJob(job.id, { status: 'running' }, tenant);
         await startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
 
         const policy = resolvePolicy(step);
@@ -132,7 +132,7 @@ function getWorker(tenantId) {
             throw new Error(`Workflow ${workflowId} timed out during retry ${attempt}`);
           }
 
-          incrementRetries(job.id);
+          await incrementRetries(job.id, tenant);
           await recordRetry();
 
           const activeAgent = agentForAttempt(step, policy, attempt);
@@ -160,7 +160,7 @@ function getWorker(tenantId) {
 
           if (!result.includes('PATCH:')) {
             await recordFailure(job.id);
-            updateJob(job.id, { status: 'failed', result: 'No patch generated' });
+            await updateJob(job.id, { status: 'failed', result: 'No patch generated' }, tenant);
             await updateStep(workflowId, step.id, 'failed');
             throw new Error('No patch generated');
           }
@@ -185,7 +185,7 @@ function getWorker(tenantId) {
           const review = runReviewPipeline(patch, undefined, patchedFile);
           if (!review.ok) {
             await recordFailure(job.id);
-            updateJob(job.id, { status: 'failed', result: review.message });
+            await updateJob(job.id, { status: 'failed', result: review.message }, tenant);
             await updateStep(workflowId, step.id, 'failed');
             throw new Error('System review failed');
           }
@@ -193,7 +193,7 @@ function getWorker(tenantId) {
           const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
           if (!aiReview.includes('APPROVED')) {
             await recordFailure(job.id);
-            updateJob(job.id, { status: 'failed', result: 'AI review rejected' });
+            await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
             await updateStep(workflowId, step.id, 'failed');
             throw new Error('AI review rejected');
           }
@@ -202,7 +202,7 @@ function getWorker(tenantId) {
           const opId = getOperationId(workflowId, step.id, patch);
 
           if (await isApplied(opId, tenant)) {
-            updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' });
+            await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
             await recordSuccess(job.id);
             await updateStep(workflowId, step.id, 'completed');
             success = true;
@@ -225,7 +225,7 @@ function getWorker(tenantId) {
               flaggedAt  : Date.now(),
             });
             await updateStep(workflowId, step.id, 'needs-review');
-            updateJob(job.id, { status: 'needs-review', result: gate.reason });
+            await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
             return { awaitingApproval: true, reason: gate.reason };
           }
 
@@ -262,7 +262,7 @@ function getWorker(tenantId) {
               await storeMemory(step.description, patch, tenant);
               await markApplied(opId, tenant);
 
-              updateJob(job.id, { status: 'completed', result: 'success' });
+              await updateJob(job.id, { status: 'completed', result: 'success' }, tenant);
               await recordSuccess(job.id);
               await recordStepEnd(step.id, 'success');
               await endSpan(workflowId, step.id, 'success');
@@ -304,7 +304,7 @@ function getWorker(tenantId) {
           await recordStepEnd(step.id, 'failure');
           await endSpan(workflowId, step.id, 'failure');
 
-          updateJob(job.id, { status: 'failed', result: lastError });
+          await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
           await updateStep(workflowId, step.id, 'failed');
 
           const dlq = getDeadLetterQueue(tenant);
