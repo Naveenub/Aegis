@@ -16,6 +16,7 @@ import { initVectorIndex } from './engine/vector-memory.js';
 import { runSystem } from './engine/orchestrator.js';
 import { addStep, Priority } from './engine/queue.js';
 import { slotStatus, getLimit } from './engine/concurrency.js';
+import { finaliseWorkflow } from './engine/git.js';
 
 const app = express();
 app.use(express.json());
@@ -182,16 +183,38 @@ app.post('/review/:workflowId/:stepId/resolve', async (req, res) => {
       return res.status(404).json({ error: 'Review item not found' });
     }
 
-    // If retrying: re-queue the step so it gets another run
+    const wf = await getWorkflow(workflowId);
+    const tenantId = wf?.tenantId ?? undefined;
+
+    // If retrying: reset step to pending and re-queue it
     if (resolution === 'retrying') {
-      const wf = await getWorkflow(workflowId);
       if (wf) {
         const step = wf.steps.find(s => s.id === stepId);
         if (step) {
-          const tenantId = wf.tenantId ?? undefined;
-          const { updateStep } = await import('./engine/workflow-store.js');
           await updateStep(workflowId, stepId, 'pending');
           await addStep(workflowId, step, wf.priority ?? Priority.NORMAL, tenantId);
+        }
+      }
+    }
+
+    // FIX: 'resolved' means a human fixed the step externally.
+    // Mark it completed and check whether the workflow is now fully done —
+    // if so, merge and clean up the workflow branch.
+    if (resolution === 'resolved') {
+      await updateStep(workflowId, stepId, 'completed');
+
+      // Check if any steps are still pending or running
+      const remaining = (wf?.steps ?? []).filter(
+        s => s.id !== stepId && (s.status === 'pending' || s.status === 'running')
+      );
+
+      if (remaining.length === 0 && tenantId) {
+        // All steps done — finalise the git branch
+        try {
+          await finaliseWorkflow(workflowId, tenantId);
+        } catch (err) {
+          // Non-fatal: log but don't fail the HTTP response
+          console.error(`[review/resolve] finaliseWorkflow failed for ${workflowId}:`, err.message);
         }
       }
     }
