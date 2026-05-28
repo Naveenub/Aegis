@@ -42,6 +42,7 @@ run → test → fail → fix → retry (max 3)
 - Step dependency tracking (`dependsOn`)
 - State transitions: `pending → running → completed / failed / needs-review`
 - Dynamic scheduling of unlocked steps
+- Full workflow lifecycle controls: **pause**, **resume**, **cancel**
 - Resumable workflows via `POST /resume/:workflowId`
 
 ### 4. Distributed Architecture
@@ -70,8 +71,9 @@ checkpoint → apply → test → rollback (if fail)
 ### 7. Memory System (RAG)
 
 - Stores past fixes as vector embeddings
-- Retrieves semantically similar issues
-- Improves agent decision quality over time
+- Configurable TTL for memory eviction (`AEGIS_MEMORY_TTL_DAYS`, default: 30 days)
+- Background eviction cron with configurable interval (`AEGIS_EVICTION_INTERVAL_HOURS`)
+- Retrieves semantically similar issues to improve agent decision quality over time
 
 ### 8. Concurrency Control
 
@@ -79,6 +81,7 @@ checkpoint → apply → test → rollback (if fail)
 - Tuned per priority tier (CRITICAL: 8, HIGH: 5, NORMAL: 3, LOW: 1)
 - Auto-expires stale slots from crashed workers (2-minute lease TTL)
 - Configurable via `AEGIS_CONCURRENCY_*` env vars
+- Live slot status exposed via `GET /concurrency/:workflowId`
 
 ### 9. Retry Policies
 
@@ -92,6 +95,7 @@ checkpoint → apply → test → rollback (if fail)
 - Controlled via `CLAUDE_AUTONOMY` and `MODE` env vars
 - `MODE=approval` — patches are held for human sign-off before being written to disk
 - Approval resolved via `POST /review/:workflowId/:stepId/resolve`
+- Review queue queryable via `GET /review-queue`
 - Steps re-queued after approval; idempotency check prevents double-application
 
 ### 11. Idempotency
@@ -104,6 +108,7 @@ checkpoint → apply → test → rollback (if fail)
 
 - Tenant isolation across all shared state (queues, locks, idempotency, metrics)
 - `tenantId` validated and propagated through every engine layer
+- Runtime tenant registration via `POST /tenants` (Redis-persisted, survives restarts)
 - Default tenant (`default`) for single-tenant deployments
 
 ### 13. Observability
@@ -111,7 +116,8 @@ checkpoint → apply → test → rollback (if fail)
 - Structured trace store per workflow (`traces.json`)
 - Per-agent and per-step metrics (count, latency, status)
 - Concurrent-safe writes via `proper-lockfile` advisory locking
-- Metrics exposed via API for dashboard consumption
+- Metrics exposed via `GET /metrics`; traces via `GET /trace/:id` and `GET /traces`
+- Built-in dashboard at `GET /dashboard`
 
 ### 14. Patch Security
 
@@ -119,6 +125,12 @@ checkpoint → apply → test → rollback (if fail)
 - Patch size limit (50 KB)
 - Structural validation before any file write
 - Lint + test gate as part of the review pipeline
+
+### 15. API Authentication
+
+- Bearer token and `x-api-key` header support via `AEGIS_API_KEY`
+- All routes except `GET /health` require a valid key
+- Health endpoint intentionally public for load-balancer probes
 
 ---
 
@@ -232,7 +244,7 @@ aegis/
 ├── engine/                           # Core system
 │   ├── orchestrator.js               # Scheduler + planner output validation
 │   ├── agent-runner.js               # Runs AI agents
-│   ├── workflow-store.js             # Workflow state engine (DAG + status)
+│   ├── workflow-store.js             # Workflow state engine (DAG + status + controls)
 │   ├── job-store.js                  # Job tracking (status, retries)
 │   ├── queue.js                      # BullMQ queues + DLQ + priority tiers
 │   ├── concurrency.js                # Per-workflow Redis semaphore
@@ -243,13 +255,16 @@ aegis/
 │   ├── review-system.js              # Patch validation + lint + test pipeline
 │   ├── git.js                        # Checkpoint + rollback (git-based)
 │   ├── lock.js                       # Distributed locking (Redlock)
-│   ├── vector-memory.js              # RAG memory (embeddings + search)
+│   ├── vector-memory.js              # RAG memory (embeddings + TTL eviction)
 │   ├── metrics.js                    # Metrics store (concurrent-safe)
 │   ├── tracer.js                     # Structured trace store (concurrent-safe)
 │   ├── tenant.js                     # Multi-tenant ID validation
+│   ├── tenant-registry.js            # Runtime tenant registration (Redis-backed)
 │   ├── logger.js                     # Structured logging (pino)
 │   ├── repo-scanner.js               # Repository scanning
 │   └── test-runner.js                # Test execution engine
+├── middleware/
+│   └── auth.js                       # Bearer token / x-api-key authentication
 ├── workers/                          # Execution layer
 │   ├── agent-worker.js               # Core worker (self-healing loop)
 │   └── dlq-worker.js                 # Dead Letter Queue processor
@@ -292,7 +307,7 @@ git commit -m "initial"
 
 ```bash
 cp .env.example .env
-# Set ANTHROPIC_API_KEY and optionally OPENAI_API_KEY
+# Set ANTHROPIC_API_KEY and optionally OPENAI_API_KEY and AEGIS_API_KEY
 ```
 
 ### 5. Start Worker
@@ -317,18 +332,24 @@ node server.js
 
 ```bash
 POST /task
+Authorization: Bearer <AEGIS_API_KEY>
 ```
 
 ```json
 {
-  "task": "Fix failing tests in authentication module"
+  "task": "Fix failing tests in authentication module",
+  "priority": "normal",
+  "tenantId": "default"
 }
 ```
 
-### Resume a workflow
+### Workflow Controls
 
 ```bash
-POST /resume/:workflowId
+POST /pause/:workflowId      # Pause a running workflow
+POST /resume/:workflowId     # Resume a paused workflow
+POST /cancel/:workflowId     # Cancel a workflow
+GET  /workflow/:workflowId   # Get full workflow status
 ```
 
 ### Resolve a pending review
@@ -339,6 +360,29 @@ POST /review/:workflowId/:stepId/resolve
 
 ```json
 { "resolution": "retrying" }
+```
+
+### Inspect review queue
+
+```bash
+GET /review-queue?limit=50&status=pending
+```
+
+### Observability
+
+```bash
+GET /metrics                 # Aggregate metrics
+GET /trace/:workflowId       # Trace for a specific workflow
+GET /traces                  # List all traces
+GET /dashboard               # Built-in HTML dashboard
+GET /concurrency/:workflowId # Live concurrency slot status
+```
+
+### Tenant Management
+
+```bash
+GET  /tenants                # List all registered tenants
+POST /tenants                # Register a new tenant
 ```
 
 ### Inspect the DLQ
@@ -354,15 +398,41 @@ node scripts/dlq-inspect.js
 | Variable | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required. Claude API key |
-| `OPENAI_API_KEY` | — | Optional. Used for embeddings |
+| `OPENAI_API_KEY` | — | Optional. Used for vector embeddings |
+| `AEGIS_API_KEY` | — | Required. API authentication key |
 | `CLAUDE_AUTONOMY` | `true` | `false` = hold all patches for human review |
 | `MODE` | `approval` | `approval` = human gate; `autonomous` = auto-apply |
-| `AEGIS_TENANTS` | `default` | Comma-separated tenant IDs |
+| `AEGIS_TENANTS` | `default` | Comma-separated tenant IDs to seed at boot |
 | `AEGIS_CONCURRENCY_CRITICAL` | `8` | Max parallel steps for CRITICAL priority |
 | `AEGIS_CONCURRENCY_HIGH` | `5` | Max parallel steps for HIGH priority |
 | `AEGIS_CONCURRENCY_NORMAL` | `3` | Max parallel steps for NORMAL priority |
 | `AEGIS_CONCURRENCY_LOW` | `1` | Max parallel steps for LOW priority |
 | `AEGIS_CONCURRENCY_LEASE_MS` | `120000` | Semaphore slot lease (ms) |
+| `AEGIS_MEMORY_TTL_DAYS` | `30` | Days before vector memory entries are evicted |
+| `AEGIS_EVICTION_INTERVAL_HOURS` | `1` | How often the memory eviction cron runs |
+
+---
+
+## 🌐 API Reference
+
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | Public | Health check + uptime |
+| `POST` | `/task` | Required | Submit a new task |
+| `GET` | `/workflow/:id` | Required | Get workflow status |
+| `POST` | `/pause/:id` | Required | Pause a workflow |
+| `POST` | `/resume/:id` | Required | Resume a paused workflow |
+| `POST` | `/cancel/:id` | Required | Cancel a workflow |
+| `GET` | `/review-queue` | Required | List pending review items |
+| `POST` | `/review/:wfId/:stepId/resolve` | Required | Resolve a review |
+| `GET` | `/metrics` | Required | Aggregate metrics |
+| `GET` | `/jobs` | Required | List jobs |
+| `GET` | `/trace/:id` | Required | Trace for a workflow |
+| `GET` | `/traces` | Required | List all traces |
+| `GET` | `/dashboard` | Required | HTML observability dashboard |
+| `GET` | `/concurrency/:id` | Required | Concurrency slot status |
+| `GET` | `/tenants` | Required | List tenants |
+| `POST` | `/tenants` | Required | Register a new tenant |
 
 ---
 
@@ -370,33 +440,34 @@ node scripts/dlq-inspect.js
 
 - Distributed execution (queue + workers + priority tiers)
 - Self-healing loop with configurable retry policies and agent escalation
-- Workflow engine (DAG + state + resumable)
+- Workflow engine (DAG + state + pause/resume/cancel)
 - Git-based atomic rollback
 - Distributed locking (Redlock)
 - Per-workflow concurrency control (Redis semaphore)
-- Human-in-the-loop approval gate
+- Human-in-the-loop approval gate with queryable review queue
 - Idempotency (SHA-256, tenant-scoped, Redis-backed)
-- Multi-tenant isolation across all shared state
+- Multi-tenant isolation with runtime registration (Redis-persisted)
 - Concurrent-safe metrics and tracing (`proper-lockfile`)
 - Patch security (path traversal prevention, size limit, lint + test gate)
-- Memory system (RAG foundation)
+- Memory system (RAG with TTL eviction and background cron)
+- API key authentication (Bearer token + `x-api-key`)
+- Built-in dashboard and full observability API
 
 ## ⚠️ Known Gaps
 
 - Workflow storage uses JSON files (not production-safe under high load)
 - Git strategy lacks branch isolation per workflow
-- No pause/cancel controls
-- No observability dashboard (metrics and traces are API-only)
+- No observability dashboard beyond the basic built-in endpoint
 - Memory ranking is basic (embedding quality and reranking not tuned)
 
-## 🧭 Roadmap — v1.1+
+## 🧭 Roadmap — v1.2+
 
 - Database-backed workflow store (Postgres/Redis)
 - Branch-based Git execution (per-workflow branches)
-- Workflow controls (pause / cancel / rewind)
-- Observability dashboard
+- Observability dashboard (full UI)
 - Improved RAG ranking and memory pruning
 - Security sandboxing for code execution
+- Workflow rewind (step-level undo)
 
 ---
 
