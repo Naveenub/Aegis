@@ -16,6 +16,33 @@ const MEMORY_TTL_MS = parseInt(process.env.AEGIS_MEMORY_TTL_DAYS ?? '30') * 24 *
 // Redis itself deletes the key, keeping the index consistent.
 const REDIS_EXPIRE_S = Math.ceil(MEMORY_TTL_MS / 1000 * 1.1);
 
+// How often the eviction cron sweeps all registered tenants.
+// Override via env: AEGIS_EVICTION_INTERVAL_HOURS (default: 1 hour)
+const EVICTION_INTERVAL_MS =
+  parseFloat(process.env.AEGIS_EVICTION_INTERVAL_HOURS ?? '1') * 60 * 60 * 1000;
+
+// Reranking: how many raw KNN candidates to fetch before quality scoring.
+// A larger overFetch catches more relevant results at the cost of more
+// embedding comparisons; 3x topK is a good default.
+// Override via env: AEGIS_MEMORY_OVERFETCH (default: 3)
+const OVERFETCH_FACTOR = Math.max(1, parseInt(process.env.AEGIS_MEMORY_OVERFETCH ?? '3'));
+
+// Minimum combined quality score [0-1] a candidate must reach to be returned.
+// Quality = 0.6 x similarity + 0.4 x recencyScore (exponential decay, half-life 7 days).
+// Override via env: AEGIS_MEMORY_MIN_SCORE (default: 0.5)
+const MIN_QUALITY_SCORE = parseFloat(process.env.AEGIS_MEMORY_MIN_SCORE ?? '0.5');
+
+// Recency decay half-life in days. Entries older than this score 0.5 on
+// recency; entries fresher than this score closer to 1.0.
+// Override via env: AEGIS_MEMORY_HALFLIFE_DAYS (default: 7)
+const RECENCY_HALFLIFE_MS =
+  parseFloat(process.env.AEGIS_MEMORY_HALFLIFE_DAYS ?? '7') * 24 * 60 * 60 * 1000;
+
+// ─── Tenant registry ─────────────────────────────────────────────────────────
+// Tracks every tenantId that has called initVectorIndex() so the eviction
+// cron can sweep all active tenants without needing external configuration.
+const _activeTenants = new Set();
+
 // Sorted-set that tracks all memory keys for a tenant, scored by storedAt (ms).
 // Used for efficient range-delete during eviction without a full FT.SEARCH scan.
 function ageIndexKey(tenantId) {
@@ -60,8 +87,49 @@ export async function initVectorIndex(tenantId = DEFAULT_TENANT) {
     // index already exists — fine
   }
 
+  // Register this tenant so the eviction cron covers it automatically
+  _activeTenants.add(tenantId);
+
   // Clear expired entries from before this process started
   await evictExpiredMemory(tenantId);
+
+  // Start the eviction cron the first time any tenant is initialised.
+  // The cron is a single shared interval that sweeps all active tenants.
+  startEvictionCron();
+}
+
+// ─── Eviction cron ────────────────────────────────────────────────────────────
+
+let _evictionCronStarted = false;
+
+/**
+ * Start a single long-lived setInterval that calls evictExpiredMemory()
+ * for every registered tenant on a configurable cadence.
+ *
+ * Safe to call multiple times — only the first call has any effect.
+ * The timer is unreffed so it never prevents the process from exiting
+ * cleanly (same pattern as how Node's built-in timers work in test runners).
+ */
+function startEvictionCron() {
+  if (_evictionCronStarted) return;
+  _evictionCronStarted = true;
+
+  const timer = setInterval(async () => {
+    for (const tid of _activeTenants) {
+      try {
+        const count = await evictExpiredMemory(tid);
+        if (count > 0) {
+          console.log(`[vector-memory] eviction cron: removed ${count} stale entries for tenant "${tid}"`);
+        }
+      } catch (err) {
+        // Log but never let one tenant's failure break the cron for others
+        console.error(`[vector-memory] eviction cron error for tenant "${tid}":`, err.message);
+      }
+    }
+  }, EVICTION_INTERVAL_MS);
+
+  // Unref so the cron timer does not keep the process alive in test / CLI contexts
+  if (typeof timer.unref === 'function') timer.unref();
 }
 
 // ─── Embedding ────────────────────────────────────────────────────────────────
@@ -153,32 +221,91 @@ export async function evictExpiredMemory(tenantId = DEFAULT_TENANT) {
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 
+/**
+ * Compute an exponential recency score in [0, 1].
+ * score = 2^(-age / halfLife)  →  1.0 when age=0, 0.5 at age=halfLife, ~0 when very old.
+ */
+function recencyScore(storedAtMs) {
+  const ageMs = Date.now() - storedAtMs;
+  return Math.pow(2, -ageMs / RECENCY_HALFLIFE_MS);
+}
+
+/**
+ * Search memory and return the top-K results ranked by a combined quality score.
+ *
+ * Algorithm:
+ *   1. Over-fetch: ask RediSearch for topK * OVERFETCH_FACTOR raw KNN candidates.
+ *      This widens the candidate pool so the reranker has good material to sort.
+ *   2. Rerank: for each candidate compute
+ *        qualityScore = 0.6 * cosineSimilarity + 0.4 * recencyScore
+ *      where recencyScore decays exponentially with a configurable half-life.
+ *   3. Filter: drop any candidate below MIN_QUALITY_SCORE.
+ *   4. Sort descending by qualityScore and return the top topK entries.
+ *
+ * This replaces the old flat cosine >= 0.75 cut, which had two problems:
+ *   - A hard threshold discards genuinely useful results just below the line.
+ *   - It gave equal rank to a fresh result and a month-old one with the same
+ *     cosine score, so stale memories polluted the context window.
+ *
+ * Note: RediSearch returns cosine *distance* (lower = more similar) when the
+ * index uses DISTANCE_METRIC COSINE. We convert: similarity = 1 - distance.
+ *
+ * @param {string} query
+ * @param {number} topK      - max results to return after reranking
+ * @param {string} tenantId
+ * @returns {object[]}       - sorted by qualityScore desc, each entry has
+ *                             { text, patch, storedAt, similarity, recency, qualityScore }
+ */
 export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
-  const queryVec = await embed(query);
-  const idx      = indexName(tenantId);
+  const queryVec   = await embed(query);
+  const idx        = indexName(tenantId);
+  const fetchCount = topK * OVERFETCH_FACTOR;
 
   const res = await redis.call(
     'FT.SEARCH', idx,
-    `*=>[KNN ${topK} @vector $vec AS score]`,
+    `*=>[KNN ${fetchCount} @vector $vec AS __dist]`,
     'PARAMS', '2', 'vec',
     Buffer.from(new Float32Array(queryVec).buffer),
-    'SORTBY', 'score',
-    'RETURN', '4', 'text', 'patch', 'score', 'storedAt',
+    'SORTBY', '__dist',
+    'RETURN', '5', 'text', 'patch', 'storedAt', '__dist', 'score',
     'DIALECT', '2'
   );
 
-  const results = [];
+  // Parse the flat FT.SEARCH response into objects
+  const candidates = [];
   for (let i = 1; i < res.length; i += 2) {
-    const doc  = res[i + 1];
-    const item = {};
-    for (let j = 0; j < doc.length; j += 2) {
-      item[doc[j]] = doc[j + 1];
+    const fields = res[i + 1];
+    const item   = {};
+    for (let j = 0; j < fields.length; j += 2) {
+      item[fields[j]] = fields[j + 1];
     }
-    results.push(item);
+    candidates.push(item);
   }
 
-  // Quality filter: drop low-similarity matches
-  return results.filter(r => parseFloat(r.score) >= 0.75);
+  // Rerank: compute combined quality score for each candidate
+  const now = Date.now();
+  const ranked = candidates
+    .map(item => {
+      // RediSearch COSINE distance in [0, 2]; convert to similarity in [0, 1]
+      const distance   = parseFloat(item.__dist ?? '1');
+      const similarity = Math.max(0, 1 - distance);
+      const recency    = recencyScore(parseInt(item.storedAt ?? '0', 10));
+      const qualityScore = 0.6 * similarity + 0.4 * recency;
+
+      return {
+        text:    item.text,
+        patch:   item.patch,
+        storedAt: item.storedAt,
+        similarity,
+        recency,
+        qualityScore
+      };
+    })
+    .filter(item => item.qualityScore >= MIN_QUALITY_SCORE)  // drop low-quality
+    .sort((a, b) => b.qualityScore - a.qualityScore)          // best first
+    .slice(0, topK);                                           // hard top-K cap
+
+  return ranked;
 }
