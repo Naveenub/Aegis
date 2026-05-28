@@ -460,7 +460,7 @@ node scripts/dlq-inspect.js
 - No observability dashboard beyond the basic built-in endpoint
 - Memory ranking is basic (embedding quality and reranking not tuned)
 
-## 🧭 Roadmap — v1.2+
+## 🧭 Roadmap — v1.4+
 
 - Database-backed workflow store (Postgres/Redis)
 - Branch-based Git execution (per-workflow branches)
