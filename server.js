@@ -27,12 +27,12 @@ app.use(express.json());
  */
 app.post('/task', async (req, res) => {
   try {
-    const { task, priority = 'normal', timeoutMs } = req.body;
+    const { task, priority = 'normal', timeoutMs, tenantId } = req.body;
 
     const p = Priority[priority.toUpperCase()] ?? Priority.NORMAL;
-    const workflowId = await runSystem(task, { priority: p, timeoutMs });
+    const workflowId = await runSystem(task, { priority: p, timeoutMs, tenantId });
 
-    res.json({ status: 'submitted', workflowId, priority, timeoutMs: timeoutMs ?? null });
+    res.json({ status: 'submitted', workflowId, priority, tenantId: tenantId ?? null, timeoutMs: timeoutMs ?? null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -52,10 +52,11 @@ app.post('/resume/:id', async (req, res) => {
 
     const wf = await getWorkflow(id);
     const priority = wf?.priority ?? Priority.NORMAL;
+    const tenantId = wf?.tenantId ?? undefined;
 
     const steps = await getRunnableSteps(id);
     for (const step of steps) {
-      await addStep(id, step, priority);
+      await addStep(id, step, priority, tenantId);
     }
 
     res.json({ status: 'resumed', workflowId: id, stepsScheduled: steps.length, priority });
@@ -187,10 +188,10 @@ app.post('/review/:workflowId/:stepId/resolve', async (req, res) => {
       if (wf) {
         const step = wf.steps.find(s => s.id === stepId);
         if (step) {
-          // Reset step to pending so the worker processes it
+          const tenantId = wf.tenantId ?? undefined;
           const { updateStep } = await import('./engine/workflow-store.js');
           await updateStep(workflowId, stepId, 'pending');
-          await addStep(workflowId, step, wf.priority ?? Priority.NORMAL);
+          await addStep(workflowId, step, wf.priority ?? Priority.NORMAL, tenantId);
         }
       }
     }
