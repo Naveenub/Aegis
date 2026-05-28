@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'fs';
+import { requireApiKey, optionalApiKey } from './middleware/auth.js';
 import { getMetrics } from './engine/metrics.js';
 import { getTrace, listTraces } from './engine/tracer.js';
 import { listJobs } from './engine/job-store.js';
@@ -21,6 +22,20 @@ import { finaliseWorkflow } from './engine/git.js';
 
 const app = express();
 app.use(express.json());
+
+/**
+ * ❤️ Health Check — intentionally public, no key required.
+ */
+app.get('/health', optionalApiKey, (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+/**
+ * 🔒 All routes below this line require a valid AEGIS_API_KEY.
+ *    Send:  Authorization: Bearer <key>
+ *      or:  x-api-key: <key>
+ */
+app.use(requireApiKey);
 
 /**
  * 🚀 Trigger task execution
@@ -482,13 +497,6 @@ app.get('/concurrency/:id', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-/**
- * ❤️ Health Check
- */
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
 });
 
 await initVectorIndex();
