@@ -101,9 +101,9 @@ export async function getRunnableSteps(workflowId) {
   return steps.filter(step => {
     if (step.status !== 'pending') return false;
 
-    if (!step.dependsOn || step.dependsOn.length === 0) return true;
+    if (!step.depends_on || step.depends_on.length === 0) return true;
 
-    return step.dependsOn.every(dep => {
+    return step.depends_on.every(dep => {
       const depStep = steps.find(s => s.id === dep);
       return depStep && depStep.status === 'completed';
     });
