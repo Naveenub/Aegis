@@ -16,9 +16,11 @@ import {
   getRunnableSteps,
   getWorkflowStatus,
   isWorkflowTimedOut,
-  cancelWorkflow
+  cancelWorkflow,
+  flagForReview,
 } from '../engine/workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from '../engine/retry-policy.js';
+import { needsApproval, approvalModeActive }         from '../engine/approval-gate.js';
 import { acquireSlot, clearSlots } from '../engine/concurrency.js';
 import { DEFAULT_TENANT, assertTenantId } from '../engine/tenant.js';
 import IORedis from 'ioredis';
@@ -194,6 +196,26 @@ function getWorker(tenantId) {
             break;
           }
 
+          // ─── Approval gate ────────────────────────────────────────────────
+          // When MODE=approval or CLAUDE_AUTONOMY=false the patch has passed
+          // all automated checks but still needs a human sign-off before it
+          // is written to disk.  Flag the step for review and return early;
+          // the worker will pick it up again once a human resolves it via
+          // POST /review/:workflowId/:stepId/resolve { resolution: "retrying" }.
+          const gate = needsApproval(step);
+          if (gate) {
+            await flagForReview(workflowId, step.id, {
+              ...gate,
+              patch,
+              agent      : activeAgent,
+              description: step.description,
+              flaggedAt  : Date.now(),
+            });
+            await updateStep(workflowId, step.id, 'needs-review');
+            updateJob(job.id, { status: 'needs-review', result: gate.reason });
+            return { awaitingApproval: true, reason: gate.reason };
+          }
+
           const lock = await acquireLock(file, tenant);
 
           try {
@@ -297,6 +319,10 @@ const TENANTS = (process.env.AEGIS_TENANTS ?? DEFAULT_TENANT)
 for (const tenant of TENANTS) {
   getWorker(tenant);
   console.log(`[agent-worker] Listening on aegis-tasks:${tenant}`);
+}
+
+if (approvalModeActive) {
+  console.log('[agent-worker] Approval gate ACTIVE — patches will be held for human review before apply');
 }
 
 export { getWorker };
