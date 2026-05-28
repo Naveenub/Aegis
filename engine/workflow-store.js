@@ -40,6 +40,7 @@ export async function createWorkflow(workflowId, steps, opts = {}) {
     JSON.stringify({
       id: workflowId,
       status: 'running',
+      tenantId: opts.tenantId ?? null,
       priority: opts.priority ?? 5,
       timeoutMs: opts.timeoutMs ?? null,
       startedAt: Date.now(),
