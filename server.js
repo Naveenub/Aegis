@@ -20,6 +20,8 @@ import { runSystem } from './engine/orchestrator.js';
 import { addStep, Priority } from './engine/queue.js';
 import { slotStatus, getLimit } from './engine/concurrency.js';
 import { finaliseWorkflow } from './engine/git.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
+import { getWorker } from './workers/agent-worker.js';
 
 const app = express();
 app.use(express.json());
@@ -545,6 +547,53 @@ load();
 });
 
 /**
+ * 📋 List all registered tenants
+ */
+app.get('/tenants', async (_req, res) => {
+  try {
+    const ids = await listTenants();
+    res.json({ count: ids.length, tenants: ids });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * ➕ Register a new tenant at runtime
+ * Body: { tenantId, label? }
+ *
+ * Idempotent — re-registering an existing tenant returns 200 with created=false.
+ * Immediately boots a BullMQ worker for the tenant in this process so jobs
+ * submitted to aegis-tasks:{tenantId} are picked up without a restart.
+ */
+app.post('/tenants', async (req, res) => {
+  try {
+    const { tenantId, label } = req.body ?? {};
+
+    if (!tenantId) {
+      return res.status(400).json({ error: 'tenantId is required' });
+    }
+
+    const { created } = await registerTenant(tenantId, { label });
+
+    // Boot (or no-op if already running) the BullMQ worker for this tenant
+    getWorker(tenantId);
+
+    // Ensure the vector index exists for the new tenant
+    await initVectorIndex(tenantId);
+
+    const record = await getTenant(tenantId);
+    res.status(created ? 201 : 200).json({ created, tenant: record });
+  } catch (err) {
+    // assertTenantId throws a plain Error for invalid ids
+    if (err.message?.startsWith('Invalid tenantId')) {
+      return res.status(400).json({ error: err.message });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * 🔢 Concurrency status for a workflow
  * Shows active slot count, configured limit, and current slot holders.
  * Query: ?priority=0  (default 5 = NORMAL; use the BullMQ numeric value)
@@ -566,6 +615,7 @@ app.get('/concurrency/:id', async (req, res) => {
   }
 });
 
+await seedTenantsFromEnv();
 await initVectorIndex();
 
 app.listen(3000, () => {
@@ -583,4 +633,6 @@ app.listen(3000, () => {
   console.log('  GET  /dashboard                     – observability dashboard (HTML)');
   console.log('  GET  /jobs                          – job list');
   console.log('  GET  /concurrency/:id               – slot usage for a workflow');
+  console.log('  GET  /tenants                       – list registered tenants');
+  console.log('  POST /tenants                       – register a tenant at runtime');
 });
