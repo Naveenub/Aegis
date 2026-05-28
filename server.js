@@ -238,7 +238,13 @@ app.get('/dashboard', (_req, res) => {
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;padding:24px}
-  h1{font-size:1.5rem;font-weight:700;margin-bottom:20px;color:#a78bfa}
+  h1{font-size:1.5rem;font-weight:700;margin-bottom:4px;color:#a78bfa}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:8px}
+  .poll-controls{display:flex;align-items:center;gap:10px;font-size:.8rem;color:#94a3b8}
+  .poll-controls select{background:#1e2130;color:#e2e8f0;border:1px solid #2d3148;border-radius:5px;padding:3px 8px;font-size:.8rem}
+  .poll-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;background:#34d399;margin-right:4px}
+  .poll-indicator.paused{background:#f87171}
+  .last-updated{font-size:.75rem;color:#64748b}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:28px}
   .card{background:#1e2130;border-radius:10px;padding:18px;border:1px solid #2d3148}
   .card .label{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em}
@@ -251,88 +257,176 @@ app.get('/dashboard', (_req, res) => {
   .badge.success{background:#064e3b;color:#34d399} .badge.failure{background:#450a0a;color:#f87171} .badge.running{background:#1e3a5f;color:#60a5fa}
   h2{font-size:1rem;font-weight:600;color:#a78bfa;margin-bottom:12px}
   .section{margin-bottom:28px}
+  .btn-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   button{background:#a78bfa;color:#0f1117;border:none;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer;font-size:.85rem}
   button:hover{background:#c4b5fd}
+  button.secondary{background:#1e2130;color:#a78bfa;border:1px solid #a78bfa}
+  button.secondary:hover{background:#252840}
   .err{color:#f87171;font-size:.85rem;margin-top:8px}
+  .progress-bar{height:3px;background:#2d3148;border-radius:2px;overflow:hidden;margin-bottom:20px}
+  .progress-fill{height:100%;background:#a78bfa;transition:width linear}
 </style>
 </head>
 <body>
-<h1>⚡ Aegis Observability</h1>
+<div class="topbar">
+  <div>
+    <h1>⚡ Aegis Observability</h1>
+    <span class="last-updated" id="lastUpdated">Never updated</span>
+  </div>
+  <div class="poll-controls">
+    <span><span class="poll-indicator" id="pollDot"></span><span id="pollStatus">Live</span></span>
+    <label for="intervalSelect">every</label>
+    <select id="intervalSelect">
+      <option value="3000">3 s</option>
+      <option value="5000" selected>5 s</option>
+      <option value="10000">10 s</option>
+      <option value="30000">30 s</option>
+      <option value="60000">60 s</option>
+    </select>
+    <button class="secondary" id="toggleBtn" onclick="togglePoll()">⏸ Pause</button>
+    <button onclick="load()">↻ Now</button>
+  </div>
+</div>
+<div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
 <div id="app"><p style="color:#94a3b8">Loading…</p></div>
+
 <script>
-async function load() {
-  const [metrics, traces] = await Promise.all([
-    fetch('/metrics').then(r=>r.json()),
-    fetch('/traces?limit=30').then(r=>r.json()),
-  ]);
+let pollTimer = null;
+let progressTimer = null;
+let paused = false;
+let intervalMs = 5000;
 
-  const byAgent = metrics.byAgent ?? {};
-  const recentSteps = metrics.recentSteps ?? [];
-
-  document.getElementById('app').innerHTML = \`
-    <div class="grid">
-      <div class="card"><div class="label">Total Jobs</div><div class="value blue">\${metrics.total}</div></div>
-      <div class="card"><div class="label">Success</div><div class="value green">\${metrics.success}</div></div>
-      <div class="card"><div class="label">Failed</div><div class="value red">\${metrics.failed}</div></div>
-      <div class="card"><div class="label">Retries</div><div class="value">\${metrics.retries}</div></div>
-      <div class="card"><div class="label">Success Rate</div><div class="value green">\${metrics.successRate}%</div></div>
-      <div class="card"><div class="label">Avg Latency</div><div class="value blue">\${metrics.avgLatency}ms</div></div>
-    </div>
-
-    <div class="section">
-      <h2>Per-Agent Latency</h2>
-      \${Object.keys(byAgent).length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No agent data yet.</p>' : \`
-      <table>
-        <thead><tr><th>Agent</th><th>Calls</th><th>Avg ms</th></tr></thead>
-        <tbody>
-          \${Object.entries(byAgent).map(([a,v])=>\`<tr><td>\${a}</td><td>\${v.count}</td><td>\${v.avgMs}</td></tr>\`).join('')}
-        </tbody>
-      </table>\`}
-    </div>
-
-    <div class="section">
-      <h2>Recent Step Spans</h2>
-      \${recentSteps.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No completed steps yet.</p>' : \`
-      <table>
-        <thead><tr><th>Step</th><th>Agent</th><th>Duration ms</th><th>Status</th></tr></thead>
-        <tbody>
-          \${recentSteps.slice().reverse().map(s=>\`
-            <tr>
-              <td title="\${s.stepId}">\${s.stepId}</td>
-              <td>\${s.agent ?? '—'}</td>
-              <td>\${s.durationMs ?? '—'}</td>
-              <td><span class="badge \${s.status}">\${s.status}</span></td>
-            </tr>\`).join('')}
-        </tbody>
-      </table>\`}
-    </div>
-
-    <div class="section">
-      <h2>Traces (step → agent → patch → test)</h2>
-      \${traces.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No traces yet.</p>' : \`
-      <table>
-        <thead><tr><th>Workflow</th><th>Spans</th><th>Status</th><th>Link</th></tr></thead>
-        <tbody>
-          \${traces.map(t => {
-            const spans = Object.values(t.spans ?? {});
-            const anyRunning = spans.some(s=>s.status==='running');
-            const anyFailed  = spans.some(s=>s.status==='failure');
-            const overall = anyRunning ? 'running' : anyFailed ? 'failure' : 'success';
-            return \`<tr>
-              <td title="\${t.traceId}">\${t.traceId.slice(0,12)}…</td>
-              <td>\${spans.length}</td>
-              <td><span class="badge \${overall}">\${overall}</span></td>
-              <td><a href="/trace/\${t.traceId}" style="color:#a78bfa">view</a></td>
-            </tr>\`;
-          }).join('')}
-        </tbody>
-      </table>\`}
-    </div>
-
-    <button onclick="load()">↻ Refresh</button>
-  \`;
+function fmt(d){
+  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
-load().catch(e => { document.getElementById('app').innerHTML = '<p class="err">'+e.message+'</p>'; });
+
+function startProgress() {
+  clearInterval(progressTimer);
+  const fill = document.getElementById('progressFill');
+  const start = Date.now();
+  fill.style.transition = 'none';
+  fill.style.width = '0%';
+  progressTimer = setInterval(() => {
+    const pct = Math.min(100, ((Date.now() - start) / intervalMs) * 100);
+    fill.style.width = pct + '%';
+    if (pct >= 100) clearInterval(progressTimer);
+  }, 100);
+}
+
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (!paused) {
+    startProgress();
+    pollTimer = setTimeout(() => { load(); }, intervalMs);
+  }
+}
+
+function togglePoll() {
+  paused = !paused;
+  const dot = document.getElementById('pollDot');
+  const status = document.getElementById('pollStatus');
+  const btn = document.getElementById('toggleBtn');
+  const fill = document.getElementById('progressFill');
+  if (paused) {
+    clearTimeout(pollTimer);
+    clearInterval(progressTimer);
+    fill.style.width = '0%';
+    dot.classList.add('paused');
+    status.textContent = 'Paused';
+    btn.textContent = '▶ Resume';
+  } else {
+    dot.classList.remove('paused');
+    status.textContent = 'Live';
+    btn.textContent = '⏸ Pause';
+    load();
+  }
+}
+
+document.getElementById('intervalSelect').addEventListener('change', function() {
+  intervalMs = parseInt(this.value, 10);
+  if (!paused) { clearTimeout(pollTimer); load(); }
+});
+
+async function load() {
+  try {
+    const [metrics, traces] = await Promise.all([
+      fetch('/metrics').then(r=>r.json()),
+      fetch('/traces?limit=30').then(r=>r.json()),
+    ]);
+
+    const byAgent = metrics.byAgent ?? {};
+    const recentSteps = metrics.recentSteps ?? [];
+
+    document.getElementById('app').innerHTML = \`
+      <div class="grid">
+        <div class="card"><div class="label">Total Jobs</div><div class="value blue">\${metrics.total ?? 0}</div></div>
+        <div class="card"><div class="label">Success</div><div class="value green">\${metrics.success ?? 0}</div></div>
+        <div class="card"><div class="label">Failed</div><div class="value red">\${metrics.failed ?? 0}</div></div>
+        <div class="card"><div class="label">Retries</div><div class="value">\${metrics.retries ?? 0}</div></div>
+        <div class="card"><div class="label">Success Rate</div><div class="value green">\${metrics.successRate ?? 0}%</div></div>
+        <div class="card"><div class="label">Avg Latency</div><div class="value blue">\${metrics.avgLatency ?? 0}ms</div></div>
+      </div>
+
+      <div class="section">
+        <h2>Per-Agent Latency</h2>
+        \${Object.keys(byAgent).length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No agent data yet.</p>' : \`
+        <table>
+          <thead><tr><th>Agent</th><th>Calls</th><th>Avg ms</th></tr></thead>
+          <tbody>
+            \${Object.entries(byAgent).map(([a,v])=>\`<tr><td>\${a}</td><td>\${v.count}</td><td>\${v.avgMs}</td></tr>\`).join('')}
+          </tbody>
+        </table>\`}
+      </div>
+
+      <div class="section">
+        <h2>Recent Step Spans</h2>
+        \${recentSteps.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No completed steps yet.</p>' : \`
+        <table>
+          <thead><tr><th>Step</th><th>Agent</th><th>Duration ms</th><th>Status</th></tr></thead>
+          <tbody>
+            \${recentSteps.slice().reverse().map(s=>\`
+              <tr>
+                <td title="\${s.stepId}">\${s.stepId}</td>
+                <td>\${s.agent ?? '—'}</td>
+                <td>\${s.durationMs ?? '—'}</td>
+                <td><span class="badge \${s.status}">\${s.status}</span></td>
+              </tr>\`).join('')}
+          </tbody>
+        </table>\`}
+      </div>
+
+      <div class="section">
+        <h2>Traces (step → agent → patch → test)</h2>
+        \${traces.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No traces yet.</p>' : \`
+        <table>
+          <thead><tr><th>Workflow</th><th>Spans</th><th>Status</th><th>Link</th></tr></thead>
+          <tbody>
+            \${traces.map(t => {
+              const spans = Object.values(t.spans ?? {});
+              const anyRunning = spans.some(s=>s.status==='running');
+              const anyFailed  = spans.some(s=>s.status==='failure');
+              const overall = anyRunning ? 'running' : anyFailed ? 'failure' : 'success';
+              return \`<tr>
+                <td title="\${t.traceId}">\${t.traceId.slice(0,12)}…</td>
+                <td>\${spans.length}</td>
+                <td><span class="badge \${overall}">\${overall}</span></td>
+                <td><a href="/trace/\${t.traceId}" style="color:#a78bfa">view</a></td>
+              </tr>\`;
+            }).join('')}
+          </tbody>
+        </table>\`}
+      </div>
+    \`;
+
+    document.getElementById('lastUpdated').textContent = 'Updated ' + fmt(new Date());
+    schedulePoll();
+  } catch(e) {
+    document.getElementById('app').innerHTML = '<p class="err">Fetch error: ' + e.message + '</p>';
+    schedulePoll(); // keep trying even on error
+  }
+}
+
+load();
 </script>
 </body>
 </html>`);
