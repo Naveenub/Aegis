@@ -1,9 +1,26 @@
-import OpenAI from 'openai';
 import IORedis from 'ioredis';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const redis   = new IORedis();
+// ─── OpenAI client — optional ─────────────────────────────────────────────────
+// Resolved lazily so a missing OPENAI_API_KEY (or absent 'openai' package)
+// never crashes the module at import time. Returns null when unavailable.
+let _clientPromise = null;
+
+async function getOpenAIClient() {
+  if (_clientPromise) return _clientPromise;
+  _clientPromise = (async () => {
+    if (!process.env.OPENAI_API_KEY) return null;
+    try {
+      const { default: OpenAI } = await import('openai');
+      return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    } catch {
+      return null;
+    }
+  })();
+  return _clientPromise;
+}
+
+const redis = new IORedis();
 
 const VECTOR_DIM = 1536;
 
@@ -134,12 +151,30 @@ function startEvictionCron() {
 
 // ─── Embedding ────────────────────────────────────────────────────────────────
 
+/**
+ * Returns a Float32 embedding vector, or null when:
+ *   - OPENAI_API_KEY is not set
+ *   - the 'openai' package is not installed
+ *   - the API call fails for any reason (network, quota, invalid key, etc.)
+ *
+ * Callers must handle null — they degrade gracefully rather than throwing.
+ *
+ * @param {string} text
+ * @returns {Promise<number[]|null>}
+ */
 async function embed(text) {
-  const res = await client.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: text
-  });
-  return res.data[0].embedding;
+  const client = await getOpenAIClient();
+  if (!client) return null;
+  try {
+    const res = await client.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: text
+    });
+    return res.data[0].embedding;
+  } catch (err) {
+    console.warn('[vector-memory] embed() failed — memory features disabled for this call:', err.message);
+    return null;
+  }
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -155,7 +190,13 @@ async function embed(text) {
 export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
-  const vector   = await embed(text);
+  const vector = await embed(text);
+  if (!vector) {
+    // Embeddings unavailable (no API key or call failed) — skip storage silently.
+    // The agent run still succeeds; it just won't seed the memory index.
+    return null;
+  }
+
   const storedAt = Date.now();
   const id       = `${memoryPrefix(tenantId)}${storedAt}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -259,7 +300,13 @@ function recencyScore(storedAtMs) {
 export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
-  const queryVec   = await embed(query);
+  const queryVec = await embed(query);
+  if (!queryVec) {
+    // Embeddings unavailable — return empty results so the agent runs without
+    // past-fix context rather than throwing and aborting the whole workflow.
+    return [];
+  }
+
   const idx        = indexName(tenantId);
   const fetchCount = topK * OVERFETCH_FACTOR;
 
