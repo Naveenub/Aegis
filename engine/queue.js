@@ -26,7 +26,7 @@ function tenantDLQName(tenantId) {
   return `aegis-dead-letter:${tenantId}`;
 }
 
-function getTaskQueue(tenantId = DEFAULT_TENANT) {
+export function getTaskQueue(tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
   if (!_queues.has(tenantId)) {
     _queues.set(tenantId, new Queue(tenantQueueName(tenantId), {
