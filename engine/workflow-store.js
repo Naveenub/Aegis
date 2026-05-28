@@ -68,6 +68,41 @@ export async function updateStep(workflowId, stepId, status) {
 }
 
 /**
+ * 🔄 Reset a step so a human-initiated retry starts clean.
+ *
+ * Unlike updateStep() (which only flips `status`), this function also
+ * zeroes `attempt` so the worker's agentForAttempt() call always begins
+ * at attempt=1 → the step's own agent, never escalationAgent/fallbackAgent.
+ * It also clears transient error fields left over from the failed run.
+ *
+ * Returns the updated step object so callers can pass it straight to
+ * addStep() without a second Redis round-trip.
+ *
+ * @param {string} workflowId
+ * @param {string} stepId
+ * @returns {object|null} the reset step, or null if not found
+ */
+export async function resetStepForRetry(workflowId, stepId) {
+  const key = WORKFLOW_PREFIX + workflowId;
+
+  const stepRaw = await redis.hget(key, stepId);
+  if (!stepRaw) return null;
+
+  const step = JSON.parse(stepRaw);
+
+  // Zero out all retry-state so the next worker invocation starts from scratch.
+  step.status    = 'pending';
+  step.attempt   = 0;        // explicit 0 — agentForAttempt(step, policy, 1) → step.agent
+  step.lastError = null;
+  step.lastPatch = null;
+  step.updatedAt = Date.now();
+
+  await redis.hset(key, stepId, JSON.stringify(step));
+
+  return step;
+}
+
+/**
  * 📊 Get full workflow
  */
 export async function getWorkflow(workflowId) {
