@@ -1,5 +1,7 @@
+import http from 'http';
 import express from 'express';
 import fs from 'fs';
+import { WebSocketServer } from 'ws';
 import { requireApiKey, optionalApiKey } from './middleware/auth.js';
 import { getMetrics } from './engine/metrics.js';
 import { getTrace, listTraces } from './engine/tracer.js';
@@ -25,6 +27,79 @@ import { getWorker } from './workers/agent-worker.js';
 
 const app = express();
 app.use(express.json());
+
+// ─── WebSocket server (share the HTTP server so same port) ───────────────────
+
+const httpServer = http.createServer(app);
+const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
+/**
+ * Collect the full dashboard payload in one shot.
+ * Mirrors what the old polling dashboard fetched via 3 HTTP calls.
+ */
+async function buildDashboardPayload() {
+  const [metrics, traces, reviewData] = await Promise.all([
+    Promise.resolve(getMetrics()),
+    Promise.resolve(listTraces(30)),
+    getReviewQueue({ limit: 50, status: 'pending' }),
+  ]);
+  return { metrics, traces, reviewQueue: reviewData };
+}
+
+/** Broadcast a fresh payload to every connected dashboard client. */
+async function broadcastDashboard() {
+  if (wss.clients.size === 0) return;
+  try {
+    const payload = JSON.stringify(await buildDashboardPayload());
+    for (const client of wss.clients) {
+      if (client.readyState === 1 /* OPEN */) {
+        client.send(payload);
+      }
+    }
+  } catch (err) {
+    console.error('[ws] broadcast error:', err.message);
+  }
+}
+
+// Send a fresh snapshot to each client the moment it connects.
+wss.on('connection', async (ws) => {
+  try {
+    ws.send(JSON.stringify(await buildDashboardPayload()));
+  } catch (err) {
+    console.error('[ws] initial send error:', err.message);
+  }
+  // Clients don't send anything; ignore inbound messages.
+});
+
+// ─── File watchers: push whenever metrics or traces change on disk ───────────
+//
+// Both files are written by engine workers after every step, so watching them
+// is the cheapest way to know "something happened" without polling.
+// fs.watch uses inotify/kqueue — effectively zero CPU when idle.
+
+const METRICS_PATH = '.claude/context/metrics.json';
+const TRACES_PATH  = '.claude/context/traces.json';
+
+// Debounce: coalesce rapid successive writes into a single broadcast.
+let broadcastTimer = null;
+function scheduleBroadcast() {
+  clearTimeout(broadcastTimer);
+  broadcastTimer = setTimeout(broadcastDashboard, 120);
+}
+
+function watchFile(filePath) {
+  // Ensure the file exists so fs.watch doesn't throw.
+  if (!fs.existsSync(filePath)) {
+    fs.mkdirSync(new URL('.', new URL(filePath, import.meta.url)).pathname, { recursive: true });
+    fs.writeFileSync(filePath, filePath.endsWith('traces.json') ? '{}' : '{}');
+  }
+  fs.watch(filePath, { persistent: false }, scheduleBroadcast);
+}
+
+watchFile(METRICS_PATH);
+watchFile(TRACES_PATH);
+
+// ─── Health ──────────────────────────────────────────────────────────────────
 
 /**
  * ❤️ Health Check — intentionally public, no key required.
@@ -245,6 +320,9 @@ app.post('/review/:workflowId/:stepId/resolve', async (req, res) => {
       }
     }
 
+    // Push updated review queue to all dashboard clients immediately.
+    scheduleBroadcast();
+
     res.json({ status: 'ok', record });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -278,7 +356,11 @@ app.get('/traces', (req, res) => {
 });
 
 /**
- * 📊 Observability Dashboard (HTML)
+ * 📊 Observability Dashboard (HTML) — WebSocket-push edition
+ *
+ * The browser opens a single WebSocket to /ws.  The server pushes
+ * { metrics, traces, reviewQueue } whenever metrics.json or traces.json
+ * changes on disk (via fs.watch + 120 ms debounce).  No HTTP polling.
  */
 app.get('/dashboard', (_req, res) => {
   res.setHeader('Content-Type', 'text/html');
@@ -293,10 +375,10 @@ app.get('/dashboard', (_req, res) => {
   body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;padding:24px}
   h1{font-size:1.5rem;font-weight:700;margin-bottom:4px;color:#a78bfa}
   .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:8px}
-  .poll-controls{display:flex;align-items:center;gap:10px;font-size:.8rem;color:#94a3b8}
-  .poll-controls select{background:#1e2130;color:#e2e8f0;border:1px solid #2d3148;border-radius:5px;padding:3px 8px;font-size:.8rem}
-  .poll-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;background:#34d399;margin-right:4px}
-  .poll-indicator.paused{background:#f87171}
+  .ws-controls{display:flex;align-items:center;gap:10px;font-size:.8rem;color:#94a3b8}
+  .ws-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;background:#f87171;margin-right:4px;transition:background .3s}
+  .ws-indicator.open{background:#34d399}
+  .ws-indicator.connecting{background:#fb923c}
   .last-updated{font-size:.75rem;color:#64748b}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:28px}
   .card{background:#1e2130;border-radius:10px;padding:18px;border:1px solid #2d3148}
@@ -310,102 +392,68 @@ app.get('/dashboard', (_req, res) => {
   .badge.success{background:#064e3b;color:#34d399} .badge.failure{background:#450a0a;color:#f87171} .badge.running{background:#1e3a5f;color:#60a5fa}
   h2{font-size:1rem;font-weight:600;color:#a78bfa;margin-bottom:12px}
   .section{margin-bottom:28px}
-  .btn-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   button{background:#a78bfa;color:#0f1117;border:none;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer;font-size:.85rem}
   button:hover{background:#c4b5fd}
   button.secondary{background:#1e2130;color:#a78bfa;border:1px solid #a78bfa}
   button.secondary:hover{background:#252840}
   .err{color:#f87171;font-size:.85rem;margin-top:8px}
-  .review-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:600;background:#7c2d12;color:#fb923c}
   .review-count{background:#fb923c;color:#0f1117;border-radius:999px;padding:1px 7px;font-size:.75rem;font-weight:700;margin-left:6px}
   .resolve-btn{padding:3px 10px;font-size:.75rem;border-radius:5px;cursor:pointer;border:none;font-weight:600}
   .resolve-btn.resolved{background:#064e3b;color:#34d399}
   .resolve-btn.skipped{background:#1e3a5f;color:#60a5fa}
   .resolve-btn.retrying{background:#3b1f6e;color:#a78bfa}
   .resolve-btn:hover{filter:brightness(1.2)}
-  .progress-bar{height:3px;background:#2d3148;border-radius:2px;overflow:hidden;margin-bottom:20px}
-  .progress-fill{height:100%;background:#a78bfa;transition:width linear}
 </style>
 </head>
 <body>
 <div class="topbar">
   <div>
     <h1>⚡ Aegis Observability</h1>
-    <span class="last-updated" id="lastUpdated">Never updated</span>
+    <span class="last-updated" id="lastUpdated">Connecting…</span>
   </div>
-  <div class="poll-controls">
-    <span><span class="poll-indicator" id="pollDot"></span><span id="pollStatus">Live</span></span>
-    <label for="intervalSelect">every</label>
-    <select id="intervalSelect">
-      <option value="3000">3 s</option>
-      <option value="5000" selected>5 s</option>
-      <option value="10000">10 s</option>
-      <option value="30000">30 s</option>
-      <option value="60000">60 s</option>
-    </select>
-    <button class="secondary" id="toggleBtn" onclick="togglePoll()">⏸ Pause</button>
-    <button onclick="load()">↻ Now</button>
+  <div class="ws-controls">
+    <span><span class="ws-indicator connecting" id="wsDot"></span><span id="wsStatus">Connecting</span></span>
+    <button class="secondary" id="reconnectBtn" onclick="connect()" style="display:none">↻ Reconnect</button>
   </div>
 </div>
-<div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
-<div id="app"><p style="color:#94a3b8">Loading…</p></div>
+<div id="app"><p style="color:#94a3b8">Waiting for server push…</p></div>
 
 <script>
-let pollTimer = null;
-let progressTimer = null;
-let paused = false;
-let intervalMs = 5000;
+let ws = null;
 
-function fmt(d){
+function fmt(d) {
   return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 
-function startProgress() {
-  clearInterval(progressTimer);
-  const fill = document.getElementById('progressFill');
-  const start = Date.now();
-  fill.style.transition = 'none';
-  fill.style.width = '0%';
-  progressTimer = setInterval(() => {
-    const pct = Math.min(100, ((Date.now() - start) / intervalMs) * 100);
-    fill.style.width = pct + '%';
-    if (pct >= 100) clearInterval(progressTimer);
-  }, 100);
+function setStatus(state) {
+  const dot = document.getElementById('wsDot');
+  const lbl = document.getElementById('wsStatus');
+  const btn = document.getElementById('reconnectBtn');
+  dot.className = 'ws-indicator ' + state;
+  lbl.textContent = state === 'open' ? 'Live' : state === 'connecting' ? 'Connecting' : 'Disconnected';
+  btn.style.display = state === 'closed' ? '' : 'none';
 }
 
-function schedulePoll() {
-  clearTimeout(pollTimer);
-  if (!paused) {
-    startProgress();
-    pollTimer = setTimeout(() => { load(); }, intervalMs);
-  }
-}
+function connect() {
+  if (ws && ws.readyState < 2) ws.close();
+  setStatus('connecting');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws');
 
-function togglePoll() {
-  paused = !paused;
-  const dot = document.getElementById('pollDot');
-  const status = document.getElementById('pollStatus');
-  const btn = document.getElementById('toggleBtn');
-  const fill = document.getElementById('progressFill');
-  if (paused) {
-    clearTimeout(pollTimer);
-    clearInterval(progressTimer);
-    fill.style.width = '0%';
-    dot.classList.add('paused');
-    status.textContent = 'Paused';
-    btn.textContent = '▶ Resume';
-  } else {
-    dot.classList.remove('paused');
-    status.textContent = 'Live';
-    btn.textContent = '⏸ Pause';
-    load();
-  }
-}
+  ws.onopen  = () => setStatus('open');
+  ws.onclose = () => { setStatus('closed'); setTimeout(connect, 3000); /* auto-reconnect */ };
+  ws.onerror = () => ws.close();
 
-document.getElementById('intervalSelect').addEventListener('change', function() {
-  intervalMs = parseInt(this.value, 10);
-  if (!paused) { clearTimeout(pollTimer); load(); }
-});
+  ws.onmessage = (evt) => {
+    try {
+      const { metrics, traces, reviewQueue } = JSON.parse(evt.data);
+      render(metrics, traces, reviewQueue?.items ?? []);
+      document.getElementById('lastUpdated').textContent = 'Updated ' + fmt(new Date());
+    } catch(e) {
+      console.error('ws parse error', e);
+    }
+  };
+}
 
 async function resolve(workflowId, stepId, resolution) {
   const row = document.getElementById(\`rq-\${workflowId}-\${stepId}\`);
@@ -420,127 +468,107 @@ async function resolve(workflowId, stepId, resolution) {
       const err = await resp.json().catch(() => ({ error: 'Unknown error' }));
       alert(\`Resolve failed: \${err.error}\`);
       if (row) row.style.opacity = '1';
-    } else {
-      if (row) row.remove();
-      // Decrement the badge counts
-      const badge = document.querySelector('.review-count');
-      const metricVal = document.querySelector('.card .value[style*="fb923c"]');
-      if (badge) badge.textContent = Math.max(0, parseInt(badge.textContent) - 1);
-      if (metricVal) metricVal.textContent = Math.max(0, parseInt(metricVal.textContent) - 1);
     }
+    // No need to manually update the UI — the server will push a fresh
+    // payload via WebSocket as soon as the review file changes.
   } catch(e) {
     alert('Network error: ' + e.message);
     if (row) row.style.opacity = '1';
   }
 }
 
-async function load() {
-  try {
-    const [metrics, traces, reviewData] = await Promise.all([
-      fetch('/metrics').then(r=>r.json()),
-      fetch('/traces?limit=30').then(r=>r.json()),
-      fetch('/review-queue?status=pending&limit=50').then(r=>r.json()),
-    ]);
-    const reviewItems = reviewData.items ?? [];
+function render(metrics, traces, reviewItems) {
+  const byAgent     = metrics.byAgent     ?? {};
+  const recentSteps = metrics.recentSteps ?? [];
 
-    const byAgent = metrics.byAgent ?? {};
-    const recentSteps = metrics.recentSteps ?? [];
+  document.getElementById('app').innerHTML = \`
+    <div class="grid">
+      <div class="card"><div class="label">Total Jobs</div><div class="value blue">\${metrics.total ?? 0}</div></div>
+      <div class="card"><div class="label">Success</div><div class="value green">\${metrics.success ?? 0}</div></div>
+      <div class="card"><div class="label">Failed</div><div class="value red">\${metrics.failed ?? 0}</div></div>
+      <div class="card"><div class="label">Retries</div><div class="value">\${metrics.retries ?? 0}</div></div>
+      <div class="card"><div class="label">Success Rate</div><div class="value green">\${metrics.successRate ?? 0}%</div></div>
+      <div class="card"><div class="label">Avg Latency</div><div class="value blue">\${metrics.avgLatency ?? 0}ms</div></div>
+      <div class="card"><div class="label">Needs Review</div><div class="value" style="color:#fb923c">\${reviewItems.length}</div></div>
+    </div>
 
-    document.getElementById('app').innerHTML = \`
-      <div class="grid">
-        <div class="card"><div class="label">Total Jobs</div><div class="value blue">\${metrics.total ?? 0}</div></div>
-        <div class="card"><div class="label">Success</div><div class="value green">\${metrics.success ?? 0}</div></div>
-        <div class="card"><div class="label">Failed</div><div class="value red">\${metrics.failed ?? 0}</div></div>
-        <div class="card"><div class="label">Retries</div><div class="value">\${metrics.retries ?? 0}</div></div>
-        <div class="card"><div class="label">Success Rate</div><div class="value green">\${metrics.successRate ?? 0}%</div></div>
-        <div class="card"><div class="label">Avg Latency</div><div class="value blue">\${metrics.avgLatency ?? 0}ms</div></div>
-        <div class="card"><div class="label">Needs Review</div><div class="value" style="color:#fb923c">\${reviewItems.length}</div></div>
-      </div>
+    <div class="section">
+      <h2>Per-Agent Latency</h2>
+      \${Object.keys(byAgent).length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No agent data yet.</p>' : \`
+      <table>
+        <thead><tr><th>Agent</th><th>Calls</th><th>Avg ms</th></tr></thead>
+        <tbody>
+          \${Object.entries(byAgent).map(([a,v])=>\`<tr><td>\${a}</td><td>\${v.count}</td><td>\${v.avgMs}</td></tr>\`).join('')}
+        </tbody>
+      </table>\`}
+    </div>
 
-      <div class="section">
-        <h2>Per-Agent Latency</h2>
-        \${Object.keys(byAgent).length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No agent data yet.</p>' : \`
-        <table>
-          <thead><tr><th>Agent</th><th>Calls</th><th>Avg ms</th></tr></thead>
-          <tbody>
-            \${Object.entries(byAgent).map(([a,v])=>\`<tr><td>\${a}</td><td>\${v.count}</td><td>\${v.avgMs}</td></tr>\`).join('')}
-          </tbody>
-        </table>\`}
-      </div>
+    <div class="section">
+      <h2>Recent Step Spans</h2>
+      \${recentSteps.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No completed steps yet.</p>' : \`
+      <table>
+        <thead><tr><th>Step</th><th>Agent</th><th>Duration ms</th><th>Status</th></tr></thead>
+        <tbody>
+          \${recentSteps.slice().reverse().map(s=>\`
+            <tr>
+              <td title="\${s.stepId}">\${s.stepId}</td>
+              <td>\${s.agent ?? '—'}</td>
+              <td>\${s.durationMs ?? '—'}</td>
+              <td><span class="badge \${s.status}">\${s.status}</span></td>
+            </tr>\`).join('')}
+        </tbody>
+      </table>\`}
+    </div>
 
-      <div class="section">
-        <h2>Recent Step Spans</h2>
-        \${recentSteps.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No completed steps yet.</p>' : \`
-        <table>
-          <thead><tr><th>Step</th><th>Agent</th><th>Duration ms</th><th>Status</th></tr></thead>
-          <tbody>
-            \${recentSteps.slice().reverse().map(s=>\`
-              <tr>
-                <td title="\${s.stepId}">\${s.stepId}</td>
-                <td>\${s.agent ?? '—'}</td>
-                <td>\${s.durationMs ?? '—'}</td>
-                <td><span class="badge \${s.status}">\${s.status}</span></td>
-              </tr>\`).join('')}
-          </tbody>
-        </table>\`}
-      </div>
+    <div class="section">
+      <h2>Traces (step → agent → patch → test)</h2>
+      \${traces.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No traces yet.</p>' : \`
+      <table>
+        <thead><tr><th>Workflow</th><th>Spans</th><th>Status</th><th>Link</th></tr></thead>
+        <tbody>
+          \${traces.map(t => {
+            const spans = Object.values(t.spans ?? {});
+            const anyRunning = spans.some(s=>s.status==='running');
+            const anyFailed  = spans.some(s=>s.status==='failure');
+            const overall = anyRunning ? 'running' : anyFailed ? 'failure' : 'success';
+            return \`<tr>
+              <td title="\${t.traceId}">\${t.traceId.slice(0,12)}…</td>
+              <td>\${spans.length}</td>
+              <td><span class="badge \${overall}">\${overall}</span></td>
+              <td><a href="/trace/\${t.traceId}" style="color:#a78bfa">view</a></td>
+            </tr>\`;
+          }).join('')}
+        </tbody>
+      </table>\`}
+    </div>
 
-      <div class="section">
-        <h2>Traces (step → agent → patch → test)</h2>
-        \${traces.length === 0 ? '<p style="color:#94a3b8;font-size:.85rem">No traces yet.</p>' : \`
-        <table>
-          <thead><tr><th>Workflow</th><th>Spans</th><th>Status</th><th>Link</th></tr></thead>
-          <tbody>
-            \${traces.map(t => {
-              const spans = Object.values(t.spans ?? {});
-              const anyRunning = spans.some(s=>s.status==='running');
-              const anyFailed  = spans.some(s=>s.status==='failure');
-              const overall = anyRunning ? 'running' : anyFailed ? 'failure' : 'success';
-              return \`<tr>
-                <td title="\${t.traceId}">\${t.traceId.slice(0,12)}…</td>
-                <td>\${spans.length}</td>
-                <td><span class="badge \${overall}">\${overall}</span></td>
-                <td><a href="/trace/\${t.traceId}" style="color:#a78bfa">view</a></td>
-              </tr>\`;
-            }).join('')}
-          </tbody>
-        </table>\`}
-      </div>
-
-      <div class="section">
-        <h2>👁 Review Queue <span class="review-count">\${reviewItems.length}</span></h2>
-        \${reviewItems.length === 0
-          ? '<p style="color:#94a3b8;font-size:.85rem">No items pending human review. ✅</p>'
-          : \`<table>
-          <thead><tr><th>Workflow</th><th>Step</th><th>Agent</th><th>Error</th><th>Flagged</th><th>Actions</th></tr></thead>
-          <tbody>
-            \${reviewItems.map(item => \`
-              <tr id="rq-\${item.workflowId}-\${item.stepId}">
-                <td title="\${item.workflowId}">\${item.workflowId.slice(0,10)}…</td>
-                <td title="\${item.stepId}">\${item.stepId.slice(0,14)}…</td>
-                <td>\${item.agent ?? '—'}</td>
-                <td title="\${item.error ?? ''}" style="color:#fca5a5;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\${item.error ? item.error.slice(0,60) + (item.error.length > 60 ? '…' : '') : '—'}</td>
-                <td style="color:#94a3b8;white-space:nowrap">\${new Date(item.flaggedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</td>
-                <td style="display:flex;gap:6px;flex-wrap:wrap">
-                  <button class="resolve-btn resolved" onclick="resolve('\${item.workflowId}','\${item.stepId}','resolved')">✓ Resolved</button>
-                  <button class="resolve-btn skipped" onclick="resolve('\${item.workflowId}','\${item.stepId}','skipped')">⏭ Skip</button>
-                  <button class="resolve-btn retrying" onclick="resolve('\${item.workflowId}','\${item.stepId}','retrying')">↻ Retry</button>
-                </td>
-              </tr>\`).join('')}
-          </tbody>
-        </table>\`}
-      </div>
-    \`;
-
-    document.getElementById('lastUpdated').textContent = 'Updated ' + fmt(new Date());
-    schedulePoll();
-  } catch(e) {
-    document.getElementById('app').innerHTML = '<p class="err">Fetch error: ' + e.message + '</p>';
-    schedulePoll(); // keep trying even on error
-  }
+    <div class="section">
+      <h2>👁 Review Queue <span class="review-count">\${reviewItems.length}</span></h2>
+      \${reviewItems.length === 0
+        ? '<p style="color:#94a3b8;font-size:.85rem">No items pending human review. ✅</p>'
+        : \`<table>
+        <thead><tr><th>Workflow</th><th>Step</th><th>Agent</th><th>Error</th><th>Flagged</th><th>Actions</th></tr></thead>
+        <tbody>
+          \${reviewItems.map(item => \`
+            <tr id="rq-\${item.workflowId}-\${item.stepId}">
+              <td title="\${item.workflowId}">\${item.workflowId.slice(0,10)}…</td>
+              <td title="\${item.stepId}">\${item.stepId.slice(0,14)}…</td>
+              <td>\${item.agent ?? '—'}</td>
+              <td title="\${item.error ?? ''}" style="color:#fca5a5;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\${item.error ? item.error.slice(0,60) + (item.error.length > 60 ? '…' : '') : '—'}</td>
+              <td style="color:#94a3b8;white-space:nowrap">\${new Date(item.flaggedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</td>
+              <td style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="resolve-btn resolved" onclick="resolve('\${item.workflowId}','\${item.stepId}','resolved')">✓ Resolved</button>
+                <button class="resolve-btn skipped"  onclick="resolve('\${item.workflowId}','\${item.stepId}','skipped')">⏭ Skip</button>
+                <button class="resolve-btn retrying" onclick="resolve('\${item.workflowId}','\${item.stepId}','retrying')">↻ Retry</button>
+              </td>
+            </tr>\`).join('')}
+        </tbody>
+      </table>\`}
+    </div>
+  \`;
 }
 
-load();
+connect();
 </script>
 </body>
 </html>`);
@@ -618,7 +646,8 @@ app.get('/concurrency/:id', async (req, res) => {
 await seedTenantsFromEnv();
 await initVectorIndex();
 
-app.listen(3000, () => {
+// Use httpServer (not app.listen) so Express and WebSocket share port 3000.
+httpServer.listen(3000, () => {
   console.log('🚀 Aegis server running on http://localhost:3000');
   console.log('  POST /task                          – submit task');
   console.log('  POST /pause/:id                     – pause workflow');
@@ -630,9 +659,10 @@ app.listen(3000, () => {
   console.log('  GET  /metrics                       – system metrics (per-agent, per-step)');
   console.log('  GET  /traces                        – list recent traces');
   console.log('  GET  /trace/:id                     – full trace for a workflow');
-  console.log('  GET  /dashboard                     – observability dashboard (HTML)');
+  console.log('  GET  /dashboard                     – observability dashboard (WebSocket-push)');
   console.log('  GET  /jobs                          – job list');
   console.log('  GET  /concurrency/:id               – slot usage for a workflow');
   console.log('  GET  /tenants                       – list registered tenants');
   console.log('  POST /tenants                       – register a tenant at runtime');
+  console.log('  WS   /ws                            – dashboard push channel');
 });
