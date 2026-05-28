@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { getTaskQueue, getDeadLetterQueue, addStep } from '../engine/queue.js';
-import { ensureWorkflowBranch, commitChanges, rollbackLastCommit } from '../engine/git.js';
+import { ensureWorkflowBranch, commitChanges, rollbackLastCommit, finaliseWorkflow } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from '../engine/metrics.js';
 import { startSpan, attachPatch, attachTestResult, endSpan } from '../engine/tracer.js';
@@ -216,10 +216,23 @@ function getWorker(tenantId) {
             return { awaitingApproval: true, reason: gate.reason };
           }
 
-          const lock = await acquireLock(file, tenant);
+          // FIX: acquireLock guards file-level writes; ensureWorkflowBranch
+          // now returns its own worktree lock that must be released separately.
+          // Both locks are held during apply+commit so no other worker can
+          // checkout a different branch mid-write.
+          const fileLock = await acquireLock(file, tenant);
+
+          // worktreeLock is released inside the finally block below.
+          // It is declared outside the inner try so rollback can also use cwd.
+          let worktreeLock = null;
+          let cwd = null;
 
           try {
-            const { cwd } = ensureWorkflowBranch(workflowId, tenant);
+            // ensureWorkflowBranch acquires the Redis worktree lock and checks
+            // out the branch atomically — concurrent workers on the same workflow
+            // will queue here rather than clobbering each other's checkout.
+            ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
+
             applyPatch(file, content);
             commitChanges(`Aegis: ${step.id}`, cwd);
 
@@ -245,13 +258,27 @@ function getWorker(tenantId) {
                 await addStep(workflowId, next, job.opts?.priority ?? 5, tenant);
               }
 
+              // FIX: when no more steps remain the workflow is complete —
+              // squash-merge the workflow branch into the tenant base branch
+              // and delete it so branches don't accumulate indefinitely.
+              // finaliseWorkflow acquires the worktree lock internally, so we
+              // release ours first to avoid a self-deadlock.
+              if (nextSteps.length === 0) {
+                try { await worktreeLock.release(); } catch { /* best-effort */ }
+                worktreeLock = null;
+                await finaliseWorkflow(workflowId, tenant);
+              }
+
             } else {
               lastError = testResult.output;
               rollbackLastCommit(cwd);
             }
 
           } finally {
-            await releaseLock(lock);
+            if (worktreeLock) {
+              try { await worktreeLock.release(); } catch { /* best-effort */ }
+            }
+            await releaseLock(fileLock);
           }
         } // end while
 
