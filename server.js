@@ -12,7 +12,8 @@ import {
   cancelWorkflow,
   getWorkflowStatus,
   getReviewQueue,
-  resolveReview
+  resolveReview,
+  resetStepForRetry
 } from './engine/workflow-store.js';
 import { initVectorIndex } from './engine/vector-memory.js';
 import { runSystem } from './engine/orchestrator.js';
@@ -204,13 +205,18 @@ app.post('/review/:workflowId/:stepId/resolve', async (req, res) => {
     const wf = await getWorkflow(workflowId);
     const tenantId = wf?.tenantId ?? undefined;
 
-    // If retrying: reset step to pending and re-queue it
+    // If retrying: reset step to pending + zero the attempt counter, then re-queue.
+    // resetStepForRetry() writes status='pending' and attempt=0 atomically and
+    // returns the updated step, so addStep() always receives a clean payload.
+    // Using the returned step (rather than wf.steps.find) avoids passing a
+    // stale object that still carries status='needs-review' and the old attempt
+    // value — which would cause agentForAttempt() to route to escalationAgent
+    // or fallbackAgent instead of the step's own agent on the very first retry.
     if (resolution === 'retrying') {
       if (wf) {
-        const step = wf.steps.find(s => s.id === stepId);
-        if (step) {
-          await updateStep(workflowId, stepId, 'pending');
-          await addStep(workflowId, step, wf.priority ?? Priority.NORMAL, tenantId);
+        const freshStep = await resetStepForRetry(workflowId, stepId);
+        if (freshStep) {
+          await addStep(workflowId, freshStep, wf.priority ?? Priority.NORMAL, tenantId);
         }
       }
     }
