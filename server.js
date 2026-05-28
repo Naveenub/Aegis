@@ -24,6 +24,7 @@ import { slotStatus, getLimit } from './engine/concurrency.js';
 import { finaliseWorkflow } from './engine/git.js';
 import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
 import { getWorker } from './workers/agent-worker.js';
+import { getDlqWorker } from './workers/dlq-worker.js';
 
 const app = express();
 app.use(express.json());
@@ -604,8 +605,12 @@ app.post('/tenants', async (req, res) => {
 
     const { created } = await registerTenant(tenantId, { label });
 
-    // Boot (or no-op if already running) the BullMQ worker for this tenant
+    // Boot (or no-op if already running) workers for this tenant.
+    // getDlqWorker must be called here so the per-tenant DLQ queue
+    // "aegis-dead-letter:{tenantId}" is consumed immediately after registration,
+    // rather than waiting for the next server restart.
     getWorker(tenantId);
+    getDlqWorker(tenantId);
 
     // Ensure the vector index exists for the new tenant
     await initVectorIndex(tenantId);
