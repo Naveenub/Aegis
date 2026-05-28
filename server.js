@@ -50,12 +50,15 @@ app.post('/resume/:id', async (req, res) => {
       return res.status(409).json({ error: 'Workflow not found or not paused' });
     }
 
+    const wf = await getWorkflow(id);
+    const priority = wf?.priority ?? Priority.NORMAL;
+
     const steps = await getRunnableSteps(id);
     for (const step of steps) {
-      await addStep(id, step);
+      await addStep(id, step, priority);
     }
 
-    res.json({ status: 'resumed', workflowId: id, stepsScheduled: steps.length });
+    res.json({ status: 'resumed', workflowId: id, stepsScheduled: steps.length, priority });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -187,7 +190,7 @@ app.post('/review/:workflowId/:stepId/resolve', async (req, res) => {
           // Reset step to pending so the worker processes it
           const { updateStep } = await import('./engine/workflow-store.js');
           await updateStep(workflowId, stepId, 'pending');
-          await addStep(workflowId, step);
+          await addStep(workflowId, step, wf.priority ?? Priority.NORMAL);
         }
       }
     }
