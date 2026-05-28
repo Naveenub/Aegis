@@ -314,6 +314,13 @@ app.get('/dashboard', (_req, res) => {
   button.secondary{background:#1e2130;color:#a78bfa;border:1px solid #a78bfa}
   button.secondary:hover{background:#252840}
   .err{color:#f87171;font-size:.85rem;margin-top:8px}
+  .review-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:600;background:#7c2d12;color:#fb923c}
+  .review-count{background:#fb923c;color:#0f1117;border-radius:999px;padding:1px 7px;font-size:.75rem;font-weight:700;margin-left:6px}
+  .resolve-btn{padding:3px 10px;font-size:.75rem;border-radius:5px;cursor:pointer;border:none;font-weight:600}
+  .resolve-btn.resolved{background:#064e3b;color:#34d399}
+  .resolve-btn.skipped{background:#1e3a5f;color:#60a5fa}
+  .resolve-btn.retrying{background:#3b1f6e;color:#a78bfa}
+  .resolve-btn:hover{filter:brightness(1.2)}
   .progress-bar{height:3px;background:#2d3148;border-radius:2px;overflow:hidden;margin-bottom:20px}
   .progress-fill{height:100%;background:#a78bfa;transition:width linear}
 </style>
@@ -398,12 +405,41 @@ document.getElementById('intervalSelect').addEventListener('change', function() 
   if (!paused) { clearTimeout(pollTimer); load(); }
 });
 
+async function resolve(workflowId, stepId, resolution) {
+  const row = document.getElementById(\`rq-\${workflowId}-\${stepId}\`);
+  if (row) row.style.opacity = '0.4';
+  try {
+    const resp = await fetch(\`/review/\${workflowId}/\${stepId}/resolve\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolution })
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: 'Unknown error' }));
+      alert(\`Resolve failed: \${err.error}\`);
+      if (row) row.style.opacity = '1';
+    } else {
+      if (row) row.remove();
+      // Decrement the badge counts
+      const badge = document.querySelector('.review-count');
+      const metricVal = document.querySelector('.card .value[style*="fb923c"]');
+      if (badge) badge.textContent = Math.max(0, parseInt(badge.textContent) - 1);
+      if (metricVal) metricVal.textContent = Math.max(0, parseInt(metricVal.textContent) - 1);
+    }
+  } catch(e) {
+    alert('Network error: ' + e.message);
+    if (row) row.style.opacity = '1';
+  }
+}
+
 async function load() {
   try {
-    const [metrics, traces] = await Promise.all([
+    const [metrics, traces, reviewData] = await Promise.all([
       fetch('/metrics').then(r=>r.json()),
       fetch('/traces?limit=30').then(r=>r.json()),
+      fetch('/review-queue?status=pending&limit=50').then(r=>r.json()),
     ]);
+    const reviewItems = reviewData.items ?? [];
 
     const byAgent = metrics.byAgent ?? {};
     const recentSteps = metrics.recentSteps ?? [];
@@ -416,6 +452,7 @@ async function load() {
         <div class="card"><div class="label">Retries</div><div class="value">\${metrics.retries ?? 0}</div></div>
         <div class="card"><div class="label">Success Rate</div><div class="value green">\${metrics.successRate ?? 0}%</div></div>
         <div class="card"><div class="label">Avg Latency</div><div class="value blue">\${metrics.avgLatency ?? 0}ms</div></div>
+        <div class="card"><div class="label">Needs Review</div><div class="value" style="color:#fb923c">\${reviewItems.length}</div></div>
       </div>
 
       <div class="section">
@@ -464,6 +501,30 @@ async function load() {
                 <td><a href="/trace/\${t.traceId}" style="color:#a78bfa">view</a></td>
               </tr>\`;
             }).join('')}
+          </tbody>
+        </table>\`}
+      </div>
+
+      <div class="section">
+        <h2>👁 Review Queue <span class="review-count">\${reviewItems.length}</span></h2>
+        \${reviewItems.length === 0
+          ? '<p style="color:#94a3b8;font-size:.85rem">No items pending human review. ✅</p>'
+          : \`<table>
+          <thead><tr><th>Workflow</th><th>Step</th><th>Agent</th><th>Error</th><th>Flagged</th><th>Actions</th></tr></thead>
+          <tbody>
+            \${reviewItems.map(item => \`
+              <tr id="rq-\${item.workflowId}-\${item.stepId}">
+                <td title="\${item.workflowId}">\${item.workflowId.slice(0,10)}…</td>
+                <td title="\${item.stepId}">\${item.stepId.slice(0,14)}…</td>
+                <td>\${item.agent ?? '—'}</td>
+                <td title="\${item.error ?? ''}" style="color:#fca5a5;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\${item.error ? item.error.slice(0,60) + (item.error.length > 60 ? '…' : '') : '—'}</td>
+                <td style="color:#94a3b8;white-space:nowrap">\${new Date(item.flaggedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</td>
+                <td style="display:flex;gap:6px;flex-wrap:wrap">
+                  <button class="resolve-btn resolved" onclick="resolve('\${item.workflowId}','\${item.stepId}','resolved')">✓ Resolved</button>
+                  <button class="resolve-btn skipped" onclick="resolve('\${item.workflowId}','\${item.stepId}','skipped')">⏭ Skip</button>
+                  <button class="resolve-btn retrying" onclick="resolve('\${item.workflowId}','\${item.stepId}','retrying')">↻ Retry</button>
+                </td>
+              </tr>\`).join('')}
           </tbody>
         </table>\`}
       </div>
