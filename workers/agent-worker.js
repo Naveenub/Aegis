@@ -92,7 +92,7 @@ function getWorker(tenantId) {
         await updateStep(workflowId, step.id, 'running');
 
         await recordStart(job.id);
-        await updateJob(job.id, { status: 'running' });
+        updateJob(job.id, { status: 'running' });
         await startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
 
         const policy = resolvePolicy(step);
@@ -130,7 +130,7 @@ function getWorker(tenantId) {
             throw new Error(`Workflow ${workflowId} timed out during retry ${attempt}`);
           }
 
-          await incrementRetries(job.id);
+          incrementRetries(job.id);
           await recordRetry();
 
           const activeAgent = agentForAttempt(step, policy, attempt);
@@ -158,7 +158,7 @@ function getWorker(tenantId) {
 
           if (!result.includes('PATCH:')) {
             await recordFailure(job.id);
-            await updateJob(job.id, { status: 'failed', result: 'No patch generated' });
+            updateJob(job.id, { status: 'failed', result: 'No patch generated' });
             await updateStep(workflowId, step.id, 'failed');
             throw new Error('No patch generated');
           }
@@ -170,7 +170,7 @@ function getWorker(tenantId) {
           const review = runReviewPipeline(patch);
           if (!review.ok) {
             await recordFailure(job.id);
-            await updateJob(job.id, { status: 'failed', result: review.message });
+            updateJob(job.id, { status: 'failed', result: review.message });
             await updateStep(workflowId, step.id, 'failed');
             throw new Error('System review failed');
           }
@@ -178,7 +178,7 @@ function getWorker(tenantId) {
           const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
           if (!aiReview.includes('APPROVED')) {
             await recordFailure(job.id);
-            await updateJob(job.id, { status: 'failed', result: 'AI review rejected' });
+            updateJob(job.id, { status: 'failed', result: 'AI review rejected' });
             await updateStep(workflowId, step.id, 'failed');
             throw new Error('AI review rejected');
           }
@@ -187,7 +187,7 @@ function getWorker(tenantId) {
           const opId = getOperationId(workflowId, step.id, patch);
 
           if (await isApplied(opId, tenant)) {
-            await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' });
+            updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' });
             await recordSuccess(job.id);
             await updateStep(workflowId, step.id, 'completed');
             success = true;
@@ -197,9 +197,9 @@ function getWorker(tenantId) {
           const lock = await acquireLock(file, tenant);
 
           try {
-            ensureWorkflowBranch(workflowId, tenant);
+            const { cwd } = ensureWorkflowBranch(workflowId, tenant);
             applyPatch(file, content);
-            commitChanges(`Aegis: ${step.id}`);
+            commitChanges(`Aegis: ${step.id}`, cwd);
 
             const testResult = runTests();
             await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
@@ -210,7 +210,7 @@ function getWorker(tenantId) {
               await storeMemory(step.description, patch, tenant);
               await markApplied(opId, tenant);
 
-              await updateJob(job.id, { status: 'completed', result: 'success' });
+              updateJob(job.id, { status: 'completed', result: 'success' });
               await recordSuccess(job.id);
               await recordStepEnd(step.id, 'success');
               await endSpan(workflowId, step.id, 'success');
@@ -225,7 +225,6 @@ function getWorker(tenantId) {
 
             } else {
               lastError = testResult.output;
-              const { cwd } = ensureWorkflowBranch(workflowId, tenant);
               rollbackLastCommit(cwd);
             }
 
@@ -239,7 +238,7 @@ function getWorker(tenantId) {
           await recordStepEnd(step.id, 'failure');
           await endSpan(workflowId, step.id, 'failure');
 
-          await updateJob(job.id, { status: 'failed', result: lastError });
+          updateJob(job.id, { status: 'failed', result: lastError });
           await updateStep(workflowId, step.id, 'failed');
 
           const dlq = getDeadLetterQueue(tenant);
