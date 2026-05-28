@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'fs';
 import { getMetrics } from './engine/metrics.js';
 import { getTrace, listTraces } from './engine/tracer.js';
+import { listJobs } from './engine/job-store.js';
 import {
   getWorkflow,
   getRunnableSteps,
@@ -130,12 +131,14 @@ app.get('/metrics', (req, res) => {
 
 /**
  * 📁 Job State Viewer
+ * Query: ?tenantId=default&limit=200
  */
-app.get('/jobs', (req, res) => {
+app.get('/jobs', async (req, res) => {
   try {
-    const path = '.claude/context/jobs.json';
-    if (!fs.existsSync(path)) return res.json([]);
-    res.json(JSON.parse(fs.readFileSync(path)));
+    const tenantId = req.query.tenantId ?? 'default';
+    const limit    = parseInt(req.query.limit ?? '200', 10);
+    const jobs     = await listJobs(tenantId, { limit });
+    res.json(jobs);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
