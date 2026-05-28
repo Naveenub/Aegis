@@ -49,10 +49,6 @@ export function applyPatch(file, content) {
       throw new Error('Patch too large');
     }
 
-    if (fs.existsSync(resolved)) {
-      fs.copyFileSync(resolved, resolved + '.bak');
-    }
-
     fs.writeFileSync(resolved, content);
     console.log('Updated:', resolved);
 
