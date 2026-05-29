@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
-// Lock the allowed root to the project directory at module load time.
-// Using process.cwd() at call-time is unsafe — worker processes may have
-// a different cwd than the project root.
+// PROJECT_ROOT is the fallback root used when no explicit cwd is supplied
+// (e.g. from tests or direct CLI calls).  Worker code should always pass the
+// tenant worktree path so writes land in the correct isolated directory.
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
 
 // Blocked basenames — checked against the *resolved* filename, not raw input.
@@ -13,11 +13,13 @@ const BLOCKED_NAMES = ['.env', 'secrets'];
 
 /**
  * Validate that a resolved absolute path is safe to write.
+ * @param {string} resolved  - Absolute path that will be written.
+ * @param {string} [root]    - Allowed root directory.  Defaults to PROJECT_ROOT.
  * Returns null on success, or an error string on failure.
  */
-export function validateTargetPath(resolved) {
-  // 1. Must stay inside the project root (path traversal guard).
-  if (!resolved.startsWith(PROJECT_ROOT + path.sep)) {
+export function validateTargetPath(resolved, root = PROJECT_ROOT) {
+  // 1. Must stay inside the allowed root (path traversal guard).
+  if (!resolved.startsWith(root + path.sep)) {
     return `Path traversal blocked: ${resolved}`;
   }
 
@@ -35,11 +37,21 @@ export function parsePatch(patch) {
   return JSON.parse(patch);
 }
 
-export function applyPatch(file, content) {
+/**
+ * Write `content` to `file` inside the given worktree root.
+ * @param {string} file     - Relative path supplied by the patch (e.g. "src/foo.js").
+ * @param {string} content  - File content to write.
+ * @param {string} [cwd]    - Absolute path to the tenant worktree.  Defaults to
+ *                            PROJECT_ROOT so direct / test callers keep working,
+ *                            but every worker call MUST pass the worktree path
+ *                            returned by ensureWorkflowBranch() to stay isolated.
+ */
+export function applyPatch(file, content, cwd = PROJECT_ROOT) {
   try {
-    const resolved = path.resolve(PROJECT_ROOT, file);
+    const root     = path.resolve(cwd);           // normalise (removes trailing sep, etc.)
+    const resolved = path.resolve(root, file);
 
-    const pathError = validateTargetPath(resolved);
+    const pathError = validateTargetPath(resolved, root);
     if (pathError) {
       console.log('Security block —', pathError);
       return;
