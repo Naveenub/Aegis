@@ -18,6 +18,17 @@ It combines AI agents (planner, debugger, reviewer), workflow orchestration (DAG
 
 ---
 
+## 🆕 What's New in v1.4.0
+
+- **Per-tenant rate limiting** — dual-layer rolling-window + burst limiter with per-tenant key isolation; all limits configurable via env vars
+- **Concurrency test coverage** — full unit test suite for `concurrency.js` covering slot acquisition, limit enforcement, stale pruning, and timeout paths (Redis fully mocked)
+- **Dual-layer burst protection** — `taskRateLimiter` middleware now chains a 5-second burst cap (default 20 req/5s) before the rolling window limiter
+- **Rate limit env config** — `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `RATE_LIMIT_BURST_MS`, `RATE_LIMIT_BURST_MAX` are all runtime-tunable without code changes
+- **RFC 6585 rate limit headers** — `RateLimit-*` standard headers returned; legacy `X-RateLimit-*` disabled
+- **Pipeline test suite** — `tests/pipeline.test.js` covering end-to-end workflow execution paths
+
+---
+
 ## 🧠 Core Capabilities
 
 ### 1. Autonomous Execution
@@ -131,6 +142,14 @@ checkpoint → apply → test → rollback (if fail)
 - Bearer token and `x-api-key` header support via `AEGIS_API_KEY`
 - All routes except `GET /health` require a valid key
 - Health endpoint intentionally public for load-balancer probes
+
+### 16. Per-Tenant Rate Limiting *(new in v1.4.0)*
+
+- Dual-layer middleware: rolling window + short-burst cap
+- Tenant-keyed throttling; falls back to API key → IP
+- RFC 6585 standard `RateLimit-*` response headers
+- Health endpoint always bypassed
+- All thresholds configurable at runtime via env vars
 
 ---
 
@@ -264,7 +283,8 @@ aegis/
 │   ├── repo-scanner.js               # Repository scanning
 │   └── test-runner.js                # Test execution engine
 ├── middleware/
-│   └── auth.js                       # Bearer token / x-api-key authentication
+│   ├── auth.js                       # Bearer token / x-api-key authentication
+│   └── rate-limit.js                 # Per-tenant rate limiting (rolling + burst)
 ├── workers/                          # Execution layer
 │   ├── agent-worker.js               # Core worker (self-healing loop)
 │   └── dlq-worker.js                 # Dead Letter Queue processor
@@ -272,7 +292,8 @@ aegis/
 │   ├── pipeline.sh
 │   └── dlq-inspect.js
 ├── tests/
-│   └── pipeline.test.js
+│   ├── pipeline.test.js              # End-to-end pipeline tests
+│   └── concurrency.test.js           # Concurrency unit tests (mocked Redis)
 ├── server.js                         # API server + dashboard endpoints
 ├── package.json
 ├── .env.example
@@ -410,6 +431,10 @@ node scripts/dlq-inspect.js
 | `AEGIS_CONCURRENCY_LEASE_MS` | `120000` | Semaphore slot lease (ms) |
 | `AEGIS_MEMORY_TTL_DAYS` | `30` | Days before vector memory entries are evicted |
 | `AEGIS_EVICTION_INTERVAL_HOURS` | `1` | How often the memory eviction cron runs |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Rolling rate-limit window (ms) |
+| `RATE_LIMIT_MAX` | `60` | Max requests per rolling window |
+| `RATE_LIMIT_BURST_MS` | `5000` | Burst window (ms) |
+| `RATE_LIMIT_BURST_MAX` | `20` | Max requests in burst window |
 
 ---
 
@@ -451,6 +476,7 @@ node scripts/dlq-inspect.js
 - Patch security (path traversal prevention, size limit, lint + test gate)
 - Memory system (RAG with TTL eviction and background cron)
 - API key authentication (Bearer token + `x-api-key`)
+- Per-tenant rate limiting with burst protection (v1.4.0)
 - Built-in dashboard and full observability API
 
 ## ⚠️ Known Gaps
@@ -460,7 +486,7 @@ node scripts/dlq-inspect.js
 - No observability dashboard beyond the basic built-in endpoint
 - Memory ranking is basic (embedding quality and reranking not tuned)
 
-## 🧭 Roadmap — v1.4+
+## 🧭 Roadmap — v1.5+
 
 - Database-backed workflow store (Postgres/Redis)
 - Branch-based Git execution (per-workflow branches)
