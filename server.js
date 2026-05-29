@@ -3,6 +3,7 @@ import express from 'express';
 import fs from 'fs';
 import { WebSocketServer } from 'ws';
 import { requireApiKey, optionalApiKey } from './middleware/auth.js';
+import { taskRateLimiter } from './middleware/rate-limit.js';
 import { getMetrics } from './engine/metrics.js';
 import { getTrace, listTraces } from './engine/tracer.js';
 import { listJobs } from './engine/job-store.js';
@@ -121,7 +122,7 @@ app.use(requireApiKey);
  * Body: { task, priority?, timeoutMs? }
  * priority: "critical" | "high" | "normal" | "low"  (default: normal)
  */
-app.post('/task', async (req, res) => {
+app.post('/task', taskRateLimiter, async (req, res) => {
   try {
     const { task, priority = 'normal', timeoutMs, tenantId } = req.body;
 
