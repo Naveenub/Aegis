@@ -246,7 +246,7 @@ function getWorker(tenantId) {
             // will queue here rather than clobbering each other's checkout.
             ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
 
-            applyPatch(file, content);
+            applyPatch(file, content, cwd);
             commitChanges(`Aegis: ${step.id}`, cwd);
 
             // FIX: run tests in the tenant worktree (cwd), scoped to the
