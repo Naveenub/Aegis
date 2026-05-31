@@ -46,19 +46,20 @@ function readFileSafe(filePath) {
  *
  * Build a compact repo map and inline relevant file content for prompt injection.
  *
- * FIX: `cwd` is now threaded through from `runAgent` so that both the repo
- * map and the inlined file content are scoped to the tenant worktree rather
- * than the main repository working tree (process.cwd()).
- *
- * When `cwd` is omitted (e.g. the planner call which has no worktree yet)
- * the function falls back to process.cwd() — same behaviour as before.
+ * FIX (async): `scanRepo` is now async (uses fs.promises.readdir with
+ * withFileTypes), so this function is async too. The single awaited scan
+ * result is used for both the repo map and the inlined file sections —
+ * eliminating the previous double-scan bug where `buildRepoContext` was
+ * called twice in `runAgent`, causing two full synchronous directory walks
+ * per agent invocation.
  *
  * @param {string[]} relevantFiles - Paths to inline in full (relative or absolute).
  * @param {string}   [cwd]         - Root to scan and resolve relative paths against.
  *                                   Defaults to process.cwd().
+ * @returns {Promise<{ repoMap: string, inlined: string }>}
  */
-function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
-  const allFiles = scanRepo(cwd).filter(
+async function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
+  const allFiles = (await scanRepo(cwd)).filter(
     (f) =>
       !f.includes('node_modules') &&
       !f.includes('.git') &&
@@ -114,7 +115,14 @@ export async function runAgent(
 
   const isPatchAgent = PATCH_AGENTS.has(agent);
 
-  // ── 2. Build system prompt ───────────────────────────────────────────────
+  // ── 2. Single async scan — result shared by system prompt and user message
+  //
+  // Previously buildRepoContext was called twice (once for .repoMap, once for
+  // .inlined), triggering two full synchronous directory walks per runAgent
+  // call. Now we do one async walk and destructure both fields from it.
+  const { repoMap, inlined } = await buildRepoContext(context.files ?? [], cwd);
+
+  // ── 3. Build system prompt ───────────────────────────────────────────────
   const systemPrompt = [
     agentPersona.trim(),
     '',
@@ -140,7 +148,7 @@ export async function runAgent(
           'Schema:',
           '{',
           '  "tasks": [',
-          '    { "id": "A", "agent": "<agent-name>", "description": "<clear task>", "depends_on": [] },',
+          '    { "id": "A", "agent": "<agent-name>", "description": "<clear task>", "depends_on\": [] },',
           '    ...',
           '  ]',
           '}',
@@ -159,15 +167,11 @@ export async function runAgent(
     '',
     '## Repository layout',
     '```',
-    buildRepoContext(context.files ?? [], cwd).repoMap,
+    repoMap,
     '```',
   ].join('\n');
 
-  // ── 3. Build user message ────────────────────────────────────────────────
-  // Re-use the same scan result — buildRepoContext is called once with cwd so
-  // the inlined file paths are relative to the tenant worktree, not process.cwd().
-  const { inlined } = buildRepoContext(context.files ?? [], cwd);
-
+  // ── 4. Build user message ────────────────────────────────────────────────
   const memory = await searchMemory(task, 3, tenantId);
   const memorySection =
     memory.length > 0
@@ -203,7 +207,7 @@ export async function runAgent(
     .filter(Boolean)
     .join('\n\n');
 
-  // ── 4. Call the API ──────────────────────────────────────────────────────
+  // ── 5. Call the API ──────────────────────────────────────────────────────
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8192,
