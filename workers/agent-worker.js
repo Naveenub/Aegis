@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { getTaskQueue, getDeadLetterQueue, addStep } from '../engine/queue.js';
-import { ensureWorkflowBranch, commitChanges, rollbackLastCommit, finaliseWorkflow, worktreeDir } from '../engine/git.js';
+import { ensureWorkflowBranch, commitChanges, rollbackLastCommit, finaliseWorkflow } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from '../engine/metrics.js';
 import { startSpan, attachPatch, attachTestResult, endSpan } from '../engine/tracer.js';
@@ -10,7 +10,7 @@ import { runAgent } from '../engine/agent-runner.js';
 import { runReviewPipeline } from '../engine/review-system.js';
 import { runTests } from '../engine/test-runner.js';
 import { storeMemory } from '../engine/vector-memory.js';
-import { updateJob, incrementRetries } from '../engine/job-store.js';
+import { createJob, updateJob, incrementRetries } from '../engine/job-store.js';
 import {
   updateStep,
   getRunnableSteps,
@@ -68,19 +68,6 @@ function getWorker(tenantId) {
       // addStep() in queue.js and survives queue serialisation unchanged.
       const tenant = jobTenantId ?? tenantId;
 
-      // Resolve the tenant worktree directory once here. This path is passed to
-      // every runAgent call so the repo scan and file resolution are scoped to
-      // the tenant worktree rather than the main repo working tree.
-      //
-      // The worktree directory may not exist yet when the very first step of a
-      // workflow runs — ensureWorkflowBranch creates it later. runAgent /
-      // buildRepoContext / scanRepo all handle a missing directory gracefully
-      // (scanRepo returns [] for a non-existent root; readFileSafe catches
-      // ENOENT). Once the worktree is created subsequent attempts see the full
-      // file tree. For the planner call in orchestrator.js (no worktree) the
-      // default process.cwd() fallback in runAgent continues to apply.
-      const tenantCwd = worktreeDir(tenant);
-
       // ─── Control check #1: entry gate ──────────────────────────────────────
       const entryStatus = await getWorkflowStatus(workflowId);
 
@@ -107,6 +94,11 @@ function getWorker(tenantId) {
         await updateStep(workflowId, step.id, 'running');
 
         await recordStart(job.id);
+        // Create the job record first so getJob() and GET /jobs return a result
+        // immediately — before any status transition fires. Without this call,
+        // job-store has no record until the first updateJob() below, meaning
+        // GET /jobs is always empty for in-flight jobs and getJob() returns null.
+        await createJob(job.id, step, tenant);
         await updateJob(job.id, { status: 'running' }, tenant);
         await startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
 
@@ -168,8 +160,7 @@ function getWorker(tenantId) {
             activeAgent,
             taskDescription,
             agentContext,
-            tenant,
-            tenantCwd
+            tenant
           );
 
           if (!result.includes('PATCH:')) {
@@ -204,7 +195,7 @@ function getWorker(tenantId) {
             throw new Error('System review failed');
           }
 
-          const aiReview = await runAgent('review-guard', patch, { patch }, tenant, tenantCwd);
+          const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
           if (!aiReview.includes('APPROVED')) {
             await recordFailure(job.id);
             await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
