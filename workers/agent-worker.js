@@ -174,82 +174,81 @@ function getWorker(tenantId) {
           lastPatch = patch;
           await attachPatch(workflowId, step.id, patch);
 
-          // Parse file early so we can pass it to runReviewPipeline for
-          // scoped lint. Patch is validated structurally inside the pipeline
-          // first, so a bad parse here is caught and rejected cleanly.
-          let patchedFile;
-          try { patchedFile = JSON.parse(patch).file; } catch { patchedFile = undefined; }
-
-          // FIX: pass cwd (tenant worktree) + the specific file being patched
-          // so lint and the baseline test run in the right directory and only
-          // touch the relevant file — not the whole repo in process.cwd().
-          // cwd is not yet available here (worktree checked out later), so we
-          // pass the worktree root that will be used after apply. For the
-          // pre-apply lint this lints the current worktree state which is the
-          // correct baseline. The authoritative post-apply test uses cwd below.
-          const review = runReviewPipeline(patch, undefined, patchedFile);
-          if (!review.ok) {
-            await recordFailure(job.id);
-            await updateJob(job.id, { status: 'failed', result: review.message }, tenant);
-            await updateStep(workflowId, step.id, 'failed');
-            throw new Error('System review failed');
-          }
-
-          const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
-          if (!aiReview.includes('APPROVED')) {
-            await recordFailure(job.id);
-            await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
-            await updateStep(workflowId, step.id, 'failed');
-            throw new Error('AI review rejected');
-          }
-
+          // Parse the patch to extract file + content early — needed for the
+          // scoped review pipeline and for acquireLock below.
           const { file, content } = parsePatch(patch);
           const opId = getOperationId(workflowId, step.id, patch);
 
-          if (await isApplied(opId, tenant)) {
-            await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
-            await recordSuccess(job.id);
-            await updateStep(workflowId, step.id, 'completed');
-            success = true;
-            break;
-          }
-
-          // ─── Approval gate ────────────────────────────────────────────────
-          // When MODE=approval or CLAUDE_AUTONOMY=false the patch has passed
-          // all automated checks but still needs a human sign-off before it
-          // is written to disk.  Flag the step for review and return early;
-          // the worker will pick it up again once a human resolves it via
-          // POST /review/:workflowId/:stepId/resolve { resolution: "retrying" }.
-          const gate = needsApproval(step);
-          if (gate) {
-            await flagForReview(workflowId, step.id, {
-              ...gate,
-              patch,
-              agent      : activeAgent,
-              description: step.description,
-              flaggedAt  : Date.now(),
-            });
-            await updateStep(workflowId, step.id, 'needs-review');
-            await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
-            return { awaitingApproval: true, reason: gate.reason };
-          }
-
-          // FIX: acquireLock guards file-level writes; ensureWorkflowBranch
-          // now returns its own worktree lock that must be released separately.
-          // Both locks are held during apply+commit so no other worker can
-          // checkout a different branch mid-write.
+          // Acquire both locks before the review pipeline so cwd is known.
+          // acquireLock guards file-level writes; ensureWorkflowBranch acquires
+          // the Redis worktree lock and checks out the branch atomically —
+          // concurrent workers on the same workflow queue here rather than
+          // clobbering each other's checkout.
           const fileLock = await acquireLock(file, tenant);
 
           // worktreeLock is released inside the finally block below.
-          // It is declared outside the inner try so rollback can also use cwd.
+          // Declared outside the inner try so rollback can also use cwd.
           let worktreeLock = null;
           let cwd = null;
 
           try {
-            // ensureWorkflowBranch acquires the Redis worktree lock and checks
-            // out the branch atomically — concurrent workers on the same workflow
-            // will queue here rather than clobbering each other's checkout.
             ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
+
+            // Run the structural + lint + baseline-test review pipeline now that
+            // cwd is known. Lint and the baseline test execute inside the tenant
+            // worktree (cwd), scoped to the single patched file, rather than
+            // falling back to process.cwd() and running against the main repo tree.
+            const review = runReviewPipeline(patch, cwd, file);
+            if (!review.ok) {
+              await recordFailure(job.id);
+              await updateJob(job.id, { status: 'failed', result: review.message }, tenant);
+              await updateStep(workflowId, step.id, 'failed');
+              throw new Error('System review failed');
+            }
+
+            const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
+            if (!aiReview.includes('APPROVED')) {
+              await recordFailure(job.id);
+              await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
+              await updateStep(workflowId, step.id, 'failed');
+              throw new Error('AI review rejected');
+            }
+
+            if (await isApplied(opId, tenant)) {
+              await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
+              await recordSuccess(job.id);
+              await updateStep(workflowId, step.id, 'completed');
+              success = true;
+              // Release locks before breaking — finally block handles worktreeLock
+              // only when non-null; null it here so the block skips the release.
+              try { await worktreeLock.release(); } catch { /* best-effort */ }
+              worktreeLock = null;
+              await releaseLock(fileLock);
+              break;
+            }
+
+            // —— Approval gate ————————————————————
+            // When MODE=approval or CLAUDE_AUTONOMY=false the patch has passed
+            // all automated checks but still needs a human sign-off before it
+            // is written to disk.  Flag the step for review and return early;
+            // the worker will pick it up again once a human resolves it via
+            // POST /review/:workflowId/:stepId/resolve { resolution: "retrying" }.
+            const gate = needsApproval(step);
+            if (gate) {
+              await flagForReview(workflowId, step.id, {
+                ...gate,
+                patch,
+                agent      : activeAgent,
+                description: step.description,
+                flaggedAt  : Date.now(),
+              });
+              await updateStep(workflowId, step.id, 'needs-review');
+              await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
+              // Release locks before returning — finally block runs after return.
+              try { await worktreeLock.release(); } catch { /* best-effort */ }
+              worktreeLock = null;
+              return { awaitingApproval: true, reason: gate.reason };
+            }
 
             applyPatch(file, content);
             commitChanges(`Aegis: ${step.id}`, cwd);
