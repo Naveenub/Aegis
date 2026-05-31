@@ -18,17 +18,6 @@ It combines AI agents (planner, debugger, reviewer), workflow orchestration (DAG
 
 ---
 
-## 🆕 What's New in v1.4.0
-
-- **Per-tenant rate limiting** — dual-layer rolling-window + burst limiter with per-tenant key isolation; all limits configurable via env vars
-- **Concurrency test coverage** — full unit test suite for `concurrency.js` covering slot acquisition, limit enforcement, stale pruning, and timeout paths (Redis fully mocked)
-- **Dual-layer burst protection** — `taskRateLimiter` middleware now chains a 5-second burst cap (default 20 req/5s) before the rolling window limiter
-- **Rate limit env config** — `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX`, `RATE_LIMIT_BURST_MS`, `RATE_LIMIT_BURST_MAX` are all runtime-tunable without code changes
-- **RFC 6585 rate limit headers** — `RateLimit-*` standard headers returned; legacy `X-RateLimit-*` disabled
-- **Pipeline test suite** — `tests/pipeline.test.js` covering end-to-end workflow execution paths
-
----
-
 ## 🧠 Core Capabilities
 
 ### 1. Autonomous Execution
@@ -142,14 +131,6 @@ checkpoint → apply → test → rollback (if fail)
 - Bearer token and `x-api-key` header support via `AEGIS_API_KEY`
 - All routes except `GET /health` require a valid key
 - Health endpoint intentionally public for load-balancer probes
-
-### 16. Per-Tenant Rate Limiting *(new in v1.4.0)*
-
-- Dual-layer middleware: rolling window + short-burst cap
-- Tenant-keyed throttling; falls back to API key → IP
-- RFC 6585 standard `RateLimit-*` response headers
-- Health endpoint always bypassed
-- All thresholds configurable at runtime via env vars
 
 ---
 
@@ -283,8 +264,7 @@ aegis/
 │   ├── repo-scanner.js               # Repository scanning
 │   └── test-runner.js                # Test execution engine
 ├── middleware/
-│   ├── auth.js                       # Bearer token / x-api-key authentication
-│   └── rate-limit.js                 # Per-tenant rate limiting (rolling + burst)
+│   └── auth.js                       # Bearer token / x-api-key authentication
 ├── workers/                          # Execution layer
 │   ├── agent-worker.js               # Core worker (self-healing loop)
 │   └── dlq-worker.js                 # Dead Letter Queue processor
@@ -292,8 +272,7 @@ aegis/
 │   ├── pipeline.sh
 │   └── dlq-inspect.js
 ├── tests/
-│   ├── pipeline.test.js              # End-to-end pipeline tests
-│   └── concurrency.test.js           # Concurrency unit tests (mocked Redis)
+│   └── pipeline.test.js
 ├── server.js                         # API server + dashboard endpoints
 ├── package.json
 ├── .env.example
@@ -310,11 +289,24 @@ aegis/
 npm install
 ```
 
-### 2. Start Redis
+### 2. Start Redis Stack
+
+Vector memory search requires **Redis Stack** (includes the RediSearch module).
+Vanilla Redis will work for all other features, but semantic memory will be silently disabled.
 
 ```bash
+# Redis Stack — required for vector memory (recommended)
+docker run -p 6379:6379 redis/redis-stack-server:latest
+
+# Vanilla Redis — all features except vector memory
 docker run -p 6379:6379 redis
 ```
+
+> **Why Redis Stack?** `initVectorIndex` issues `FT.CREATE` commands that only exist
+> in the RediSearch module bundled with Redis Stack. Without it, `storeMemory` and
+> `searchMemory` silently return `null` / `[]` — agents run without past-fix context.
+> The `GET /health` endpoint reports `vectorMemory.redisSearch: false` when the module
+> is absent so you can detect this immediately.
 
 ### 3. Initialize Git (required for rollback)
 
@@ -418,9 +410,9 @@ node scripts/dlq-inspect.js
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required. Claude API key |
-| `OPENAI_API_KEY` | — | Optional. Used for vector embeddings |
-| `AEGIS_API_KEY` | — | Required. API authentication key |
+| `ANTHROPIC_API_KEY` | — | **Required.** Claude API key |
+| `OPENAI_API_KEY` | — | **Required for vector memory.** Used for `text-embedding-3-small` embeddings. Without it `storeMemory` and `searchMemory` no-op silently |
+| `AEGIS_API_KEY` | — | **Required.** API authentication key |
 | `CLAUDE_AUTONOMY` | `true` | `false` = hold all patches for human review |
 | `MODE` | `approval` | `approval` = human gate; `autonomous` = auto-apply |
 | `AEGIS_TENANTS` | `default` | Comma-separated tenant IDs to seed at boot |
@@ -431,10 +423,61 @@ node scripts/dlq-inspect.js
 | `AEGIS_CONCURRENCY_LEASE_MS` | `120000` | Semaphore slot lease (ms) |
 | `AEGIS_MEMORY_TTL_DAYS` | `30` | Days before vector memory entries are evicted |
 | `AEGIS_EVICTION_INTERVAL_HOURS` | `1` | How often the memory eviction cron runs |
-| `RATE_LIMIT_WINDOW_MS` | `60000` | Rolling rate-limit window (ms) |
-| `RATE_LIMIT_MAX` | `60` | Max requests per rolling window |
-| `RATE_LIMIT_BURST_MS` | `5000` | Burst window (ms) |
-| `RATE_LIMIT_BURST_MAX` | `20` | Max requests in burst window |
+
+---
+
+## 🧠 Vector Memory (Redis Stack + OpenAI)
+
+Vector memory lets agents learn from past fixes — semantically similar prior patches are
+surfaced in every agent prompt, improving decision quality over time.
+
+### Requirements
+
+| Dependency | Why needed | What happens without it |
+|---|---|---|
+| **Redis Stack** | `FT.CREATE` / `FT.SEARCH` (RediSearch module) | `searchMemory` returns `[]` silently; no past-fix context in prompts |
+| **`OPENAI_API_KEY`** | `text-embedding-3-small` embeddings | `embed()` returns `null`; `storeMemory` skips storage silently |
+| **`openai` npm package** | OpenAI client | Same as missing key — auto-installed by `npm install` |
+
+Both deps must be present for memory to function. If either is absent workflows still
+complete — agents just receive no past-fix context.
+
+### Setup
+
+```bash
+# 1. Start Redis Stack (not vanilla Redis)
+docker run -p 6379:6379 redis/redis-stack-server:latest
+
+# 2. Add your OpenAI key to .env
+OPENAI_API_KEY=sk-...
+```
+
+### Verify
+
+```bash
+curl http://localhost:3000/health
+```
+
+```json
+{
+  "status": "ok",
+  "vectorMemory": {
+    "embeddings": true,
+    "openai": true,
+    "redisSearch": true,
+    "warnings": []
+  }
+}
+```
+
+When `embeddings` is `false`, the `warnings` array explains exactly which dep is missing
+and how to fix it. Boot logs also print `[vector-memory] ⚠️` lines for each gap.
+
+### Degraded mode
+
+If you intentionally run without vector memory (e.g. local dev against vanilla Redis),
+no action is required — just expect empty `warnings` in health and no memory context in
+agent prompts. Set `OPENAI_API_KEY` and switch to Redis Stack when you want to enable it.
 
 ---
 
@@ -476,7 +519,6 @@ node scripts/dlq-inspect.js
 - Patch security (path traversal prevention, size limit, lint + test gate)
 - Memory system (RAG with TTL eviction and background cron)
 - API key authentication (Bearer token + `x-api-key`)
-- Per-tenant rate limiting with burst protection (v1.4.0)
 - Built-in dashboard and full observability API
 
 ## ⚠️ Known Gaps
@@ -486,7 +528,7 @@ node scripts/dlq-inspect.js
 - No observability dashboard beyond the basic built-in endpoint
 - Memory ranking is basic (embedding quality and reranking not tuned)
 
-## 🧭 Roadmap — v1.5+
+## 🧭 Roadmap — v1.4+
 
 - Database-backed workflow store (Postgres/Redis)
 - Branch-based Git execution (per-workflow branches)
