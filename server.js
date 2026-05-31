@@ -1,104 +1,110 @@
-// ─── server.js — two targeted changes ────────────────────────────────────────
+// ─── server.js — key rotation / revocation additions ─────────────────────────
 //
-// Change 1: update the git.js import on line 24.
+// Add this import alongside the other engine imports at the top of server.js:
 //
-// BEFORE:
-//   import { finaliseWorkflow } from './engine/git.js';
+//   import { createKey, revokeKey, listKeys } from './engine/key-store.js';
 //
-// AFTER:
-//   import { finaliseWorkflow, removeWorkflowWorktree } from './engine/git.js';
+// Then add these three routes anywhere after the express app is created.
+// They use the same requireApiKey / assertTenantAccess guards already present
+// on the other management routes (POST /tenants, etc.).
 //
-//
-// Change 2: replace the POST /cancel/:id handler body so that a cancelled
-// workflow's worktree is cleaned up immediately (best-effort — the worktree
-// may not exist yet if the workflow was cancelled before hitting the git layer).
-//
-// BEFORE (the entire handler, lines 216-230):
-//
-//   app.post('/cancel/:id', async (req, res) => {
-//     try {
-//       const { id } = req.params;
-//       const { reason = 'user request' } = req.body ?? {};
-//
-//       const ok = await cancelWorkflow(id, reason);
-//       if (!ok) {
-//         return res.status(409).json({ error: 'Workflow not found, already cancelled, or completed' });
-//       }
-//
-//       res.json({ status: 'cancelled', workflowId: id, reason });
-//     } catch (err) {
-//       res.status(500).json({ error: err.message });
-//     }
-//   });
-//
-// AFTER:
+// ─── Key management routes ────────────────────────────────────────────────────
 
-app.post('/cancel/:id', async (req, res) => {
+/**
+ * POST /tenants/:id/keys
+ *
+ * Create a new API key for a tenant (rotate without restart).
+ * The raw key is returned exactly once — store it immediately.
+ *
+ * Body (optional JSON):
+ *   { label?: string, expiresAt?: number }   expiresAt = ms epoch
+ *
+ * Response:
+ *   { keyId, rawKey, label, createdAt, expiresAt }
+ *
+ * Example:
+ *   curl -X POST /tenants/acme/keys \
+ *        -H 'Authorization: Bearer <current-key>' \
+ *        -d '{"label":"prod rotation 2026-05"}'
+ */
+app.post('/tenants/:id/keys', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { reason = 'user request' } = req.body ?? {};
+    const tenantId = req.params.id;
 
-    const ok = await cancelWorkflow(id, reason);
-    if (!ok) {
-      return res.status(409).json({ error: 'Workflow not found, already cancelled, or completed' });
-    }
+    // Auth: caller must present a valid key for this tenant
+    await requireApiKey(req, res, () => {}, tenantId);
+    if (res.headersSent) return;
+    if (!assertTenantAccess(req, tenantId, res)) return;
 
-    // Remove the per-workflow worktree so cancelled workflows don't accumulate
-    // directories on disk. Best-effort — the worktree may not have been created
-    // yet (e.g. cancelled before the first step reached the git layer).
-    const wf = await getWorkflow(id);
-    if (wf?.tenantId) {
-      removeWorkflowWorktree(id, wf.tenantId).catch(err => {
-        console.warn(`[cancel] removeWorkflowWorktree failed for ${id}:`, err.message);
-      });
-    }
+    const { label = '', expiresAt = null } = req.body ?? {};
 
-    res.json({ status: 'cancelled', workflowId: id, reason });
+    const { keyId, rawKey, record } = await createKey(tenantId, { label, expiresAt });
+
+    res.status(201).json({
+      keyId,
+      rawKey,          // only time the raw key is ever returned
+      label:     record.label,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Change 3: add GET /workflows listing endpoint ────────────────────────────
-//
-// Add this import alongside the other workflow-store imports at the top of
-// server.js (where cancelWorkflow, getWorkflow, etc. are already imported):
-//
-//   import { listWorkflows } from './engine/workflow-store.js';
-//
-// Then add this route — it can go anywhere after the express app is created,
-// conventionally next to the other GET /workflow/:id route.
-
 /**
- * GET /workflows
+ * GET /tenants/:id/keys
  *
- * Query params (all optional):
- *   status    — filter by status: running | paused | cancelled | completed | failed | needs-review
- *   tenantId  — filter by tenant
- *   limit     — max results (default 50, max 200)
- *   cursor    — pagination cursor returned by a previous call ('0' or omit for first page)
+ * List all keys for a tenant (metadata only — no raw keys or hashes).
  *
  * Response:
- *   { workflows: [...], nextCursor: "<string>" }
- *   nextCursor === '0' means all pages have been fetched.
- *
- * Example:
- *   GET /workflows?status=running&limit=20
- *   GET /workflows?status=failed&tenantId=acme&cursor=<prev_cursor>
+ *   { keys: [{ keyId, label, createdAt, expiresAt, revokedAt }] }
  */
-app.get('/workflows', async (req, res) => {
+app.get('/tenants/:id/keys', async (req, res) => {
   try {
-    const {
-      status   = null,
-      tenantId = null,
-      cursor   = '0'
-    } = req.query;
+    const tenantId = req.params.id;
 
-    const limit = Math.min(parseInt(req.query.limit ?? '50', 10) || 50, 200);
+    await requireApiKey(req, res, () => {}, tenantId);
+    if (res.headersSent) return;
+    if (!assertTenantAccess(req, tenantId, res)) return;
 
-    const result = await listWorkflows({ status, tenantId, limit, cursor });
+    const keys = await listKeys(tenantId);
+    res.json({ keys });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    res.json(result);
+/**
+ * DELETE /tenants/:id/keys/:keyId
+ *
+ * Revoke a key immediately.
+ * Takes effect on the very next request — no process restart required.
+ * The record is tombstoned (revokedAt set) rather than deleted so the
+ * audit trail is preserved.
+ *
+ * Response:
+ *   { revoked: true, keyId }
+ *
+ * Zero-downtime rotation workflow:
+ *   1. POST /tenants/:id/keys          → get new rawKey, distribute to services
+ *   2. DELETE /tenants/:id/keys/:oldId → old key rejected immediately
+ */
+app.delete('/tenants/:id/keys/:keyId', async (req, res) => {
+  try {
+    const { id: tenantId, keyId } = req.params;
+
+    await requireApiKey(req, res, () => {}, tenantId);
+    if (res.headersSent) return;
+    if (!assertTenantAccess(req, tenantId, res)) return;
+
+    const ok = await revokeKey(tenantId, keyId);
+
+    if (!ok) {
+      return res.status(404).json({ error: `Key "${keyId}" not found for tenant "${tenantId}".` });
+    }
+
+    res.json({ revoked: true, keyId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
