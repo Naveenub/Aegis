@@ -511,30 +511,46 @@ agent prompts. Set `OPENAI_API_KEY` and switch to Redis Stack when you want to e
 
 ## ✅ What's Solid
 
-- Distributed execution (queue + workers + priority tiers)
-- Self-healing loop with configurable retry policies and agent escalation
-- Workflow engine (DAG + state + pause/resume/cancel + wall-clock timeouts)
-- Git-based atomic rollback
-- Distributed locking (Redlock)
-- Per-workflow concurrency control (Redis semaphore, pipeline-optimised)
-- Human-in-the-loop approval gate with queryable review queue
-- Idempotency (SHA-256, tenant-scoped, Redis-backed)
-- Multi-tenant isolation with runtime registration (Redis-persisted)
-- Per-tenant rate limiting (rolling window + burst limiter)
-- Redis-backed workflow store (replaces JSON files; restart-safe)
-- Concurrent-safe metrics and tracing (`proper-lockfile`)
-- Patch security (path traversal prevention, size limit, lint + test gate)
-- Memory system (RAG with TTL eviction and background cron)
-- API key authentication (Bearer token + `x-api-key`)
-- WebSocket live step-status events
-- Built-in dashboard and full observability API
+**Execution & Orchestration**
+- BullMQ-backed task queue with 4 priority tiers (CRITICAL / HIGH / NORMAL / LOW)
+- Self-healing retry loop — `run → test → fail → fix → retry` — with configurable per-step policies and backoff presets (`STANDARD`, `IO_BOUND`, `CODE_GEN`)
+- DAG workflow engine with dynamic step unlocking, pause / resume / cancel, and wall-clock timeouts
+- Dead Letter Queue for exhausted retries with a dedicated `dlq-worker` and structured `dlq-inspect.js`
+- Redis-backed workflow store — restart-safe, no JSON files, horizontal-scaling ready
+
+**Safety & Isolation**
+- Git worktree-per-workflow — each workflow runs in its own directory and branch; concurrent workflows never contend
+- Atomic rollback via `rollbackLastCommit(cwd)` on test failure
+- Two-tier Redlock: tenant-level (worktree admin) and workflow-level (apply + commit window)
+- Docker sandbox for lint and test execution — `--network none`, read-only rootfs, 512 MB RAM / 1 CPU, 60 s timeout; degrades gracefully with a boot warning when Docker is absent
+- Patch security: path traversal prevention, 50 KB size cap, lint + test pre-flight gate
+
+**Reliability Primitives**
+- SHA-256 idempotency (tenant-scoped, Redis-backed) — prevents double-apply on worker retries
+- Per-workflow Redis semaphore for parallel step control, pipeline-optimised (~40% lower acquire latency vs v1.4)
+- Per-tenant rate limiting: rolling window + burst limiter, tunable via env vars
+- Human-in-the-loop approval gate — patches held for sign-off before disk write, queryable via `GET /review-queue`
+
+**Agents & Memory**
+- 7 agent roles with real Claude API calls (`claude-sonnet-4-20250514`): planner, debugger, refactorer, test-writer, review-guard, security-editor, feature-builder
+- Structured prompt contracts — output format enforced per agent type (PATCH block, JSON DAG, APPROVED/REJECTED)
+- RAG vector memory backed by Redis Stack + OpenAI embeddings: stores past fixes, reranks by `0.6 × cosine similarity + 0.4 × recency decay`, TTL eviction cron, graceful no-op when deps are absent
+
+**Observability & Auth**
+- Bearer token + `x-api-key` auth on all routes except `GET /health`
+- Structured metrics and trace store with concurrent-safe writes
+- WebSocket (`/ws`) for real-time step-status events
+- Multi-tenant isolation with runtime registration persisted in Redis
 
 ## ⚠️ Known Gaps
 
-- Git strategy lacks branch isolation per workflow
-- No full observability UI (basic `/dashboard` endpoint only)
-- Memory ranking is basic (embedding quality and reranking not tuned)
-- No security sandboxing for generated code execution
+- **Sandbox is opt-in, not enforced** — `AEGIS_SANDBOX_DISABLE=true` (or Docker being absent) runs agent-generated code directly on the host via `execSync`. No hard block; only a warning log. Do not run in production without Docker.
+- **Git merge conflicts are unresolved** — the per-workflow worktree model prevents races, but `finaliseWorkflow` squash-merges to a shared tenant base branch. Two workflows that touch the same file will conflict at merge time; there is no automated resolution strategy.
+- **Test coverage is thin** — 4 test files cover retry policy, concurrency, workflow-store, and pipeline flow. The agent runner, review system, vector memory, approval gate, and Git engine have no tests.
+- **Dashboard is a stub** — `GET /dashboard` returns a basic HTML page. Metrics and traces are queryable as JSON but there is no visual UI.
+- **Agent prompt quality is unvalidated** — agent personas are loaded verbatim from markdown files. There is no eval harness, no regression suite, and no feedback loop from task outcomes to prompt improvement.
+- **`repo-scanner.js` blocks the event loop** — the repository walk uses synchronous `readdirSync`. On large repos this will stall the main thread during prompt-context construction.
+- **No step-level undo** — once a step commits and the worktree is finalised, the only recovery option is full workflow cancellation.
 
 ## 🗓️ Changelog
 
@@ -580,11 +596,13 @@ agent prompts. Set `OPENAI_API_KEY` and switch to Redis Stack when you want to e
 
 ## 🧭 Roadmap — v1.6+
 
-- Branch-based Git execution (per-workflow branches)
-- Full observability UI (replacing the basic `/dashboard` endpoint)
-- Improved RAG ranking and memory pruning (reranking, BM25 hybrid)
-- Security sandboxing for code execution (gVisor / nsjail)
-- Workflow rewind (step-level undo)
+- **Observability UI** — replace the stub `/dashboard` with a real workflow graph viewer, step-level timeline, and DLQ inspector
+- **Git merge strategy** — automated conflict resolution or abort-and-notify when concurrent workflows touch the same file at finalise time
+- **Agent eval harness** — prompt regression tests driven by recorded task/outcome pairs; feedback loop to improve agent persona files
+- **Async repo scanner** — replace `readdirSync` with an async walk so large repos don't block the event loop during prompt construction
+- **BM25 hybrid memory ranking** — supplement cosine similarity with keyword scoring for better retrieval on short or jargon-heavy task descriptions
+- **Workflow rewind** — step-level undo that rolls back a specific commit without cancelling the whole workflow
+- **Expanded test coverage** — unit tests for agent-runner, review-system, vector-memory, approval-gate, and git engine
 
 ---
 
@@ -607,13 +625,14 @@ AEGIS is NOT:
 
 ## 🤝 Contributing
 
-This project is experimental but structured. Areas to contribute:
+This project is experimental but structured. Highest-value areas:
 
-- Workflow store persistence (Postgres/Redis backend)
-- Memory ranking improvements (RAG reranking)
-- Observability dashboard
-- Git branch-per-workflow execution strategy
-- Agent prompt quality improvements
+- **Test coverage** — unit tests for `agent-runner`, `review-system`, `vector-memory`, `approval-gate`, `git`
+- **Observability dashboard** — replace `GET /dashboard` stub with a real UI
+- **Git merge strategy** — conflict detection and resolution at `finaliseWorkflow`
+- **Async repo scanner** — non-blocking directory walk for large repos
+- **Agent prompt evals** — harness + recorded fixtures for prompt regression testing
+- **Memory ranking** — BM25 hybrid retrieval, configurable blend weights
 
 ---
 
