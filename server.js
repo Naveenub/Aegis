@@ -55,7 +55,11 @@ import {
   cancelWorkflow,
   getReviewQueue,
   resolveReview,
+  rewindStep,
+  getRewindHistory,
 } from './engine/workflow-store.js';
+import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
+import { acquireLock, releaseLock } from './engine/lock.js';
 import {
   listTenants,
   getTenant,
@@ -198,6 +202,98 @@ app.post(
     }
   },
 );
+
+// ─── Step Rewind ──────────────────────────────────────────────────────────────
+
+/**
+ * POST /workflows/:workflowId/steps/:stepId/rewind
+ * Revert a completed step's git commit and reset it (plus any downstream
+ * completed steps) back to `pending` so they are re-executed on resume.
+ *
+ * Body: { tenantId?: string, reason?: string }
+ *
+ * Returns:
+ *   { ok: true, workflowId, stepId, resetSteps: string[], commitHash: string|null }
+ *
+ * Errors:
+ *   400 — step not completed, or workflow not in a rewindable state
+ *   404 — workflow or step not found
+ *   409 — git revert produced a merge conflict (resolve manually)
+ */
+app.post(
+  '/workflows/:workflowId/steps/:stepId/rewind',
+  (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  async (req, res) => {
+    const { workflowId, stepId } = req.params;
+    const { tenantId, reason }   = req.body ?? {};
+    const tenant = tenantId ?? req.resolvedTenantId;
+
+    try {
+      // ── Acquire the worktree lock so no concurrent step runs during the revert ─
+      let worktreeLock = null;
+      let cwd          = null;
+
+      try {
+        ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
+      } catch {
+        // Worktree not yet created — step was never committed; skip git revert.
+      }
+
+      let commitHash = null;
+
+      if (cwd) {
+        try {
+          const result = revertStepCommit(workflowId, stepId, cwd);
+          commitHash = result.commitHash;
+          // result.reverted === false means the commit was not found (e.g. the
+          // step failed before writing).  We still reset the step state below.
+        } catch (gitErr) {
+          return res.status(409).json({
+            error: `git revert failed — resolve conflicts manually: ${gitErr.message}`,
+          });
+        } finally {
+          if (worktreeLock) {
+            try { await worktreeLock.release(); } catch { /* best-effort */ }
+          }
+        }
+      }
+
+      // ── Reset step state in Redis ──────────────────────────────────────────
+      const result = await rewindStep(workflowId, stepId, { commitHash, reason });
+
+      if (!result.ok) {
+        const statusCode = result.reason?.includes('not found') ? 404 : 400;
+        return res.status(statusCode).json({ error: result.reason });
+      }
+
+      res.json({
+        ok:         true,
+        workflowId,
+        stepId,
+        resetSteps: result.resetSteps,
+        commitHash,
+      });
+
+    } catch (err) {
+      console.error('[POST /workflows/:workflowId/steps/:stepId/rewind]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+/**
+ * GET /workflows/:workflowId/rewind-history
+ * Return the rewind audit trail for a workflow, newest first.
+ */
+app.get('/workflows/:workflowId/rewind-history', requireApiKey, async (req, res) => {
+  try {
+    const history = await getRewindHistory(req.params.workflowId);
+    res.json({ history });
+  } catch (err) {
+    console.error('[GET /workflows/:workflowId/rewind-history]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── Jobs ─────────────────────────────────────────────────────────────────────
 
