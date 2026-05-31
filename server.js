@@ -2,7 +2,7 @@ import http from 'http';
 import express from 'express';
 import fs from 'fs';
 import { WebSocketServer } from 'ws';
-import { requireApiKey, optionalApiKey } from './middleware/auth.js';
+import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
 import { getMetrics } from './engine/metrics.js';
 import { getTrace, listTraces } from './engine/tracer.js';
 import { listJobs } from './engine/job-store.js';
@@ -124,25 +124,41 @@ app.get('/health', optionalApiKey, async (req, res) => {
 });
 
 /**
- * 🔒 All routes below this line require a valid AEGIS_API_KEY.
+ * 🔒 All routes below this line require a valid API key.
  *    Send:  Authorization: Bearer <key>
  *      or:  x-api-key: <key>
+ *
+ *    Per-tenant routes call requireApiKey(req, res, next, tenantId) inline so
+ *    the middleware can look up the correct per-tenant key and bind
+ *    req.resolvedTenantId.  Routes that don't accept a caller-supplied tenantId
+ *    use the requireDefaultKey helper which validates against the default tenant.
  */
-app.use(requireApiKey);
+
+/** Convenience wrapper for routes that don't take a tenantId from the caller. */
+function requireDefaultKey(req, res, next) {
+  return requireApiKey(req, res, next, 'default');
+}
+
+app.use(requireDefaultKey);
 
 /**
  * 🚀 Trigger task execution
  * Body: { task, priority?, timeoutMs? }
  * priority: "critical" | "high" | "normal" | "low"  (default: normal)
  */
-app.post('/task', async (req, res) => {
+app.post('/task', (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId), async (req, res) => {
   try {
     const { task, priority = 'normal', timeoutMs, tenantId } = req.body;
 
-    const p = Priority[priority.toUpperCase()] ?? Priority.NORMAL;
-    const workflowId = await runSystem(task, { priority: p, timeoutMs, tenantId });
+    // assertTenantAccess is redundant here because requireApiKey already bound
+    // req.resolvedTenantId to the tenant the key authorises — use it as the
+    // canonical tenantId rather than trusting the raw body value.
+    const authorisedTenant = req.resolvedTenantId;
 
-    res.json({ status: 'submitted', workflowId, priority, tenantId: tenantId ?? null, timeoutMs: timeoutMs ?? null });
+    const p = Priority[priority.toUpperCase()] ?? Priority.NORMAL;
+    const workflowId = await runSystem(task, { priority: p, timeoutMs, tenantId: authorisedTenant });
+
+    res.json({ status: 'submitted', workflowId, priority, tenantId: authorisedTenant, timeoutMs: timeoutMs ?? null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -241,9 +257,9 @@ app.get('/metrics', (req, res) => {
  * 📁 Job State Viewer
  * Query: ?tenantId=default&limit=200
  */
-app.get('/jobs', async (req, res) => {
+app.get('/jobs', (req, res, next) => requireApiKey(req, res, next, req.query.tenantId ?? 'default'), async (req, res) => {
   try {
-    const tenantId = req.query.tenantId ?? 'default';
+    const tenantId = req.resolvedTenantId;
     const limit    = parseInt(req.query.limit ?? '200', 10);
     const jobs     = await listJobs(tenantId, { limit });
     res.json(jobs);
