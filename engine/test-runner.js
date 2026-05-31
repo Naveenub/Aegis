@@ -1,5 +1,5 @@
 import path from 'path';
-import { scanRepo } from './repo-scanner.js';
+import { scanRepoSync } from './repo-scanner.js';
 import { runInSandbox } from './sandbox.js';
 
 // ─── Test-file discovery ──────────────────────────────────────────────────────
@@ -9,13 +9,18 @@ const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
 /**
  * Return all test files found under `root`, repo-relative.
- * Excludes node_modules and .git (handled by scanRepo).
+ * Excludes node_modules and .git (handled by scanRepoSync).
+ *
+ * Uses scanRepoSync because runTests() is called from runInSandbox() via
+ * child_process.execSync — a synchronous context where async I/O is not
+ * available. This is the only legitimate caller of the sync scanner;
+ * all other callers must use the async scanRepo().
  *
  * @param {string} root  - Absolute path to scan (tenant worktree)
  * @returns {string[]}   - Absolute paths to test files
  */
 function findTestFiles(root) {
-  return scanRepo(root).filter(f => TEST_FILE_RE.test(f));
+  return scanRepoSync(root).filter(f => TEST_FILE_RE.test(f));
 }
 
 // ─── Core runner ──────────────────────────────────────────────────────────────
