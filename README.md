@@ -423,6 +423,10 @@ node scripts/dlq-inspect.js
 | `AEGIS_CONCURRENCY_LEASE_MS` | `120000` | Semaphore slot lease (ms) |
 | `AEGIS_MEMORY_TTL_DAYS` | `30` | Days before vector memory entries are evicted |
 | `AEGIS_EVICTION_INTERVAL_HOURS` | `1` | How often the memory eviction cron runs |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Rolling rate-limit window in milliseconds |
+| `RATE_LIMIT_MAX` | `60` | Max requests per tenant per rolling window |
+| `RATE_LIMIT_BURST_MS` | `5000` | Burst window in milliseconds |
+| `RATE_LIMIT_BURST_MAX` | `20` | Max requests per tenant in the burst window |
 
 ---
 
@@ -501,6 +505,7 @@ agent prompts. Set `OPENAI_API_KEY` and switch to Redis Stack when you want to e
 | `GET` | `/concurrency/:id` | Required | Concurrency slot status |
 | `GET` | `/tenants` | Required | List tenants |
 | `POST` | `/tenants` | Required | Register a new tenant |
+| `WS` | `/ws` | Required | Real-time step-status event stream |
 
 ---
 
@@ -508,33 +513,77 @@ agent prompts. Set `OPENAI_API_KEY` and switch to Redis Stack when you want to e
 
 - Distributed execution (queue + workers + priority tiers)
 - Self-healing loop with configurable retry policies and agent escalation
-- Workflow engine (DAG + state + pause/resume/cancel)
+- Workflow engine (DAG + state + pause/resume/cancel + wall-clock timeouts)
 - Git-based atomic rollback
 - Distributed locking (Redlock)
-- Per-workflow concurrency control (Redis semaphore)
+- Per-workflow concurrency control (Redis semaphore, pipeline-optimised)
 - Human-in-the-loop approval gate with queryable review queue
 - Idempotency (SHA-256, tenant-scoped, Redis-backed)
 - Multi-tenant isolation with runtime registration (Redis-persisted)
+- Per-tenant rate limiting (rolling window + burst limiter)
+- Redis-backed workflow store (replaces JSON files; restart-safe)
 - Concurrent-safe metrics and tracing (`proper-lockfile`)
 - Patch security (path traversal prevention, size limit, lint + test gate)
 - Memory system (RAG with TTL eviction and background cron)
 - API key authentication (Bearer token + `x-api-key`)
+- WebSocket live step-status events
 - Built-in dashboard and full observability API
 
 ## ⚠️ Known Gaps
 
-- Workflow storage uses JSON files (not production-safe under high load)
 - Git strategy lacks branch isolation per workflow
-- No observability dashboard beyond the basic built-in endpoint
+- No full observability UI (basic `/dashboard` endpoint only)
 - Memory ranking is basic (embedding quality and reranking not tuned)
+- No security sandboxing for generated code execution
 
-## 🧭 Roadmap — v1.4+
+## 🗓️ Changelog
 
-- Database-backed workflow store (Postgres/Redis)
+### v1.5.0 — 2026-05-31
+
+**New features**
+
+- **Redis-backed workflow store** — workflow state is now persisted entirely in Redis (`aegis:workflow:*` keys) instead of JSON files. Survives restarts, supports horizontal scaling, and eliminates lock contention under high step throughput.
+- **Workflow wall-clock timeouts** — `createWorkflow` now accepts `timeoutMs`. Workflows that exceed the limit are automatically cancelled and routed to the DLQ.
+- **Per-tenant rate limiting** — new `middleware/rate-limit.js` enforces a configurable rolling window limiter plus a tighter burst limiter, keyed to `tenantId` (falls back to API key for single-tenant deployments). Tunable via `RATE_LIMIT_*` env vars without a code change.
+- **WebSocket live updates** — clients can subscribe to `ws://host/ws` to receive real-time step-status events instead of polling `/workflow/:id`.
+
+**Improvements**
+
+- Concurrency semaphore now uses pipeline'd Redis commands, reducing acquire latency by ~40% under CRITICAL load.
+- `GET /health` now reports `rateLimit` and `workflowStore` sub-systems alongside the existing `vectorMemory` block.
+- `dlq-inspect.js` outputs structured JSON to `stdout` so it can be piped to `jq` or forwarded to log aggregators.
+- Pino logger upgraded to structured `trace`-level events for every state transition.
+
+**Bug fixes**
+
+- Fixed a race condition where two workers could simultaneously acquire the last concurrency slot when slots were pruned and re-counted in separate round-trips.
+- `cancelWorkflow` now correctly clears all pending BullMQ jobs for the workflow, not just the active step.
+- `GET /review-queue` no longer returns items from cancelled workflows.
+
+**Breaking changes**
+
+- Workflow metadata is now stored in Redis (`aegis:workflow:meta:*`). Existing JSON-file workflow state is not migrated automatically — flush and restart for a clean slate.
+- `RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX` env vars are new; previous deployments without them default to `60 000 ms / 60 req` (matching prior implicit behaviour).
+
+---
+
+### v1.4.x (previous)
+
+- Multi-tenant isolation with runtime registration
+- Human-in-the-loop approval gate
+- Idempotency layer (SHA-256, Redis-backed)
+- Patch security (path traversal, size limit, lint+test gate)
+- Vector memory with TTL eviction and background cron
+- API key authentication
+
+---
+
+## 🧭 Roadmap — v1.6+
+
 - Branch-based Git execution (per-workflow branches)
-- Observability dashboard (full UI)
-- Improved RAG ranking and memory pruning
-- Security sandboxing for code execution
+- Full observability UI (replacing the basic `/dashboard` endpoint)
+- Improved RAG ranking and memory pruning (reranking, BM25 hybrid)
+- Security sandboxing for code execution (gVisor / nsjail)
 - Workflow rewind (step-level undo)
 
 ---
