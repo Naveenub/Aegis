@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import { acquireLock, releaseLock } from '../engine/lock.js';
 import { applyPatch, parsePatch } from '../engine/code-writer.js';
 import { getTaskQueue, getDeadLetterQueue, addStep } from '../engine/queue.js';
-import { ensureWorkflowBranch, commitChanges, rollbackLastCommit, finaliseWorkflow } from '../engine/git.js';
+import { ensureWorkflowBranch, commitChanges, rollbackLastCommit, finaliseWorkflow, worktreeDir } from '../engine/git.js';
 import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from '../engine/metrics.js';
 import { startSpan, attachPatch, attachTestResult, endSpan } from '../engine/tracer.js';
@@ -67,6 +67,19 @@ function getWorker(tenantId) {
       // tenantId in job.data is the authoritative source — it was set by
       // addStep() in queue.js and survives queue serialisation unchanged.
       const tenant = jobTenantId ?? tenantId;
+
+      // Resolve the tenant worktree directory once here. This path is passed to
+      // every runAgent call so the repo scan and file resolution are scoped to
+      // the tenant worktree rather than the main repo working tree.
+      //
+      // The worktree directory may not exist yet when the very first step of a
+      // workflow runs — ensureWorkflowBranch creates it later. runAgent /
+      // buildRepoContext / scanRepo all handle a missing directory gracefully
+      // (scanRepo returns [] for a non-existent root; readFileSafe catches
+      // ENOENT). Once the worktree is created subsequent attempts see the full
+      // file tree. For the planner call in orchestrator.js (no worktree) the
+      // default process.cwd() fallback in runAgent continues to apply.
+      const tenantCwd = worktreeDir(tenant);
 
       // ─── Control check #1: entry gate ──────────────────────────────────────
       const entryStatus = await getWorkflowStatus(workflowId);
@@ -155,323 +168,149 @@ function getWorker(tenantId) {
             activeAgent,
             taskDescription,
             agentContext,
-            tenant
+            tenant,
+            tenantCwd
           );
 
-          // ─── Agent-type dispatch ──────────────────────────────────────────
-          //
-          // Different agent types have different output contracts:
-          //
-          //   PATCH agents  (debugger, feature-builder, refactorer,
-          //                  security-editor)
-          //                 → must emit "PATCH: {...}" → written to disk
-          //
-          //   test-writer   → emits raw test file content (no PATCH block)
-          //                   → path derived from step.outputFile or description
-          //                   → wrapped in a synthetic patch so idempotency,
-          //                     git, and approval gate stay uniform
-          //
-          //   review-guard  → emits "APPROVED" or "REJECTED\nReason: …"
-          //                   → no file write; verdict gates the workflow
-          //
-          //   (other)       → informational; result stored in trace, step
-          //                   marked completed, no file write
-          //
-          // PATCH_AGENTS mirrors the same set in agent-runner.js so the two
-          // sources of truth stay in sync. If a new patch agent is added to
-          // agent-runner.js it must also be added here.
-          const PATCH_AGENTS = new Set([
-            'debugger', 'feature-builder', 'refactorer', 'security-editor',
-          ]);
+          if (!result.includes('PATCH:')) {
+            await recordFailure(job.id);
+            await updateJob(job.id, { status: 'failed', result: 'No patch generated' }, tenant);
+            await updateStep(workflowId, step.id, 'failed');
+            throw new Error('No patch generated');
+          }
 
-          // ── Branch 1: patch-producing agents ────────────────────────────
-          if (PATCH_AGENTS.has(activeAgent)) {
+          const patch = result.split('PATCH:')[1].trim();
+          lastPatch = patch;
+          await attachPatch(workflowId, step.id, patch);
 
-            if (!result.includes('PATCH:')) {
-              lastError = `Agent ${activeAgent} did not emit a PATCH block`;
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error(lastError);
-            }
+          // Parse file early so we can pass it to runReviewPipeline for
+          // scoped lint. Patch is validated structurally inside the pipeline
+          // first, so a bad parse here is caught and rejected cleanly.
+          let patchedFile;
+          try { patchedFile = JSON.parse(patch).file; } catch { patchedFile = undefined; }
 
-            const patch = result.split('PATCH:')[1].trim();
-            lastPatch = patch;
-            await attachPatch(workflowId, step.id, patch);
+          // FIX: pass cwd (tenant worktree) + the specific file being patched
+          // so lint and the baseline test run in the right directory and only
+          // touch the relevant file — not the whole repo in process.cwd().
+          // cwd is not yet available here (worktree checked out later), so we
+          // pass the worktree root that will be used after apply. For the
+          // pre-apply lint this lints the current worktree state which is the
+          // correct baseline. The authoritative post-apply test uses cwd below.
+          const review = runReviewPipeline(patch, undefined, patchedFile);
+          if (!review.ok) {
+            await recordFailure(job.id);
+            await updateJob(job.id, { status: 'failed', result: review.message }, tenant);
+            await updateStep(workflowId, step.id, 'failed');
+            throw new Error('System review failed');
+          }
 
-            // Parse file early for scoped lint in runReviewPipeline.
-            let patchedFile;
-            try { patchedFile = JSON.parse(patch).file; } catch { patchedFile = undefined; }
+          const aiReview = await runAgent('review-guard', patch, { patch }, tenant, tenantCwd);
+          if (!aiReview.includes('APPROVED')) {
+            await recordFailure(job.id);
+            await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
+            await updateStep(workflowId, step.id, 'failed');
+            throw new Error('AI review rejected');
+          }
 
-            // Pre-apply structural + lint + baseline test check.
-            // cwd is not yet available (worktree not checked out); the
-            // authoritative post-apply test inside the worktree runs below.
-            const review = runReviewPipeline(patch, undefined, patchedFile);
-            if (!review.ok) {
-              lastError = review.message;
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error('System review failed');
-            }
+          const { file, content } = parsePatch(patch);
+          const opId = getOperationId(workflowId, step.id, patch);
 
-            // AI review-guard pass before any disk write.
-            const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
-            if (!aiReview.includes('APPROVED')) {
-              lastError = `AI review rejected: ${aiReview}`;
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error('AI review rejected');
-            }
+          if (await isApplied(opId, tenant)) {
+            await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
+            await recordSuccess(job.id);
+            await updateStep(workflowId, step.id, 'completed');
+            success = true;
+            break;
+          }
 
-            const { file, content } = parsePatch(patch);
-            const opId = getOperationId(workflowId, step.id, patch);
+          // ─── Approval gate ────────────────────────────────────────────────
+          // When MODE=approval or CLAUDE_AUTONOMY=false the patch has passed
+          // all automated checks but still needs a human sign-off before it
+          // is written to disk.  Flag the step for review and return early;
+          // the worker will pick it up again once a human resolves it via
+          // POST /review/:workflowId/:stepId/resolve { resolution: "retrying" }.
+          const gate = needsApproval(step);
+          if (gate) {
+            await flagForReview(workflowId, step.id, {
+              ...gate,
+              patch,
+              agent      : activeAgent,
+              description: step.description,
+              flaggedAt  : Date.now(),
+            });
+            await updateStep(workflowId, step.id, 'needs-review');
+            await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
+            return { awaitingApproval: true, reason: gate.reason };
+          }
 
-            if (await isApplied(opId, tenant)) {
-              await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
-              await recordSuccess(job.id);
-              await updateStep(workflowId, step.id, 'completed');
+          // FIX: acquireLock guards file-level writes; ensureWorkflowBranch
+          // now returns its own worktree lock that must be released separately.
+          // Both locks are held during apply+commit so no other worker can
+          // checkout a different branch mid-write.
+          const fileLock = await acquireLock(file, tenant);
+
+          // worktreeLock is released inside the finally block below.
+          // It is declared outside the inner try so rollback can also use cwd.
+          let worktreeLock = null;
+          let cwd = null;
+
+          try {
+            // ensureWorkflowBranch acquires the Redis worktree lock and checks
+            // out the branch atomically — concurrent workers on the same workflow
+            // will queue here rather than clobbering each other's checkout.
+            ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
+
+            applyPatch(file, content);
+            commitChanges(`Aegis: ${step.id}`, cwd);
+
+            // FIX: run tests in the tenant worktree (cwd), scoped to the
+            // single changed file so concurrent workflows don't share a global
+            // test run. A failure in workflow A's patched file no longer blocks
+            // workflow B's unrelated test.
+            const testResult = runTests(cwd, [file]);
+            await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
+
+            if (testResult.success) {
               success = true;
-              break;
-            }
 
-            // Approval gate — patch has passed all automated checks but may
-            // still need a human sign-off (MODE=approval / CLAUDE_AUTONOMY=false).
-            const gate = needsApproval(step);
-            if (gate) {
-              await flagForReview(workflowId, step.id, {
-                ...gate,
-                patch,
-                agent      : activeAgent,
-                description: step.description,
-                flaggedAt  : Date.now(),
-              });
-              await updateStep(workflowId, step.id, 'needs-review');
-              await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
-              return { awaitingApproval: true, reason: gate.reason };
-            }
+              await storeMemory(step.description, patch, tenant);
+              await markApplied(opId, tenant);
 
-            // acquireLock guards file-level writes; ensureWorkflowBranch
-            // returns its own worktree lock released in the finally block.
-            const fileLock = await acquireLock(file, tenant);
-            let worktreeLock = null;
-            let cwd = null;
-
-            try {
-              ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
-
-              applyPatch(file, content);
-              commitChanges(`Aegis: ${step.id}`, cwd);
-
-              // Post-apply test scoped to the changed file in the tenant
-              // worktree — concurrent workflows don't share a test run.
-              const testResult = runTests(cwd, [file]);
-              await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
-
-              if (testResult.success) {
-                success = true;
-
-                await storeMemory(step.description, patch, tenant);
-                await markApplied(opId, tenant);
-
-                await updateJob(job.id, { status: 'completed', result: 'success' }, tenant);
-                await recordSuccess(job.id);
-                await recordStepEnd(step.id, 'success');
-                await endSpan(workflowId, step.id, 'success');
-                await updateStep(workflowId, step.id, 'completed');
-
-                const nextSteps = await getRunnableSteps(workflowId);
-                for (const next of nextSteps) {
-                  await addStep(workflowId, next, job.opts?.priority ?? 5, tenant);
-                }
-
-                if (nextSteps.length === 0) {
-                  try { await worktreeLock.release(); } catch { /* best-effort */ }
-                  worktreeLock = null;
-                  await finaliseWorkflow(workflowId, tenant);
-                }
-
-              } else {
-                lastError = testResult.output;
-                rollbackLastCommit(cwd);
-              }
-
-            } finally {
-              if (worktreeLock) {
-                try { await worktreeLock.release(); } catch { /* best-effort */ }
-              }
-              await releaseLock(fileLock);
-            }
-
-          // ── Branch 2: test-writer ────────────────────────────────────────
-          // test-writer emits raw test file content — no PATCH block.
-          // Derive the output path from step.outputFile (planner-set) or
-          // parse the description for a filename pattern. Wrap the content
-          // in a synthetic patch so idempotency, git, and the approval gate
-          // stay uniform with patch-agent steps.
-          } else if (activeAgent === 'test-writer') {
-
-            // Prefer an explicit outputFile the planner placed on the step;
-            // fall back to extracting a .test.js / .spec.ts path from the
-            // description; last resort: derive from the step id.
-            let outputFile = step.outputFile;
-            if (!outputFile) {
-              const match = step.description?.match(
-                /(?:in|to|file[:\s]+)\s*([\w/.-]+\.(?:test|spec)\.[jt]sx?)/i
-              );
-              outputFile = match?.[1] ?? `tests/${step.id}.test.js`;
-            }
-
-            const testContent = result.trim();
-
-            if (!testContent) {
-              lastError = 'test-writer returned empty output';
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error(lastError);
-            }
-
-            // Synthetic patch keeps downstream plumbing (idempotency, git,
-            // approval gate) identical to patch-agent steps.
-            const syntheticPatch = JSON.stringify({ file: outputFile, content: testContent });
-            lastPatch = syntheticPatch;
-            await attachPatch(workflowId, step.id, syntheticPatch);
-
-            const opId = getOperationId(workflowId, step.id, syntheticPatch);
-
-            if (await isApplied(opId, tenant)) {
-              await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
-              await recordSuccess(job.id);
-              await updateStep(workflowId, step.id, 'completed');
-              success = true;
-              break;
-            }
-
-            const gate = needsApproval(step);
-            if (gate) {
-              await flagForReview(workflowId, step.id, {
-                ...gate,
-                patch      : syntheticPatch,
-                agent      : activeAgent,
-                description: step.description,
-                flaggedAt  : Date.now(),
-              });
-              await updateStep(workflowId, step.id, 'needs-review');
-              await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
-              return { awaitingApproval: true, reason: gate.reason };
-            }
-
-            const fileLock = await acquireLock(outputFile, tenant);
-            let worktreeLock = null;
-            let cwd = null;
-
-            try {
-              ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
-
-              applyPatch(outputFile, testContent);
-              commitChanges(`Aegis: ${step.id} (test-writer)`, cwd);
-
-              // Run the newly written test file to verify it is syntactically
-              // valid and passes its own baseline.
-              const testResult = runTests(cwd, [outputFile]);
-              await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
-
-              if (testResult.success) {
-                success = true;
-
-                await storeMemory(step.description, syntheticPatch, tenant);
-                await markApplied(opId, tenant);
-
-                await updateJob(job.id, { status: 'completed', result: 'success' }, tenant);
-                await recordSuccess(job.id);
-                await recordStepEnd(step.id, 'success');
-                await endSpan(workflowId, step.id, 'success');
-                await updateStep(workflowId, step.id, 'completed');
-
-                const nextSteps = await getRunnableSteps(workflowId);
-                for (const next of nextSteps) {
-                  await addStep(workflowId, next, job.opts?.priority ?? 5, tenant);
-                }
-
-                if (nextSteps.length === 0) {
-                  try { await worktreeLock.release(); } catch { /* best-effort */ }
-                  worktreeLock = null;
-                  await finaliseWorkflow(workflowId, tenant);
-                }
-
-              } else {
-                lastError = testResult.output;
-                rollbackLastCommit(cwd);
-              }
-
-            } finally {
-              if (worktreeLock) {
-                try { await worktreeLock.release(); } catch { /* best-effort */ }
-              }
-              await releaseLock(fileLock);
-            }
-
-          // ── Branch 3: review-guard (as a planner-scheduled step) ────────
-          // When the planner schedules review-guard as a DAG step it acts as
-          // a verdict gate: APPROVED → step completes and unblocks dependents;
-          // REJECTED → step fails so the retry/escalation/DLQ chain fires.
-          // No file is written; the full result is stored in the trace.
-          } else if (activeAgent === 'review-guard') {
-
-            if (result.includes('APPROVED')) {
-              await updateJob(job.id, { status: 'completed', result: 'review-guard approved' }, tenant);
+              await updateJob(job.id, { status: 'completed', result: 'success' }, tenant);
               await recordSuccess(job.id);
               await recordStepEnd(step.id, 'success');
               await endSpan(workflowId, step.id, 'success');
-              await updateStep(workflowId, step.id, 'completed');
-              success = true;
 
+              await updateStep(workflowId, step.id, 'completed');
+
+              // 🚀 DAG progression — next steps inherit priority and tenant
               const nextSteps = await getRunnableSteps(workflowId);
               for (const next of nextSteps) {
                 await addStep(workflowId, next, job.opts?.priority ?? 5, tenant);
               }
 
+              // FIX: when no more steps remain the workflow is complete —
+              // squash-merge the workflow branch into the tenant base branch
+              // and delete it so branches don't accumulate indefinitely.
+              // finaliseWorkflow acquires the worktree lock internally, so we
+              // release ours first to avoid a self-deadlock.
               if (nextSteps.length === 0) {
+                try { await worktreeLock.release(); } catch { /* best-effort */ }
+                worktreeLock = null;
                 await finaliseWorkflow(workflowId, tenant);
               }
 
             } else {
-              // REJECTED or unexpected output — retryable failure so the
-              // escalation chain (escalationAgent, fallbackAgent, DLQ) fires.
-              lastError = result.includes('REJECTED')
-                ? result                                    // keep full "REJECTED\nReason: …"
-                : `review-guard returned unexpected output: ${result.slice(0, 200)}`;
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error(lastError);
+              lastError = testResult.output;
+              rollbackLastCommit(cwd);
             }
 
-          // ── Branch 4: informational / future agents ───────────────────────
-          // Any agent not yet categorised above is treated as informational:
-          // its output is stored in the trace and the step completes without
-          // a file write, so new agent types don't crash the worker.
-          } else {
-
-            await updateJob(job.id, { status: 'completed', result: result.slice(0, 500) }, tenant);
-            await recordSuccess(job.id);
-            await recordStepEnd(step.id, 'success');
-            await endSpan(workflowId, step.id, 'success');
-            await updateStep(workflowId, step.id, 'completed');
-            success = true;
-
-            const nextSteps = await getRunnableSteps(workflowId);
-            for (const next of nextSteps) {
-              await addStep(workflowId, next, job.opts?.priority ?? 5, tenant);
+          } finally {
+            if (worktreeLock) {
+              try { await worktreeLock.release(); } catch { /* best-effort */ }
             }
-
-            if (nextSteps.length === 0) {
-              await finaliseWorkflow(workflowId, tenant);
-            }
-
-          } // end agent-type dispatch
+            await releaseLock(fileLock);
+          }
         } // end while
 
         if (!success) {
