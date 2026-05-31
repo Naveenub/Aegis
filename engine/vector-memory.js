@@ -177,7 +177,112 @@ async function embed(text) {
   }
 }
 
-// ─── Store ────────────────────────────────────────────────────────────────────
+// ─── Capability probe ─────────────────────────────────────────────────────────
+
+/**
+ * getVectorCapabilities()
+ *
+ * Probes both the OpenAI key and the Redis Stack RediSearch module and returns
+ * a structured object describing what is available.  Called at boot time and
+ * on GET /health so operators get an immediate, unambiguous signal instead of
+ * discovering the degradation from a missing context window hours into a run.
+ *
+ * Redis Stack check: issue `FT._LIST` (list all indexes).  This command is
+ * only available when the RediSearch module is loaded.  Vanilla Redis returns
+ * an ERR_UNKNOWN_COMMAND error; we catch that and set redisSearch=false.
+ *
+ * @returns {Promise<{
+ *   openai:      boolean,   // OPENAI_API_KEY set and openai package importable
+ *   redisSearch: boolean,   // RediSearch module present in the connected Redis
+ *   embeddings:  boolean,   // both required deps available (openai && redisSearch)
+ *   warnings:    string[]   // human-readable explanation of each missing dep
+ * }>}
+ */
+export async function getVectorCapabilities() {
+  const warnings = [];
+
+  // ── 1. OpenAI key + package ───────────────────────────────────────────────
+  const openaiClient = await getOpenAIClient();
+  const openai = openaiClient !== null;
+  if (!openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      warnings.push(
+        'OPENAI_API_KEY is not set — vector memory embeddings are disabled. ' +
+        'Agents will run without past-fix context. ' +
+        'Set OPENAI_API_KEY in your .env to enable semantic memory search.'
+      );
+    } else {
+      warnings.push(
+        'The "openai" npm package could not be loaded — run `npm install openai`. ' +
+        'Vector memory embeddings are disabled until the package is available.'
+      );
+    }
+  }
+
+  // ── 2. RediSearch module (Redis Stack) ────────────────────────────────────
+  let redisSearch = false;
+  try {
+    // FT._LIST lists all RediSearch indexes. It only exists when the module is loaded.
+    await redis.call('FT._LIST');
+    redisSearch = true;
+  } catch (err) {
+    // ERR_UNKNOWN_COMMAND → module absent. Any other error is a transient
+    // Redis issue and should not be treated as a permanent capability gap.
+    const isUnknownCommand =
+      err.message?.includes('ERR unknown command') ||
+      err.message?.includes('unknown command') ||
+      err.message?.includes('NOSCRIPT');
+
+    if (isUnknownCommand) {
+      warnings.push(
+        'Redis Stack (RediSearch module) is not available — vector memory search is disabled. ' +
+        'The connected Redis instance is vanilla Redis. ' +
+        'Upgrade to Redis Stack to enable semantic memory:\n' +
+        '  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
+        'Without Redis Stack, past-fix context will never be surfaced to agents.'
+      );
+    } else {
+      // Transient error — flag it but don't permanently mark redisSearch false.
+      // A restart may resolve it; we don't want to kill the health check permanently.
+      warnings.push(
+        `Redis Stack probe returned an unexpected error (may be transient): ${err.message}`
+      );
+      // Optimistically treat as available so we don't mask a momentary blip
+      redisSearch = true;
+    }
+  }
+
+  const embeddings = openai && redisSearch;
+
+  return { openai, redisSearch, embeddings, warnings };
+}
+
+/**
+ * logVectorCapabilityWarnings()
+ *
+ * Convenience wrapper for boot-time logging: runs the capability probe and
+ * prints each warning to stderr with a clear [vector-memory] prefix so it
+ * cannot be missed in the server startup log.
+ *
+ * Called once at server startup and once after each tenant registration so
+ * new environments surface the issue immediately.
+ */
+export async function logVectorCapabilityWarnings() {
+  const caps = await getVectorCapabilities();
+  for (const w of caps.warnings) {
+    console.warn(`[vector-memory] ⚠️  ${w}`);
+  }
+  if (!caps.embeddings) {
+    console.warn(
+      '[vector-memory] ℹ️  Vector memory is DEGRADED. ' +
+      'Workflows will still run — agents simply receive no past-fix context. ' +
+      'See README § "Vector Memory (Redis Stack + OpenAI)" for setup instructions.'
+    );
+  }
+  return caps;
+}
+
+
 
 /**
  * Store a memory entry with a TTL.
