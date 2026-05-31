@@ -1,72 +1,74 @@
-// ─── server.js — metrics endpoint additions ───────────────────────────────────
-//
-// Add these two imports alongside the other engine imports at the top of server.js:
-//
-//   import { renderPrometheus, renderOtel } from './engine/metrics.js';
-//
-// Then add these routes anywhere after the express app is created.
-// Neither endpoint requires auth — standard practice for /metrics scrapers.
-// If you want auth, wrap each handler in requireApiKey.
-//
+/**
+ * dashboard-routes.js
+ *
+ * Drop-in route additions for server.js.
+ *
+ * HOW TO INTEGRATE
+ * ────────────────
+ * 1. Add this import near the top of server.js alongside the other engine imports:
+ *
+ *      import { readFileSync } from 'fs';
+ *      import { fileURLToPath } from 'url';
+ *      import { dirname, join } from 'path';
+ *      import { getMetrics } from './engine/metrics.js';
+ *
+ * 2. Copy the three route blocks below into server.js, after the Express app
+ *    is created and middleware is applied.
+ *
+ * That's it — no new dependencies, no build step.
+ */
+
+// ─── Resolve dashboard HTML path at module load time ──────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = dirname(__filename);
+const DASHBOARD_HTML = join(__dirname, 'engine', 'dashboard.html');
 
 /**
- * GET /metrics
+ * GET /api/metrics
  *
- * Prometheus text-format exposition (format 0.0.4).
- * Scraped by Prometheus, Grafana Agent, VictoriaMetrics, Datadog Agent, etc.
+ * Internal JSON endpoint consumed by the dashboard. Returns the full
+ * structured metrics object from getMetrics() — all-time counters,
+ * windowed rollups, latency percentiles, per-agent stats, and recent steps.
  *
- * Exposes:
- *   aegis_jobs_total / success / failed / retries        — all-time counters
- *   aegis_success_rate / avg_latency_ms                  — all-time rates
- *   aegis_agent_jobs_total / avg_latency_ms{agent}       — per-agent gauges
- *   aegis_window_jobs_total / success_rate{window}       — 1m / 5m / 1h rollups
- *   aegis_latency_p50_ms / p95_ms / p99_ms{window}       — windowed percentiles
- *
- * Prometheus scrape config example:
- *   - job_name: aegis
- *     static_configs:
- *       - targets: ['localhost:3000']
- *     metrics_path: /metrics
+ * Not intended for Prometheus scraping (use GET /metrics for that).
+ * Auth: requireApiKey (same as all non-health endpoints).
  */
-app.get('/metrics', async (req, res) => {
+app.get('/api/metrics', requireApiKey, async (req, res) => {
   try {
-    const body = await renderPrometheus();
-    // Content-Type required by Prometheus; charset must be UTF-8
-    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-    res.send(body);
+    const data = await getMetrics();
+    res.json(data);
   } catch (err) {
-    res.status(500).type('text/plain').send(`# ERROR: ${err.message}\n`);
+    res.status(500).json({ error: err.message });
   }
 });
 
 /**
- * GET /metrics/json
+ * GET /dashboard
  *
- * OpenTelemetry-compatible JSON (OTLP/JSON ResourceMetrics shape).
- * Consumed by:
- *   - OTEL Collector HTTP receiver (forward to any OTEL backend)
- *   - Dashboards that prefer JSON over Prometheus scraping
- *   - Custom alerting / reporting tools
+ * Full observability UI served as a single self-contained HTML page.
+ * The page fetches live data from:
+ *   GET /api/metrics        — structured metrics JSON (all-time + windowed)
+ *   GET /metrics/json       — OTEL fallback when /api/metrics is unavailable
+ *   GET /traces             — workflow trace list
+ *   GET /jobs               — job log
+ *   GET /review-queue       — pending human-review items
  *
- * Response shape:
- *   { resourceMetrics: [{ resource, scopeMetrics: [{ metrics: [...] }] }] }
- *
- * Each metric entry is a gauge dataPoint with attributes for window/agent,
- * allowing any OTEL-aware tool to slice by dimension without extra config.
- *
- * OTEL Collector pipeline example (otel-collector-config.yaml):
- *   receivers:
- *     otlphttp:
- *       endpoint: "http://aegis:3000/metrics/json"
- *   exporters:
- *     otlp:
- *       endpoint: "https://your-otel-backend"
+ * Auth: requireApiKey — operators should use a read-only key for browser access.
+ * The HTML file is read from disk at startup (not per-request) so disk I/O
+ * only happens once; edits to dashboard.html require a server restart.
  */
-app.get('/metrics/json', async (req, res) => {
+const dashboardHtml = (() => {
   try {
-    const body = await renderOtel();
-    res.json(body);
+    return readFileSync(DASHBOARD_HTML, 'utf-8');
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.warn('[dashboard] Could not read engine/dashboard.html:', err.message);
+    return `<!DOCTYPE html><html><body><pre>Dashboard HTML not found at ${DASHBOARD_HTML}.\nRun the server from the project root.</pre></body></html>`;
   }
+})();
+
+app.get('/dashboard', requireApiKey, (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  // No-cache so a forced browser refresh always gets the latest HTML
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.send(dashboardHtml);
 });
