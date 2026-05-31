@@ -42,11 +42,23 @@ function readFileSafe(filePath) {
 }
 
 /**
- * Build a compact repo map: relative path + first-line summary only.
- * Full file content is included only for files named in `relevantFiles`.
+ * buildRepoContext(relevantFiles, cwd)
+ *
+ * Build a compact repo map and inline relevant file content for prompt injection.
+ *
+ * FIX: `cwd` is now threaded through from `runAgent` so that both the repo
+ * map and the inlined file content are scoped to the tenant worktree rather
+ * than the main repository working tree (process.cwd()).
+ *
+ * When `cwd` is omitted (e.g. the planner call which has no worktree yet)
+ * the function falls back to process.cwd() — same behaviour as before.
+ *
+ * @param {string[]} relevantFiles - Paths to inline in full (relative or absolute).
+ * @param {string}   [cwd]         - Root to scan and resolve relative paths against.
+ *                                   Defaults to process.cwd().
  */
-function buildRepoContext(relevantFiles = []) {
-  const allFiles = scanRepo().filter(
+function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
+  const allFiles = scanRepo(cwd).filter(
     (f) =>
       !f.includes('node_modules') &&
       !f.includes('.git') &&
@@ -55,15 +67,15 @@ function buildRepoContext(relevantFiles = []) {
   );
 
   const repoMap = allFiles
-    .map((f) => path.relative(process.cwd(), f))
+    .map((f) => path.relative(cwd, f))
     .join('\n');
 
   const inlined = relevantFiles
     .map((f) => {
-      const abs = path.isAbsolute(f) ? f : path.join(process.cwd(), f);
+      const abs = path.isAbsolute(f) ? f : path.join(cwd, f);
       const content = readFileSafe(abs);
       if (!content) return null;
-      return `### ${path.relative(process.cwd(), abs)}\n\`\`\`\n${content}\n\`\`\``;
+      return `### ${path.relative(cwd, abs)}\n\`\`\`\n${content}\n\`\`\``;
     })
     .filter(Boolean)
     .join('\n\n');
@@ -81,12 +93,16 @@ function buildRepoContext(relevantFiles = []) {
  *                                 context.error    - previous error output (for debug loop)
  *                                 context.patch    - previous patch attempt (for review loop)
  * @param {string}   tenantId  - Tenant identifier
+ * @param {string}   [cwd]     - Tenant worktree directory to scope the repo scan and file
+ *                               resolution against. Defaults to process.cwd() so callers
+ *                               that have no worktree (e.g. the planner) need not change.
  */
 export async function runAgent(
   agent,
   task,
   context = {},
-  tenantId = DEFAULT_TENANT
+  tenantId = DEFAULT_TENANT,
+  cwd = process.cwd()
 ) {
   assertTenantId(tenantId);
 
@@ -143,12 +159,14 @@ export async function runAgent(
     '',
     '## Repository layout',
     '```',
-    buildRepoContext(context.files ?? []).repoMap,
+    buildRepoContext(context.files ?? [], cwd).repoMap,
     '```',
   ].join('\n');
 
   // ── 3. Build user message ────────────────────────────────────────────────
-  const { inlined } = buildRepoContext(context.files ?? []);
+  // Re-use the same scan result — buildRepoContext is called once with cwd so
+  // the inlined file paths are relative to the tenant worktree, not process.cwd().
+  const { inlined } = buildRepoContext(context.files ?? [], cwd);
 
   const memory = await searchMemory(task, 3, tenantId);
   const memorySection =
