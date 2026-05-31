@@ -4,7 +4,9 @@ import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
 import { initVectorIndex } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
-import { v4 as uuidv4 } from 'uuid';
+// crypto.randomUUID() is built into Node 14.17+ — no external package needed.
+// This replaces the former `import { v4 as uuidv4 } from 'uuid'` which was
+// absent from package.json and relied on uuid being a transitive dependency.
 
 // ─── Planner output validation ────────────────────────────────────────────────
 
@@ -139,7 +141,7 @@ const MAX_PLAN_ATTEMPTS = 3;
  */
 export async function runSystem(task, opts = {}) {
   const tenantId   = assertTenantId(opts.tenantId ?? DEFAULT_TENANT);
-  const workflowId = uuidv4();
+  const workflowId = crypto.randomUUID();
   const priority   = opts.priority ?? Priority.NORMAL;
 
   logger.info({ tenantId, workflowId, task, priority }, 'Start');
