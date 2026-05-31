@@ -60,12 +60,20 @@ export function getQueueEvents(tenantId = DEFAULT_TENANT) {
 
 /**
  * Schedule a workflow step with explicit priority.
+ *
+ * @param {string} workflowId
+ * @param {object} step
+ * @param {number} [priority]   - Priority.* constant (default NORMAL)
+ * @param {string} [tenantId]
+ * @param {object} [jobOpts]    - Extra BullMQ job options merged over defaults.
+ *                                Useful for the DLQ worker which passes { delay }
+ *                                to defer CRITICAL-lane retries by a back-off period.
  */
-export async function addStep(workflowId, step, priority = Priority.NORMAL, tenantId = DEFAULT_TENANT) {
+export async function addStep(workflowId, step, priority = Priority.NORMAL, tenantId = DEFAULT_TENANT, jobOpts = {}) {
   return getTaskQueue(tenantId).add(
     'step',
     { workflowId, step, tenantId },
-    { priority }
+    { priority, ...jobOpts }
   );
 }
 
