@@ -1,62 +1,45 @@
-import { execSync } from 'child_process';
 import path from 'path';
+import { runInSandbox } from './sandbox.js';
 
 /**
  * runLint(cwd, files?)
  *
- * FIX: The original called `npm run lint` with no cwd, so it always ran
- * eslint against the main working tree in process.cwd(). Under concurrent
- * workers this means:
- *   - A lint failure in workflow A blocks workflow B's patch from being accepted.
- *   - Lint runs on the un-patched main tree, not the tenant worktree where the
- *     patch was actually written.
+ * Runs ESLint inside a Docker sandbox (see engine/sandbox.js).
  *
- * Fix:
- *   1. Accept a `cwd` argument — always the tenant worktree directory returned
- *      by ensureWorkflowBranch(). Lint now runs on the tree that has the patch.
- *   2. Accept an optional `files` array. When supplied, eslint is invoked
- *      directly on just those paths so only the changed file is linted, not
- *      the entire repo. This makes concurrent workflows independent: a lint
- *      error in one patched file cannot fail another workflow's unrelated file.
- *   3. Fall back to linting the whole worktree (eslint .) when no files are
- *      supplied — preserves backward-compat for callers that don't know the
- *      changed file yet (e.g. the review pipeline pre-apply check).
+ * Security change: lint no longer executes on the host via execSync.
+ * Instead, it runs inside a container with:
+ *   - no network access
+ *   - read-only rootfs (worktree mounted rw, node_modules ro)
+ *   - 512 MB RAM / 1 CPU cap
+ *   - 60-second timeout
  *
- * @param {string}   cwd   - Absolute path to the tenant worktree directory.
+ * All previous behaviour (cwd scoping, file-scoped vs whole-worktree lint,
+ * eslint binary resolved from project root) is preserved.
+ *
+ * @param {string}   cwd     - Absolute path to the tenant worktree directory.
  * @param {string[]} [files] - Relative paths (within cwd) of files to lint.
  * @returns {{ success: boolean, output: string }}
  */
 export function runLint(cwd, files = []) {
-  // Resolve eslint bin relative to the project root (where node_modules lives),
-  // not relative to the worktree, since worktrees share the object store but
-  // not node_modules.
   const projectRoot = path.resolve(import.meta.dirname, '..');
-  const eslint      = path.join(projectRoot, 'node_modules', '.bin', 'eslint');
 
-  // When linting specific files, pass their resolved absolute paths so eslint
-  // can always find them regardless of its own cwd resolution.
+  // Resolve the eslint binary path as seen inside the container.
+  // The bind mount maps absNodeModules → absNodeModules, so the path is identical
+  // inside the container — no path translation needed.
+  const eslint = path.join(projectRoot, 'node_modules', '.bin', 'eslint');
+
   const targets =
     files.length > 0
       ? files.map(f => path.resolve(cwd, f)).join(' ')
-      : '.';   // whole worktree
+      : '.';
 
-  // --no-eslintrc prevents eslint from walking up past the worktree and
-  // accidentally picking up a different config from the repo root.
-  // --rulesdir / --resolve-plugins-relative-to point back to the project root
-  // so the shared eslintrc.cjs is honoured.
+  // --resolve-plugins-relative-to points eslint at the project root so the
+  // shared eslintrc.cjs is honoured even when cwd is a worktree subdirectory.
   const cmd = [
     eslint,
     '--resolve-plugins-relative-to', projectRoot,
     targets,
   ].join(' ');
 
-  try {
-    execSync(cmd, { stdio: 'pipe', cwd });
-    return { success: true, output: 'Lint passed' };
-  } catch (err) {
-    return {
-      success: false,
-      output: err.stdout?.toString() || err.stderr?.toString() || err.message,
-    };
-  }
+  return runInSandbox(cmd, cwd, projectRoot);
 }
