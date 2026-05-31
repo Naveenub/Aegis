@@ -3,7 +3,6 @@ import express from 'express';
 import fs from 'fs';
 import { WebSocketServer } from 'ws';
 import { requireApiKey, optionalApiKey } from './middleware/auth.js';
-import { taskRateLimiter } from './middleware/rate-limit.js';
 import { getMetrics } from './engine/metrics.js';
 import { getTrace, listTraces } from './engine/tracer.js';
 import { listJobs } from './engine/job-store.js';
@@ -18,7 +17,7 @@ import {
   resolveReview,
   resetStepForRetry
 } from './engine/workflow-store.js';
-import { initVectorIndex } from './engine/vector-memory.js';
+import { initVectorIndex, getVectorCapabilities, logVectorCapabilityWarnings } from './engine/vector-memory.js';
 import { runSystem } from './engine/orchestrator.js';
 import { addStep, Priority } from './engine/queue.js';
 import { slotStatus, getLimit } from './engine/concurrency.js';
@@ -105,9 +104,23 @@ watchFile(TRACES_PATH);
 
 /**
  * ❤️ Health Check — intentionally public, no key required.
+ *
+ * Returns uptime plus a `vectorMemory` object so operators can immediately
+ * see whether Redis Stack and the OpenAI key are wired up correctly.
+ * When `vectorMemory.embeddings` is false, the `warnings` array explains why.
  */
-app.get('/health', optionalApiKey, (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+app.get('/health', optionalApiKey, async (req, res) => {
+  const caps = await getVectorCapabilities();
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    vectorMemory: {
+      embeddings:  caps.embeddings,
+      openai:      caps.openai,
+      redisSearch: caps.redisSearch,
+      warnings:    caps.warnings,
+    },
+  });
 });
 
 /**
@@ -122,7 +135,7 @@ app.use(requireApiKey);
  * Body: { task, priority?, timeoutMs? }
  * priority: "critical" | "high" | "normal" | "low"  (default: normal)
  */
-app.post('/task', taskRateLimiter, async (req, res) => {
+app.post('/task', async (req, res) => {
   try {
     const { task, priority = 'normal', timeoutMs, tenantId } = req.body;
 
@@ -651,6 +664,9 @@ app.get('/concurrency/:id', async (req, res) => {
 
 await seedTenantsFromEnv();
 await initVectorIndex();
+// Surface Redis Stack / OpenAI gaps immediately at startup rather than
+// letting them silently degrade agent context for the lifetime of the process.
+await logVectorCapabilityWarnings();
 
 // Use httpServer (not app.listen) so Express and WebSocket share port 3000.
 httpServer.listen(3000, () => {
