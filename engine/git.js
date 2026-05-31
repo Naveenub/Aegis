@@ -61,7 +61,17 @@ function run(cmd, cwd = process.cwd()) {
   return execSync(cmd, { stdio: 'pipe', cwd }).toString();
 }
 
-function worktreeDir(tenantId) {
+/**
+ * worktreeDir(tenantId)
+ *
+ * Resolve the absolute path of a tenant's git worktree directory.
+ * Exported so callers (e.g. agent-worker) can compute the path without
+ * duplicating the WORKTREES_ROOT constant.
+ *
+ * NOTE: this function only computes the path — it does NOT create the
+ * worktree. Use ensureWorkflowBranch() for that.
+ */
+export function worktreeDir(tenantId) {
   return path.resolve(WORKTREES_ROOT, tenantId);
 }
 
