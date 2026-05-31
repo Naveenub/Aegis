@@ -1,0 +1,1032 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aegis — Observability</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #080c10;
+    --surface:   #0d1117;
+    --border:    #1c2330;
+    --border-hi: #2a3547;
+    --text:      #c9d1d9;
+    --muted:     #586069;
+    --accent:    #58a6ff;
+    --green:     #3fb950;
+    --red:       #f85149;
+    --yellow:    #d29922;
+    --purple:    #bc8cff;
+    --cyan:      #39c5cf;
+    --font-mono: 'IBM Plex Mono', monospace;
+    --font-ui:   'DM Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* ── Layout ────────────────────────────────────────────── */
+  .shell {
+    display: grid;
+    grid-template-rows: 52px 1fr;
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .logo {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--muted); font-weight: 400; }
+
+  .hdr-sep { flex: 1; }
+
+  .status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: .35; }
+  }
+
+  .hdr-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .btn-refresh {
+    background: none;
+    border: 1px solid var(--border-hi);
+    border-radius: 5px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .btn-refresh:hover { color: var(--accent); border-color: var(--accent); }
+
+  .main {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    overflow: hidden;
+    height: calc(100vh - 52px);
+  }
+
+  /* ── Sidebar ───────────────────────────────────────────── */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .nav-section { padding: 20px 0 8px; }
+  .nav-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: .14em;
+    color: var(--muted);
+    text-transform: uppercase;
+    padding: 0 16px 8px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 16px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    font-size: 13px;
+    color: var(--muted);
+    transition: all .1s;
+    user-select: none;
+  }
+  .nav-item:hover { color: var(--text); background: rgba(88,166,255,.06); }
+  .nav-item.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: rgba(88,166,255,.08);
+  }
+  .nav-icon { width: 15px; text-align: center; font-size: 13px; }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 16px;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .sidebar-footer a { color: var(--accent); text-decoration: none; }
+
+  /* ── Content area ──────────────────────────────────────── */
+  .content {
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .view { display: none; flex-direction: column; gap: 24px; }
+  .view.active { display: flex; }
+
+  .view-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  /* ── Stat cards ────────────────────────────────────────── */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: border-color .15s;
+  }
+  .stat-card:hover { border-color: var(--border-hi); }
+  .stat-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .stat-value {
+    font-family: var(--font-mono);
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--text);
+  }
+  .stat-value.green  { color: var(--green); }
+  .stat-value.red    { color: var(--red); }
+  .stat-value.accent { color: var(--accent); }
+  .stat-sub {
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* ── Window pills ──────────────────────────────────────── */
+  .window-tabs {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .win-pill {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    flex: 1;
+    min-width: 140px;
+  }
+  .win-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 24px;
+  }
+  .win-stats { display: flex; flex-direction: column; gap: 2px; }
+  .win-rate {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--green);
+  }
+  .win-rate.warn { color: var(--yellow); }
+  .win-rate.bad  { color: var(--red); }
+  .win-detail { font-size: 11px; color: var(--muted); }
+
+  /* ── Panel / table ─────────────────────────────────────── */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .panel-count {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  th {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-align: left;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+  td {
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+    font-size: 12.5px;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .mono { font-family: var(--font-mono); }
+  .dim  { color: var(--muted); }
+
+  /* ── Badges ────────────────────────────────────────────── */
+  .badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: .06em;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-weight: 500;
+  }
+  .badge-green   { background: rgba(63,185,80,.15);  color: var(--green);  }
+  .badge-red     { background: rgba(248,81,73,.15);  color: var(--red);    }
+  .badge-yellow  { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .badge-blue    { background: rgba(88,166,255,.15); color: var(--accent); }
+  .badge-purple  { background: rgba(188,140,255,.15);color: var(--purple); }
+  .badge-muted   { background: rgba(86,98,113,.15);  color: var(--muted);  }
+
+  /* ── Agent bar chart ───────────────────────────────────── */
+  .agent-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .agent-row {
+    display: grid;
+    grid-template-columns: 120px 1fr 60px 70px;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .agent-row:last-child { border-bottom: none; }
+  .agent-name { font-family: var(--font-mono); font-size: 11px; color: var(--text); }
+  .bar-track {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width .5s ease;
+  }
+  .agent-count { font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-align: right; }
+  .agent-ms    { font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-align: right; }
+
+  /* ── Latency percentile table ──────────────────────────── */
+  .perc-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+  }
+  .perc-cell {
+    padding: 14px 16px;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .perc-cell:last-child { border-right: none; }
+  .perc-label { font-family: var(--font-mono); font-size: 10px; color: var(--muted); letter-spacing: .1em; }
+  .perc-val   { font-family: var(--font-mono); font-size: 22px; font-weight: 600; color: var(--cyan); }
+  .perc-unit  { font-size: 11px; color: var(--muted); }
+
+  /* ── Trace timeline ────────────────────────────────────── */
+  .trace-item {
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .trace-item:last-child { border-bottom: none; }
+  .trace-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .trace-header:hover { background: rgba(255,255,255,.02); }
+  .trace-id { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
+  .trace-meta { font-size: 12px; color: var(--muted); }
+  .trace-toggle {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    transition: transform .2s;
+  }
+  .trace-toggle.open { transform: rotate(180deg); }
+  .trace-spans {
+    display: none;
+    padding: 0 16px 12px 32px;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .trace-spans.open { display: flex; }
+  .span-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+  }
+  .span-step { color: var(--text); flex: 1; }
+  .span-agent { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .span-dur   { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+  /* ── Review queue ──────────────────────────────────────── */
+  .review-item {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .review-item:last-child { border-bottom: none; }
+  .review-wf { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
+  .review-reason { font-size: 12px; color: var(--text); }
+  .review-meta { font-size: 11px; color: var(--muted); display: flex; gap: 12px; }
+
+  /* ── Latency histogram ─────────────────────────────────── */
+  .histo {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 60px;
+    padding: 12px 16px;
+  }
+  .histo-bar {
+    flex: 1;
+    background: rgba(88,166,255,.25);
+    border-radius: 2px 2px 0 0;
+    min-height: 2px;
+    transition: background .15s;
+    cursor: default;
+    position: relative;
+  }
+  .histo-bar:hover { background: var(--accent); }
+
+  /* ── Empty / loading ───────────────────────────────────── */
+  .empty {
+    padding: 40px 16px;
+    text-align: center;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .loading-bar {
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    background-size: 200% 100%;
+    animation: shimmer 1.2s linear infinite;
+  }
+  @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+  /* ── DLQ / errors tag ──────────────────────────────────── */
+  .dlq-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(248,81,73,.12);
+    color: var(--red);
+    border: 1px solid rgba(248,81,73,.2);
+  }
+
+  /* ── Responsive ────────────────────────────────────────── */
+  @media (max-width: 700px) {
+    .main { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="logo">Aegis <span>/ Observability</span></div>
+    <div class="hdr-sep"></div>
+    <div class="status-dot" id="statusDot" title="Polling active"></div>
+    <div class="hdr-time" id="clock">--:--:--</div>
+    <button class="btn-refresh" onclick="refresh()">↺ refresh</button>
+  </header>
+
+  <div class="main">
+
+    <!-- ── Sidebar ── -->
+    <nav class="sidebar">
+      <div class="nav-section">
+        <div class="nav-label">Monitoring</div>
+        <div class="nav-item active" data-view="metrics" onclick="switchView('metrics', this)">
+          <span class="nav-icon">◈</span> Metrics
+        </div>
+        <div class="nav-item" data-view="agents" onclick="switchView('agents', this)">
+          <span class="nav-icon">⬡</span> Agents
+        </div>
+        <div class="nav-item" data-view="latency" onclick="switchView('latency', this)">
+          <span class="nav-icon">▲</span> Latency
+        </div>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Workflows</div>
+        <div class="nav-item" data-view="traces" onclick="switchView('traces', this)">
+          <span class="nav-icon">⋮⋮</span> Traces
+        </div>
+        <div class="nav-item" data-view="jobs" onclick="switchView('jobs', this)">
+          <span class="nav-icon">≡</span> Jobs
+        </div>
+        <div class="nav-item" data-view="review" onclick="switchView('review', this)">
+          <span class="nav-icon">◇</span> Review Queue
+        </div>
+      </div>
+      <div class="sidebar-footer">
+        <div><a href="/metrics" target="_blank">/metrics</a> · Prometheus</div>
+        <div style="margin-top:4px"><a href="/metrics/json" target="_blank">/metrics/json</a> · OTEL</div>
+        <div style="margin-top:8px;color:var(--muted)">Auto-refresh 15s</div>
+      </div>
+    </nav>
+
+    <!-- ── Content ── -->
+    <div class="content" id="content">
+
+      <!-- ░░ METRICS ░░ -->
+      <div class="view active" id="view-metrics">
+        <div class="view-title">System Metrics</div>
+
+        <div id="loading-metrics" class="loading-bar"></div>
+
+        <div class="stat-grid" id="stat-grid">
+          <div class="stat-card"><div class="stat-label">Total Jobs</div><div class="stat-value accent" id="m-total">—</div></div>
+          <div class="stat-card"><div class="stat-label">Success</div><div class="stat-value green" id="m-success">—</div></div>
+          <div class="stat-card"><div class="stat-label">Failed</div><div class="stat-value red" id="m-failed">—</div></div>
+          <div class="stat-card"><div class="stat-label">Retries</div><div class="stat-value" id="m-retries">—</div></div>
+          <div class="stat-card"><div class="stat-label">Success Rate</div><div class="stat-value green" id="m-rate">—</div><div class="stat-sub">all-time</div></div>
+          <div class="stat-card"><div class="stat-label">Avg Latency</div><div class="stat-value accent" id="m-latency">—</div><div class="stat-sub">all-time ms</div></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Windowed Success Rate</span>
+          </div>
+          <div class="window-tabs" id="window-tabs" style="padding:12px;gap:8px;"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Recent Steps</span>
+            <span class="panel-count" id="steps-count"></span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Step ID</th><th>Agent</th><th>Duration</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="steps-tbody">
+              <tr><td colspan="4" class="empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ░░ AGENTS ░░ -->
+      <div class="view" id="view-agents">
+        <div class="view-title">Agent Performance</div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Jobs by Agent</span>
+          </div>
+          <div class="agent-grid" id="agent-grid">
+            <div class="empty">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ░░ LATENCY ░░ -->
+      <div class="view" id="view-latency">
+        <div class="view-title">Latency Percentiles</div>
+        <div style="display:flex;flex-direction:column;gap:16px;" id="lat-views"></div>
+      </div>
+
+      <!-- ░░ TRACES ░░ -->
+      <div class="view" id="view-traces">
+        <div class="view-title">Workflow Traces</div>
+        <div class="panel" id="traces-panel">
+          <div class="panel-header">
+            <span class="panel-title">Traces (newest first)</span>
+            <span class="panel-count" id="traces-count"></span>
+          </div>
+          <div id="traces-list"><div class="empty">Loading…</div></div>
+        </div>
+      </div>
+
+      <!-- ░░ JOBS ░░ -->
+      <div class="view" id="view-jobs">
+        <div class="view-title">Job Log</div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Recent Jobs</span>
+            <span class="panel-count" id="jobs-count"></span>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Job ID</th><th>Agent</th><th>Status</th><th>Retries</th><th>Duration</th></tr>
+            </thead>
+            <tbody id="jobs-tbody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ░░ REVIEW QUEUE ░░ -->
+      <div class="view" id="view-review">
+        <div class="view-title">Review Queue</div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Pending Human Review</span>
+            <span class="panel-count" id="review-count"></span>
+          </div>
+          <div id="review-list"><div class="empty">Loading…</div></div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div><!-- /shell -->
+
+<script>
+// ── State ─────────────────────────────────────────────────
+let currentView = 'metrics';
+let metricsData = null;
+
+// ── Navigation ────────────────────────────────────────────
+function switchView(view, el) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('view-' + view).classList.add('active');
+  currentView = view;
+  loadView(view);
+}
+
+// ── Clock ─────────────────────────────────────────────────
+function tickClock() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB', { hour12: false });
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// ── Fetch helpers ─────────────────────────────────────────
+async function apiFetch(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+// ── Formatters ────────────────────────────────────────────
+function fmtMs(ms) {
+  if (!ms || ms === 0) return '—';
+  if (ms < 1000) return ms + ' ms';
+  return (ms / 1000).toFixed(1) + ' s';
+}
+
+function fmtAge(ms) {
+  if (!ms) return '—';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60)   return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  return Math.floor(s / 3600) + 'h ago';
+}
+
+function fmtId(id) {
+  if (!id) return '—';
+  return id.length > 18 ? id.slice(0, 8) + '…' + id.slice(-6) : id;
+}
+
+function statusBadge(status) {
+  const map = {
+    completed:    ['badge-green',  'completed'],
+    success:      ['badge-green',  'success'],
+    running:      ['badge-blue',   'running'],
+    failed:       ['badge-red',    'failed'],
+    pending:      ['badge-muted',  'pending'],
+    'needs-review': ['badge-yellow', 'review'],
+    paused:       ['badge-yellow', 'paused'],
+    cancelled:    ['badge-muted',  'cancelled'],
+  };
+  const [cls, label] = map[status] || ['badge-muted', status];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+// ── Metrics view ──────────────────────────────────────────
+async function loadMetrics() {
+  const lo = document.getElementById('loading-metrics');
+  lo.style.display = 'block';
+  try {
+    const m = await apiFetch('/metrics/json');
+    metricsData = m;
+    renderMetrics(m);
+  } catch(e) {
+    console.error('metrics', e);
+  } finally {
+    lo.style.display = 'none';
+  }
+
+  // Also fetch /metrics structured data from the JSON API
+  try {
+    const raw = await apiFetch('/metrics/json');
+    // Already rendered above
+  } catch {}
+}
+
+async function loadMetricsJson() {
+  try {
+    const data = await apiFetch('/api/metrics');
+    renderMetricsData(data);
+  } catch {}
+}
+
+async function renderMetricsFromApi() {
+  try {
+    // Try the internal JSON endpoint
+    const res = await fetch('/api/metrics');
+    if (res.ok) {
+      const data = await res.json();
+      renderMetricsData(data);
+      return;
+    }
+  } catch {}
+}
+
+function renderMetricsData(m) {
+  document.getElementById('m-total').textContent   = m.total ?? '—';
+  document.getElementById('m-success').textContent = m.success ?? '—';
+  document.getElementById('m-failed').textContent  = m.failed ?? '—';
+  document.getElementById('m-retries').textContent = m.retries ?? '—';
+  document.getElementById('m-rate').textContent    = m.successRate != null ? m.successRate + '%' : '—';
+  document.getElementById('m-latency').textContent = m.avgLatency != null ? m.avgLatency + ' ms' : '—';
+
+  // Windowed tabs
+  const wt = document.getElementById('window-tabs');
+  wt.innerHTML = '';
+  const wins = m.windows || {};
+  for (const [label, wd] of Object.entries(wins)) {
+    const rate = wd.successRate ?? 0;
+    const cls = rate >= 90 ? '' : rate >= 70 ? 'warn' : 'bad';
+    wt.innerHTML += `
+      <div class="win-pill">
+        <div class="win-label">${label}</div>
+        <div class="win-stats">
+          <div class="win-rate ${cls}">${rate}%</div>
+          <div class="win-detail">${wd.total} jobs · ${wd.failed} failed</div>
+        </div>
+      </div>`;
+  }
+
+  // Recent steps
+  const tbody = document.getElementById('steps-tbody');
+  const steps = m.recentSteps || [];
+  document.getElementById('steps-count').textContent = steps.length + ' steps';
+  if (!steps.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No step data yet</td></tr>';
+  } else {
+    tbody.innerHTML = steps.map(s => `
+      <tr>
+        <td class="mono dim">${fmtId(s.stepId)}</td>
+        <td class="mono" style="color:var(--purple)">${s.agent || '—'}</td>
+        <td class="mono dim">${fmtMs(s.durationMs)}</td>
+        <td>${statusBadge(s.status)}</td>
+      </tr>`).join('');
+  }
+}
+
+// ── Agent view ────────────────────────────────────────────
+function renderAgents(m) {
+  const grid = document.getElementById('agent-grid');
+  const agents = Object.entries(m.byAgent || {});
+  if (!agents.length) {
+    grid.innerHTML = '<div class="empty">No agent data yet</div>';
+    return;
+  }
+  const maxCount = Math.max(...agents.map(([, v]) => v.count), 1);
+  grid.innerHTML = `
+    <div class="agent-row" style="border-bottom:1px solid var(--border)">
+      <div class="agent-name dim">Agent</div>
+      <div class="dim" style="font-family:var(--font-mono);font-size:10px;letter-spacing:.1em">Jobs</div>
+      <div class="agent-count dim">Count</div>
+      <div class="agent-ms dim">Avg ms</div>
+    </div>` +
+    agents.sort((a, b) => b[1].count - a[1].count).map(([name, stats]) => `
+    <div class="agent-row">
+      <div class="agent-name">${name}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(stats.count/maxCount*100)}%"></div></div>
+      <div class="agent-count">${stats.count}</div>
+      <div class="agent-ms">${stats.avgMs}</div>
+    </div>`).join('');
+}
+
+// ── Latency view ──────────────────────────────────────────
+function renderLatency(m) {
+  const container = document.getElementById('lat-views');
+  const wins = Object.entries(m.windows || {});
+  if (!wins.length) {
+    container.innerHTML = '<div class="empty">No latency data yet</div>';
+    return;
+  }
+  container.innerHTML = wins.map(([label, wd]) => {
+    const lat = wd.latency || {};
+    return `
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Window: ${label}</span>
+        <span class="panel-count">${wd.total} samples</span>
+      </div>
+      <div class="perc-grid">
+        <div class="perc-cell">
+          <div class="perc-label">P50</div>
+          <div class="perc-val">${lat.p50 ?? 0}</div>
+          <div class="perc-unit">ms</div>
+        </div>
+        <div class="perc-cell">
+          <div class="perc-label">P95</div>
+          <div class="perc-val">${lat.p95 ?? 0}</div>
+          <div class="perc-unit">ms</div>
+        </div>
+        <div class="perc-cell">
+          <div class="perc-label">P99</div>
+          <div class="perc-val">${lat.p99 ?? 0}</div>
+          <div class="perc-unit">ms</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Traces view ───────────────────────────────────────────
+async function loadTraces() {
+  const list = document.getElementById('traces-list');
+  list.innerHTML = '<div class="loading-bar"></div>';
+  try {
+    const data = await apiFetch('/traces');
+    const traces = Array.isArray(data) ? data : (data.traces || []);
+    document.getElementById('traces-count').textContent = traces.length + ' traces';
+    if (!traces.length) {
+      list.innerHTML = '<div class="empty">No traces yet</div>';
+      return;
+    }
+    list.innerHTML = traces.map(t => {
+      const spans = Object.values(t.spans || {});
+      const start = spans.length ? Math.min(...spans.map(s => s.startMs)) : null;
+      const hasFailure = spans.some(s => s.status === 'failure');
+      const allDone = spans.every(s => s.status !== 'running');
+      const badge = !allDone ? statusBadge('running') : hasFailure ? statusBadge('failed') : statusBadge('completed');
+      return `
+        <div class="trace-item">
+          <div class="trace-header" onclick="toggleTrace(this)">
+            <span class="trace-id">${fmtId(t.traceId)}</span>
+            ${badge}
+            <span class="trace-meta">${spans.length} spans · ${fmtAge(start)}</span>
+            <span class="trace-toggle">▾</span>
+          </div>
+          <div class="trace-spans">
+            ${spans.map(s => `
+              <div class="span-row">
+                ${statusBadge(s.status)}
+                <span class="span-step">${s.step || s.spanId}</span>
+                <span class="span-agent">${s.agent || ''}</span>
+                <span class="span-dur">${s.endMs ? fmtMs(s.endMs - s.startMs) : 'running'}</span>
+              </div>`).join('')}
+          </div>
+        </div>`;
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="empty">Failed to load traces</div>';
+  }
+}
+
+function toggleTrace(header) {
+  const spans = header.nextElementSibling;
+  const toggle = header.querySelector('.trace-toggle');
+  spans.classList.toggle('open');
+  toggle.classList.toggle('open');
+}
+
+// ── Jobs view ─────────────────────────────────────────────
+async function loadJobs() {
+  const tbody = document.getElementById('jobs-tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="empty">Loading…</td></tr>';
+  try {
+    const data = await apiFetch('/jobs');
+    const jobs = Array.isArray(data) ? data : (data.jobs || []);
+    document.getElementById('jobs-count').textContent = jobs.length + ' jobs';
+    if (!jobs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No jobs yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = jobs.map(j => `
+      <tr>
+        <td class="mono dim">${fmtId(j.jobId || j.id)}</td>
+        <td class="mono" style="color:var(--purple)">${j.agent || j.step?.agent || '—'}</td>
+        <td>${statusBadge(j.status)}</td>
+        <td class="mono dim">${j.retries ?? 0}</td>
+        <td class="mono dim">${j.durationMs ? fmtMs(j.durationMs) : '—'}</td>
+      </tr>`).join('');
+  } catch(e) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">Failed to load jobs</td></tr>';
+  }
+}
+
+// ── Review queue view ─────────────────────────────────────
+async function loadReview() {
+  const list = document.getElementById('review-list');
+  list.innerHTML = '<div class="loading-bar"></div>';
+  try {
+    const data = await apiFetch('/review-queue?limit=50&status=pending');
+    const items = Array.isArray(data) ? data : (data.items || data.queue || []);
+    document.getElementById('review-count').textContent = items.length + ' pending';
+    if (!items.length) {
+      list.innerHTML = '<div class="empty">No items pending review</div>';
+      return;
+    }
+    list.innerHTML = items.map(item => `
+      <div class="review-item">
+        <div class="review-wf">${fmtId(item.workflowId)} <span class="dim">·</span> step: ${fmtId(item.stepId)}</div>
+        <div class="review-reason">${item.reason || item.details?.reason || 'Awaiting approval'}</div>
+        <div class="review-meta">
+          <span>${item.details?.agent ? 'agent: ' + item.details.agent : ''}</span>
+          <span>${fmtAge(item.flaggedAt || item.details?.flaggedAt)}</span>
+          ${item.status ? statusBadge(item.status) : ''}
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="empty">Failed to load review queue</div>';
+  }
+}
+
+// ── Master load ───────────────────────────────────────────
+async function loadView(view) {
+  if (view === 'metrics' || view === 'agents' || view === 'latency') {
+    await loadMetricsAndRender(view);
+  } else if (view === 'traces') {
+    await loadTraces();
+  } else if (view === 'jobs') {
+    await loadJobs();
+  } else if (view === 'review') {
+    await loadReview();
+  }
+}
+
+async function loadMetricsAndRender(view) {
+  const lo = document.getElementById('loading-metrics');
+  if (lo) lo.style.display = 'block';
+  try {
+    // Try the dedicated JSON metrics endpoint
+    const res = await fetch('/api/metrics');
+    if (res.ok) {
+      const m = await res.json();
+      renderMetricsData(m);
+      renderAgents(m);
+      renderLatency(m);
+    } else {
+      // fallback: parse OTEL json for totals
+      const otel = await apiFetch('/metrics/json');
+      const pts = (otel?.resourceMetrics?.[0]?.scopeMetrics?.[0]?.metrics || []);
+      const find = name => pts.find(p => p.name === name)?.gauge?.dataPoints?.[0]?.asDouble ?? 0;
+      const m = {
+        total: find('aegis.jobs.total'),
+        success: find('aegis.jobs.success'),
+        failed: find('aegis.jobs.failed'),
+        retries: find('aegis.jobs.retries'),
+        successRate: find('aegis.success_rate'),
+        avgLatency: find('aegis.avg_latency_ms'),
+        byAgent: {},
+        recentSteps: [],
+        windows: {},
+      };
+      // Build byAgent from OTEL
+      pts.filter(p => p.name === 'aegis.agent.jobs').forEach(p => {
+        const agent = p.gauge.dataPoints[0]?.attributes?.find(a => a.key === 'agent')?.value?.stringValue;
+        const avgPt = pts.find(q => q.name === 'aegis.agent.avg_latency_ms' &&
+          q.gauge.dataPoints[0]?.attributes?.find(a => a.key === 'agent')?.value?.stringValue === agent);
+        if (agent) m.byAgent[agent] = { count: p.gauge.dataPoints[0].asDouble, avgMs: avgPt?.gauge?.dataPoints?.[0]?.asDouble ?? 0 };
+      });
+      // Build windows
+      const winNames = ['1m','5m','1h'];
+      winNames.forEach(win => {
+        const findWin = (name) => pts.find(p => p.name === name && p.gauge?.dataPoints?.[0]?.attributes?.find(a => a.key==='window')?.value?.stringValue === win);
+        const tot = findWin('aegis.window.total')?.gauge?.dataPoints?.[0]?.asDouble ?? 0;
+        const suc = findWin('aegis.window.success')?.gauge?.dataPoints?.[0]?.asDouble ?? 0;
+        const fail = findWin('aegis.window.failed')?.gauge?.dataPoints?.[0]?.asDouble ?? 0;
+        const rate = findWin('aegis.window.success_rate')?.gauge?.dataPoints?.[0]?.asDouble ?? 0;
+        m.windows[win] = {
+          total: tot, success: suc, failed: fail, successRate: rate,
+          latency: {
+            p50: findWin('aegis.latency.p50_ms')?.gauge?.dataPoints?.[0]?.asDouble ?? 0,
+            p95: findWin('aegis.latency.p95_ms')?.gauge?.dataPoints?.[0]?.asDouble ?? 0,
+            p99: findWin('aegis.latency.p99_ms')?.gauge?.dataPoints?.[0]?.asDouble ?? 0,
+          }
+        };
+      });
+      renderMetricsData(m);
+      renderAgents(m);
+      renderLatency(m);
+    }
+  } catch(e) {
+    console.error('metrics load', e);
+  } finally {
+    if (lo) lo.style.display = 'none';
+  }
+}
+
+// ── Refresh + auto-poll ───────────────────────────────────
+async function refresh() {
+  await loadView(currentView);
+}
+
+setInterval(() => loadView(currentView), 15_000);
+
+// ── Init ──────────────────────────────────────────────────
+loadView('metrics');
+</script>
+</body>
+</html>
