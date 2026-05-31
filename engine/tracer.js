@@ -1,7 +1,28 @@
 /**
- * tracer.js — lightweight structured trace store
+ * tracer.js — lightweight structured trace store, Redis-backed
  *
- * Trace model:
+ * FIX: The previous implementation persisted all trace/span data to
+ * .claude/context/traces.json, with proper-lockfile for intra-process safety.
+ * proper-lockfile locks are process-local: in a multi-process or multi-host
+ * BullMQ deployment each worker maintains its own copy of the file.  Spans
+ * written by worker A are invisible to worker B; the dashboard shows an
+ * incomplete trace at best, a corrupt one at worst.
+ *
+ * Fix: migrate to Redis, which is already the shared store used by the rest
+ * of the engine.  Each span is stored as its own Redis hash so concurrent
+ * writers never race — there is no read-modify-write cycle.
+ *
+ * Key layout
+ * ──────────
+ *   aegis:trace:{traceId}:meta          STRING (JSON) — traceId
+ *   aegis:trace:{traceId}:span:{spanId} HASH   — step, agent, patch,
+ *                                                testResult, startMs, endMs,
+ *                                                status
+ *   aegis:traces:index                  ZSET   — traceId scored by first-
+ *                                                span startMs (for listing)
+ *
+ * Trace model (unchanged from the file-based version)
+ * ────────────────────────────────────────────────────
  *   trace (traceId = workflowId)
  *     └─ span  (spanId = stepId)
  *           step        string
@@ -11,60 +32,22 @@
  *           startMs     number
  *           endMs       number | null
  *           status      'running' | 'success' | 'failure'
- *
- * Persisted to .claude/context/traces.json (append-friendly object map).
- *
- * FIX: The original code did an unguarded load→mutate→save.
- * Under concurrent BullMQ workers N workers could read the same stale snapshot,
- * each write their span, and all but the last writer's span would be silently
- * dropped.  Every write now holds an advisory lock via `proper-lockfile`.
- * Reads remain lock-free — an eventually-consistent trace is fine for the UI.
  */
 
-import fs   from 'fs';
-import path from 'path';
-import lock from 'proper-lockfile';
+import IORedis from 'ioredis';
 
-const PATH      = '.claude/context/traces.json';
-const LOCK_OPTS = {
-  retries : { retries: 10, minTimeout: 50, maxTimeout: 200, factor: 1.5 },
-  stale   : 15_000,
+const redis = new IORedis();
+
+// ─── Key helpers ──────────────────────────────────────────────────────────────
+
+const K = {
+  meta:  traceId           => `aegis:trace:${traceId}:meta`,
+  span:  (traceId, spanId) => `aegis:trace:${traceId}:span:${spanId}`,
+  spans: traceId           => `aegis:trace:${traceId}:spans`,  // ZSET of spanIds scored by startMs
+  index:                      'aegis:traces:index',
 };
 
-// ─── internal helpers ────────────────────────────────────────────────────────
-
-function ensureFile() {
-  if (!fs.existsSync(PATH)) {
-    fs.mkdirSync(path.dirname(PATH), { recursive: true });
-    fs.writeFileSync(PATH, '{}');
-  }
-}
-
-function load() {
-  try {
-    return JSON.parse(fs.readFileSync(PATH, 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-
-function save(traces) {
-  fs.writeFileSync(PATH, JSON.stringify(traces, null, 2));
-}
-
-async function withLock(fn) {
-  ensureFile();
-  const release = await lock.lock(PATH, LOCK_OPTS);
-  try {
-    const traces  = load();
-    const updated = fn(traces);
-    save(updated);
-  } finally {
-    await release();
-  }
-}
-
-// ─── write ───────────────────────────────────────────────────────────────────
+// ─── write ────────────────────────────────────────────────────────────────────
 
 /**
  * Open a new span for a step.
@@ -74,20 +57,32 @@ async function withLock(fn) {
  * @param {string} agent     - agent name executing this step
  */
 export async function startSpan(traceId, spanId, stepDesc, agent) {
-  await withLock(traces => {
-    if (!traces[traceId]) traces[traceId] = { traceId, spans: {} };
-    traces[traceId].spans[spanId] = {
-      spanId,
-      step       : stepDesc,
-      agent,
-      patch      : null,
-      testResult : null,
-      startMs    : Date.now(),
-      endMs      : null,
-      status     : 'running',
-    };
-    return traces;
+  const startMs = Date.now();
+
+  const pipeline = redis.pipeline();
+
+  // Upsert trace meta (NX keeps the original creation time on the index)
+  pipeline.setnx(K.meta(traceId), JSON.stringify({ traceId }));
+
+  // Store span fields in a hash — each field write is independent, no race
+  pipeline.hset(K.span(traceId, spanId), {
+    spanId,
+    step:       stepDesc,
+    agent,
+    patch:      '',           // empty string == null (Redis hashes are strings)
+    testResult: '',
+    startMs:    startMs.toString(),
+    endMs:      '',
+    status:     'running',
   });
+
+  // Index spans within the trace (score = startMs for ordered retrieval)
+  pipeline.zadd(K.spans(traceId), startMs, spanId);
+
+  // Index traces globally (NX: only set score on first span so order = trace creation time)
+  pipeline.zadd(K.index, 'NX', startMs, traceId);
+
+  await pipeline.exec();
 }
 
 /**
@@ -97,11 +92,7 @@ export async function startSpan(traceId, spanId, stepDesc, agent) {
  * @param {string} patch
  */
 export async function attachPatch(traceId, spanId, patch) {
-  await withLock(traces => {
-    const span = traces[traceId]?.spans[spanId];
-    if (span) span.patch = patch;
-    return traces;
-  });
+  await redis.hset(K.span(traceId, spanId), 'patch', patch ?? '');
 }
 
 /**
@@ -111,11 +102,11 @@ export async function attachPatch(traceId, spanId, patch) {
  * @param {{ success: boolean, output: string }} testResult
  */
 export async function attachTestResult(traceId, spanId, testResult) {
-  await withLock(traces => {
-    const span = traces[traceId]?.spans[spanId];
-    if (span) span.testResult = testResult;
-    return traces;
-  });
+  await redis.hset(
+    K.span(traceId, spanId),
+    'testResult',
+    testResult ? JSON.stringify(testResult) : '',
+  );
 }
 
 /**
@@ -125,42 +116,69 @@ export async function attachTestResult(traceId, spanId, testResult) {
  * @param {'success'|'failure'} status
  */
 export async function endSpan(traceId, spanId, status) {
-  await withLock(traces => {
-    const span = traces[traceId]?.spans[spanId];
-    if (span) {
-      span.endMs  = Date.now();
-      span.status = status;
-    }
-    return traces;
+  await redis.hset(K.span(traceId, spanId), {
+    endMs:  Date.now().toString(),
+    status,
   });
 }
 
-// ─── read (lock-free — eventual consistency is fine for the UI) ──────────────
+// ─── read (eventually consistent — fine for the UI) ──────────────────────────
+
+/**
+ * Deserialize a raw Redis hash into a typed span object.
+ */
+function deserializeSpan(raw) {
+  if (!raw?.spanId) return null;
+  return {
+    spanId:     raw.spanId,
+    step:       raw.step,
+    agent:      raw.agent,
+    patch:      raw.patch      || null,
+    testResult: raw.testResult ? JSON.parse(raw.testResult) : null,
+    startMs:    Number(raw.startMs),
+    endMs:      raw.endMs ? Number(raw.endMs) : null,
+    status:     raw.status,
+  };
+}
 
 /**
  * Return the full trace for a workflow.
  * @param {string} traceId
  * @returns {{ traceId, spans: object } | null}
  */
-export function getTrace(traceId) {
-  ensureFile();
-  const traces = load();
-  return traces[traceId] ?? null;
+export async function getTrace(traceId) {
+  const metaRaw = await redis.get(K.meta(traceId));
+  if (!metaRaw) return null;
+
+  // Fetch all span IDs for this trace, then fetch each span hash in one pipeline
+  const spanIds = await redis.zrange(K.spans(traceId), 0, -1);
+  if (!spanIds.length) return { traceId, spans: {} };
+
+  const pipeline = redis.pipeline();
+  for (const spanId of spanIds) pipeline.hgetall(K.span(traceId, spanId));
+  const results = await pipeline.exec();
+
+  const spans = {};
+  for (let i = 0; i < spanIds.length; i++) {
+    const [err, raw] = results[i];
+    if (err || !raw) continue;
+    const span = deserializeSpan(raw);
+    if (span) spans[spanIds[i]] = span;
+  }
+
+  return { traceId, spans };
 }
 
 /**
  * Return all traces (newest first, capped at limit).
  * @param {number} limit
- * @returns {Array}
+ * @returns {Promise<Array>}
  */
-export function listTraces(limit = 100) {
-  ensureFile();
-  const traces = load();
-  return Object.values(traces)
-    .sort((a, b) => {
-      const aStart = Math.min(...Object.values(a.spans).map(s => s.startMs));
-      const bStart = Math.min(...Object.values(b.spans).map(s => s.startMs));
-      return bStart - aStart;
-    })
-    .slice(0, limit);
+export async function listTraces(limit = 100) {
+  // Index is scored by first-span startMs; ZREVRANGE gives newest first
+  const traceIds = await redis.zrevrange(K.index, 0, limit - 1);
+  if (!traceIds.length) return [];
+
+  const traces = await Promise.all(traceIds.map(id => getTrace(id)));
+  return traces.filter(Boolean);
 }
