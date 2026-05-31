@@ -289,14 +289,32 @@ function getWorker(tenantId) {
               }
 
               // When no more steps remain the workflow is complete —
-              // squash-merge the workflow branch into the tenant base branch
-              // and remove the dedicated worktree.
+              // merge the workflow branch into the tenant base branch.
               // finaliseWorkflow acquires the tenant lock internally, so we
               // release our per-workflow lock first to avoid ordering issues.
               if (nextSteps.length === 0) {
                 try { await worktreeLock.release(); } catch { /* best-effort */ }
                 worktreeLock = null;
-                await finaliseWorkflow(workflowId, tenant);
+
+                const mergeResult = await finaliseWorkflow(workflowId, tenant);
+
+                if (!mergeResult.merged) {
+                  // Merge conflicts detected — the workflow branch is left intact
+                  // so a human can inspect or manually resolve. Flag for review.
+                  await flagForReview(workflowId, 'merge', {
+                    reason: 'merge-conflict',
+                    description: 'Workflow completed but could not be merged into the tenant base branch due to conflicts with a concurrent workflow.',
+                    conflicts: mergeResult.conflicts,
+                    branch: `aegis/${tenant}/${workflowId}`,
+                    baseBranch: `aegis-tenant/${tenant}`,
+                    flaggedAt: Date.now(),
+                  });
+                  await updateStep(workflowId, step.id, 'needs-review');
+                  await updateJob(job.id, {
+                    status: 'needs-review',
+                    result: `Merge conflicts: ${mergeResult.conflicts.join(', ')}`,
+                  }, tenant);
+                }
               }
 
             } else {
