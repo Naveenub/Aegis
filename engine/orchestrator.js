@@ -4,9 +4,9 @@ import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
 import { initVectorIndex } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
+import { scanRepo } from './repo-scanner.js';
+import { worktreeDir } from './git.js';
 // crypto.randomUUID() is built into Node 14.17+ — no external package needed.
-// This replaces the former `import { v4 as uuidv4 } from 'uuid'` which was
-// absent from package.json and relied on uuid being a transitive dependency.
 
 // ─── Planner output validation ────────────────────────────────────────────────
 
@@ -23,23 +23,161 @@ const VALID_AGENTS = new Set([
   'meta-reviewer',
 ]);
 
+// Minimum meaningful description length (chars). Catches "fix it", "done", etc.
+const MIN_DESCRIPTION_LENGTH = 20;
+
 /**
  * Strip markdown code fences the model sometimes wraps around JSON output
  * despite explicit instructions not to.
- *
- * Handles:
- *   ```json\n{...}\n```
- *   ```\n{...}\n```
- *   plain {...}
  */
 function stripFences(raw) {
   return raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
 }
 
+// ─── Structural graph validation ──────────────────────────────────────────────
+
+/**
+ * Detect cycles in the dependency graph using Kahn's topological sort.
+ *
+ * parsePlan() already rejects forward-references (a task depending on an id
+ * not yet seen), so by the time this runs every dep is guaranteed to exist.
+ * This pass catches the remaining case: a cycle where A→B→C→A all appear in
+ * order but form a loop through indirect paths.
+ *
+ * Throws with the detected cycle path on failure.
+ *
+ * @param {object[]} tasks  - validated task objects with .id and .depends_on
+ */
+function assertNoCycles(tasks) {
+  // Build adjacency (id → set of ids that depend ON it, i.e. out-edges)
+  // and in-degree map for Kahn's algorithm.
+  const inDegree = new Map();
+  const children = new Map(); // id → [ids that list id as a dependency]
+
+  for (const t of tasks) {
+    if (!inDegree.has(t.id)) inDegree.set(t.id, 0);
+    if (!children.has(t.id)) children.set(t.id, []);
+  }
+
+  for (const t of tasks) {
+    for (const dep of t.depends_on) {
+      inDegree.set(t.id, (inDegree.get(t.id) ?? 0) + 1);
+      children.get(dep).push(t.id);
+    }
+  }
+
+  // Kahn's: start with all nodes that have no incoming edges
+  const queue = [...inDegree.entries()]
+    .filter(([, deg]) => deg === 0)
+    .map(([id]) => id);
+
+  let processed = 0;
+
+  while (queue.length) {
+    const node = queue.shift();
+    processed++;
+
+    for (const child of (children.get(node) ?? [])) {
+      const newDeg = inDegree.get(child) - 1;
+      inDegree.set(child, newDeg);
+      if (newDeg === 0) queue.push(child);
+    }
+  }
+
+  if (processed !== tasks.length) {
+    // Nodes that were never processed are part of a cycle
+    const cycleNodes = [...inDegree.entries()]
+      .filter(([, deg]) => deg > 0)
+      .map(([id]) => id);
+
+    throw new Error(
+      `Planner produced a circular dependency among tasks: [${cycleNodes.join(', ')}]. ` +
+      'The dependency graph must be a DAG (directed acyclic graph).'
+    );
+  }
+}
+
+/**
+ * Validate that every file listed in task.files actually exists in the repo.
+ *
+ * Called after the worktree is available (or falls back to process.cwd()).
+ * Unknown files are stripped from the task in-place and a warning is logged
+ * rather than throwing — a hallucinated file path should not abort the whole
+ * workflow, but it must not silently reach agent-runner where it would cause
+ * a confusing "file not found" deep in execution.
+ *
+ * @param {object[]} tasks      - mutable task array (files arrays edited in-place)
+ * @param {string}   repoRoot   - absolute path to scan for real files
+ * @param {object}   [log]      - logger instance (optional, falls back to console)
+ */
+function stripHallucinatedFiles(tasks, repoRoot, log = logger) {
+  // Build a Set of repo-relative paths for O(1) lookup.
+  // scanRepo returns absolute paths; convert to repo-relative for matching.
+  const repoFiles = new Set(
+    scanRepo(repoRoot).map(abs => abs.slice(repoRoot.length).replace(/^[\\/]/, ''))
+  );
+
+  for (const task of tasks) {
+    if (!task.files || task.files.length === 0) continue;
+
+    const valid   = [];
+    const phantom = [];
+
+    for (const f of task.files) {
+      // Normalise separators so Windows paths match the scan output
+      const normalised = f.replace(/\\/g, '/').replace(/^\.\//, '');
+      if (repoFiles.has(normalised)) {
+        valid.push(f);
+      } else {
+        phantom.push(f);
+      }
+    }
+
+    if (phantom.length) {
+      log.warn(
+        { taskId: task.id, phantomFiles: phantom },
+        'Planner referenced files that do not exist in the repo — stripped'
+      );
+      task.files = valid;
+    }
+  }
+}
+
+/**
+ * Ensure every task description is substantive enough to be actionable.
+ * A description like "fix it" or "done" gives agents nothing to work with.
+ *
+ * @param {object[]} tasks
+ */
+function assertDescriptionsSubstantive(tasks) {
+  for (const task of tasks) {
+    if (task.description.trim().length < MIN_DESCRIPTION_LENGTH) {
+      throw new Error(
+        `tasks id="${task.id}" description is too vague (${task.description.trim().length} chars, ` +
+        `minimum ${MIN_DESCRIPTION_LENGTH}): "${task.description}". ` +
+        'Descriptions must include concrete details (file names, function names, expected behaviour).'
+      );
+    }
+  }
+}
+
+// ─── Plan parsing (schema + structural) ──────────────────────────────────────
+
 /**
  * Parse and validate the planner's JSON output.
  * Throws a descriptive error rather than letting bad data silently corrupt
  * the workflow or produce an unreadable crash further downstream.
+ *
+ * Validation layers (in order):
+ *   1. JSON parse
+ *   2. Top-level shape  { tasks: [...] }
+ *   3. Per-task schema  (id, agent, description, depends_on, files)
+ *   4. Description substance  (not just "fix it")
+ *   5. Cycle detection  (DAG check via topological sort)
+ *
+ * File-path validation (stripHallucinatedFiles) is a separate pass called
+ * from runSystem() once the repoRoot is known, because the planner runs
+ * before any worktree exists.
  *
  * @param {string} raw   - Raw text returned by the planner agent
  * @returns {{ tasks: object[] }}
@@ -73,11 +211,11 @@ function parsePlan(raw) {
     throw new Error('Planner returned an empty tasks array — nothing to execute.');
   }
 
-  // ── 3. Per-task validation ─────────────────────────────────────────────────
+  // ── 3. Per-task schema ─────────────────────────────────────────────────────
   const seenIds = new Set();
 
   for (let i = 0; i < plan.tasks.length; i++) {
-    const t = plan.tasks[i];
+    const t   = plan.tasks[i];
     const loc = `tasks[${i}]`;
 
     if (t === null || typeof t !== 'object') {
@@ -106,27 +244,42 @@ function parsePlan(raw) {
       throw new Error(`${loc} (id="${t.id}") must have a non-empty description string`);
     }
 
-    // depends_on
+    // depends_on — must be array; every dep must be a previously-seen id
     if (!Array.isArray(t.depends_on)) {
       throw new Error(
         `${loc} (id="${t.id}") "depends_on" must be an array (got ${JSON.stringify(t.depends_on)})`
       );
     }
     for (const dep of t.depends_on) {
+      if (typeof dep !== 'string' || dep.trim() === '') {
+        throw new Error(
+          `${loc} (id="${t.id}") "depends_on" contains a non-string entry: ${JSON.stringify(dep)}`
+        );
+      }
       if (!seenIds.has(dep)) {
         throw new Error(
-          `${loc} (id="${t.id}") depends_on "${dep}" which is not defined before this task`
+          `${loc} (id="${t.id}") depends_on "${dep}" which is not defined before this task. ` +
+          'Tasks must be listed in dependency order.'
         );
       }
     }
 
-    // files (optional but must be array of strings when present)
+    // files — optional, but must be array of strings when present
     if (t.files !== undefined) {
       if (!Array.isArray(t.files) || t.files.some((f) => typeof f !== 'string')) {
         throw new Error(`${loc} (id="${t.id}") "files" must be an array of strings`);
       }
+    } else {
+      // Normalise absent files to empty array for uniform downstream handling
+      t.files = [];
     }
   }
+
+  // ── 4. Description substance ───────────────────────────────────────────────
+  assertDescriptionsSubstantive(plan.tasks);
+
+  // ── 5. Cycle detection ─────────────────────────────────────────────────────
+  assertNoCycles(plan.tasks);
 
   return plan;
 }
@@ -153,7 +306,7 @@ export async function runSystem(task, opts = {}) {
   // Ensure this tenant's vector index exists before first use
   await initVectorIndex(tenantId);
 
-  // 1️⃣ Plan — retry up to MAX_PLAN_ATTEMPTS on parse/schema failure
+  // 1️⃣ Plan — retry up to MAX_PLAN_ATTEMPTS on parse/schema/graph failure
   let plan;
   let lastError;
 
@@ -179,17 +332,24 @@ export async function runSystem(task, opts = {}) {
     );
   }
 
-  // 2️⃣ Persist workflow
+  // 2️⃣ File-path validation — strip hallucinated paths now that we can scan.
+  //    The tenant base worktree may not exist yet (workflow worktree is created
+  //    per-workflow in git.js); fall back to process.cwd() so this pass always
+  //    runs rather than being skipped when there's nothing to scan.
+  const repoRoot = worktreeDir(tenantId) ?? process.cwd();
+  stripHallucinatedFiles(plan.tasks, repoRoot);
+
+  // 3️⃣ Persist workflow
   await createWorkflow(workflowId, plan.tasks, {
     tenantId,
     priority,
     timeoutMs: opts.timeoutMs ?? null,
   });
 
-  // 3️⃣ Get initial runnable steps
+  // 4️⃣ Get initial runnable steps
   const steps = await getRunnableSteps(workflowId, tenantId);
 
-  // 4️⃣ Schedule — no execution here
+  // 5️⃣ Schedule — no execution here
   for (const step of steps) {
     await addStep(workflowId, step, priority, tenantId);
   }
