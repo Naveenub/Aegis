@@ -58,3 +58,48 @@ app.post('/cancel/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── Change 3: add GET /workflows listing endpoint ────────────────────────────
+//
+// Add this import alongside the other workflow-store imports at the top of
+// server.js (where cancelWorkflow, getWorkflow, etc. are already imported):
+//
+//   import { listWorkflows } from './engine/workflow-store.js';
+//
+// Then add this route — it can go anywhere after the express app is created,
+// conventionally next to the other GET /workflow/:id route.
+
+/**
+ * GET /workflows
+ *
+ * Query params (all optional):
+ *   status    — filter by status: running | paused | cancelled | completed | failed | needs-review
+ *   tenantId  — filter by tenant
+ *   limit     — max results (default 50, max 200)
+ *   cursor    — pagination cursor returned by a previous call ('0' or omit for first page)
+ *
+ * Response:
+ *   { workflows: [...], nextCursor: "<string>" }
+ *   nextCursor === '0' means all pages have been fetched.
+ *
+ * Example:
+ *   GET /workflows?status=running&limit=20
+ *   GET /workflows?status=failed&tenantId=acme&cursor=<prev_cursor>
+ */
+app.get('/workflows', async (req, res) => {
+  try {
+    const {
+      status   = null,
+      tenantId = null,
+      cursor   = '0'
+    } = req.query;
+
+    const limit = Math.min(parseInt(req.query.limit ?? '50', 10) || 50, 200);
+
+    const result = await listWorkflows({ status, tenantId, limit, cursor });
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
