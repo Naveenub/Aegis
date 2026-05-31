@@ -1,123 +1,91 @@
 /**
- * metrics.js — job/step metric store
+ * metrics.js — job/step metric store, Redis-backed
  *
- * FIX: The original code did an unguarded load→mutate→save on a flat JSON file.
- * Under concurrent BullMQ workers this is a classic read-modify-write race:
- * two workers read the same stale snapshot, both increment counters, and the
- * last writer silently drops the other worker's update.
+ * FIX: The previous implementation wrote counters and span data to
+ * .claude/context/metrics.json, protected only by `proper-lockfile`.
+ * proper-lockfile advisory locks are process-local: they give no protection
+ * across multiple BullMQ worker processes or multiple hosts.  Each process
+ * maintained its own copy of the file, so the dashboard always showed a
+ * partial view — only the metrics accumulated by whichever process happened
+ * to be read.
  *
- * Solution: wrap every mutation in a retry loop using `proper-lockfile`, which
- * creates an advisory `.lock` file next to metrics.json. If another process
- * already holds the lock the call retries (up to LOCK_RETRIES times) so no
- * update is ever lost. Reads (getMetrics) intentionally skip the lock — they
- * only need an eventually-consistent snapshot for the dashboard.
+ * Fix: migrate every counter and span to Redis, which is already the shared
+ * store used by job-store.js, workflow-store.js, and queue.js.
+ *
+ * Key layout
+ * ──────────
+ *   aegis:metrics:counters          HASH  — total, success, failed, retries
+ *   aegis:metrics:latency           LIST  — RPUSH per-job latency ms (integers)
+ *   aegis:metrics:agent:{name}      HASH  — count, totalMs
+ *   aegis:metrics:step:{stepId}     HASH  — agentName, startMs, endMs,
+ *                                           durationMs, status
+ *   aegis:metrics:steps:completed   ZSET  — stepId scored by endMs
+ *                                           (for ordered recent-steps query)
+ *   aegis:metrics:start:{jobId}     STRING — startMs, TTL 1 h
+ *
+ * All counters use HINCRBY so concurrent writers never race; there is no
+ * read-modify-write cycle anywhere in this module.
  */
 
-import fs   from 'fs';
-import path from 'path';
-import lock from 'proper-lockfile';
+import IORedis from 'ioredis';
 
-const PATH      = '.claude/context/metrics.json';
-const LOCK_OPTS = {
-  retries : { retries: 10, minTimeout: 50, maxTimeout: 200, factor: 1.5 },
-  stale   : 15_000,   // treat a lock as stale after 15 s (crashed worker)
+const redis = new IORedis();
+
+// ─── Key helpers ──────────────────────────────────────────────────────────────
+
+const K = {
+  counters:       'aegis:metrics:counters',
+  latency:        'aegis:metrics:latency',
+  agent:  name => `aegis:metrics:agent:${name}`,
+  step:   id   => `aegis:metrics:step:${id}`,
+  steps:          'aegis:metrics:steps:completed',
+  start:  jobId => `aegis:metrics:start:${jobId}`,
 };
 
-// ─── internal helpers ────────────────────────────────────────────────────────
+const START_TTL_S = 3600; // 1 hour — discard start times for long-running jobs
 
-function ensureFile() {
-  if (!fs.existsSync(PATH)) {
-    fs.mkdirSync(path.dirname(PATH), { recursive: true });
-    fs.writeFileSync(PATH, JSON.stringify(empty(), null, 2));
-  }
-}
-
-function empty() {
-  return {
-    total   : 0,
-    success : 0,
-    failed  : 0,
-    retries : 0,
-    latency : [],
-    byAgent : {},   // { [agentName]: { count, totalMs } }
-    byStep  : {},   // { [stepId]:  { agentName, startMs, endMs, durationMs, status } }
-  };
-}
-
-function load() {
-  try {
-    return JSON.parse(fs.readFileSync(PATH, 'utf-8'));
-  } catch {
-    return empty();
-  }
-}
-
-function save(data) {
-  fs.writeFileSync(PATH, JSON.stringify(data, null, 2));
-}
-
-/**
- * Acquire an exclusive advisory lock, run `fn(data)` which mutates the
- * in-memory object, then flush to disk and release.
- *
- * `fn` receives the current parsed metrics and must return the (mutated)
- * object to persist.  Any exception inside `fn` releases the lock before
- * propagating so the process never dead-locks itself.
- */
-async function withLock(fn) {
-  ensureFile();
-  const release = await lock.lock(PATH, LOCK_OPTS);
-  try {
-    const data = load();
-    const updated = fn(data);   // synchronous mutation
-    save(updated);
-  } finally {
-    await release();
-  }
-}
-
-// ─── job-level (workflow) ────────────────────────────────────────────────────
+// ─── job-level (workflow) ─────────────────────────────────────────────────────
 
 export async function recordStart(jobId) {
-  await withLock(data => {
-    data.total += 1;
-    data[`start_${jobId}`] = Date.now();
-    return data;
-  });
+  await Promise.all([
+    redis.hincrby(K.counters, 'total', 1),
+    redis.set(K.start(jobId), Date.now().toString(), 'EX', START_TTL_S),
+  ]);
 }
 
 export async function recordRetry() {
-  await withLock(data => {
-    data.retries += 1;
-    return data;
-  });
+  await redis.hincrby(K.counters, 'retries', 1);
 }
 
 export async function recordSuccess(jobId) {
-  await withLock(data => {
-    data.success += 1;
-    const start = data[`start_${jobId}`];
-    if (start) {
-      data.latency.push(Date.now() - start);
-      delete data[`start_${jobId}`];
-    }
-    return data;
-  });
+  const pipeline = redis.pipeline();
+  pipeline.hincrby(K.counters, 'success', 1);
+
+  const startRaw = await redis.get(K.start(jobId));
+  if (startRaw) {
+    const latency = Date.now() - Number(startRaw);
+    pipeline.rpush(K.latency, latency.toString());
+    pipeline.del(K.start(jobId));
+  }
+
+  await pipeline.exec();
 }
 
 export async function recordFailure(jobId) {
-  await withLock(data => {
-    data.failed += 1;
-    const start = data[`start_${jobId}`];
-    if (start) {
-      data.latency.push(Date.now() - start);
-      delete data[`start_${jobId}`];
-    }
-    return data;
-  });
+  const pipeline = redis.pipeline();
+  pipeline.hincrby(K.counters, 'failed', 1);
+
+  const startRaw = await redis.get(K.start(jobId));
+  if (startRaw) {
+    const latency = Date.now() - Number(startRaw);
+    pipeline.rpush(K.latency, latency.toString());
+    pipeline.del(K.start(jobId));
+  }
+
+  await pipeline.exec();
 }
 
-// ─── per-step spans ──────────────────────────────────────────────────────────
+// ─── per-step spans ───────────────────────────────────────────────────────────
 
 /**
  * Mark a step as started for a given agent.
@@ -125,9 +93,10 @@ export async function recordFailure(jobId) {
  * @param {string} agentName
  */
 export async function recordStepStart(stepId, agentName) {
-  await withLock(data => {
-    data.byStep[stepId] = { agentName, startMs: Date.now(), status: 'running' };
-    return data;
+  await redis.hset(K.step(stepId), {
+    agentName,
+    startMs: Date.now().toString(),
+    status:  'running',
   });
 }
 
@@ -137,58 +106,90 @@ export async function recordStepStart(stepId, agentName) {
  * @param {'success'|'failure'} status
  */
 export async function recordStepEnd(stepId, status) {
-  await withLock(data => {
-    const span = data.byStep[stepId];
-    if (!span) return data;
+  const raw = await redis.hgetall(K.step(stepId));
+  if (!raw?.startMs) return;
 
-    const endMs      = Date.now();
-    const durationMs = endMs - span.startMs;
+  const endMs      = Date.now();
+  const durationMs = endMs - Number(raw.startMs);
+  const agent      = raw.agentName || 'unknown';
 
-    data.byStep[stepId] = { ...span, endMs, durationMs, status };
+  const pipeline = redis.pipeline();
 
-    const agent = span.agentName || 'unknown';
-    if (!data.byAgent[agent]) data.byAgent[agent] = { count: 0, totalMs: 0 };
-    data.byAgent[agent].count   += 1;
-    data.byAgent[agent].totalMs += durationMs;
-
-    return data;
+  // Update the span record
+  pipeline.hset(K.step(stepId), {
+    endMs:      endMs.toString(),
+    durationMs: durationMs.toString(),
+    status,
   });
+
+  // Add to the completed sorted set so getMetrics can page by recency
+  pipeline.zadd(K.steps, endMs, stepId);
+
+  // Roll into per-agent totals (atomic HINCRBY — no race)
+  pipeline.hincrby(K.agent(agent), 'count',   1);
+  pipeline.hincrby(K.agent(agent), 'totalMs', durationMs);
+
+  await pipeline.exec();
 }
 
-// ─── read (lock-free — eventual consistency is fine for dashboards) ───────────
+// ─── read (eventually consistent — fine for dashboards) ──────────────────────
 
-export function getMetrics() {
-  ensureFile();
-  const data = load();
+export async function getMetrics() {
+  // Fetch all data concurrently
+  const [countersRaw, latencyRaw, stepIds] = await Promise.all([
+    redis.hgetall(K.counters),
+    redis.lrange(K.latency, 0, -1),
+    redis.zrevrange(K.steps, 0, 49),   // 50 most-recent completed steps
+  ]);
 
-  const latencies  = data.latency ?? [];
+  const total   = Number(countersRaw?.total   ?? 0);
+  const success = Number(countersRaw?.success ?? 0);
+  const failed  = Number(countersRaw?.failed  ?? 0);
+  const retries = Number(countersRaw?.retries ?? 0);
+
+  const latencies  = (latencyRaw ?? []).map(Number);
   const avgLatency =
     latencies.length > 0
-      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+      ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
       : 0;
 
+  // Fetch per-agent hashes and per-step hashes in parallel
+  const agentKeys = await redis.keys('aegis:metrics:agent:*');
+
+  const [agentRaws, stepRaws] = await Promise.all([
+    agentKeys.length
+      ? Promise.all(agentKeys.map(k => redis.hgetall(k).then(h => ({ k, h }))))
+      : Promise.resolve([]),
+    stepIds.length
+      ? Promise.all(stepIds.map(id => redis.hgetall(K.step(id)).then(h => ({ id, h }))))
+      : Promise.resolve([]),
+  ]);
+
   const byAgent = {};
-  for (const [agent, { count, totalMs }] of Object.entries(data.byAgent ?? {})) {
-    byAgent[agent] = { count, avgMs: count > 0 ? Math.round(totalMs / count) : 0 };
+  for (const { k, h } of agentRaws) {
+    const name  = k.replace('aegis:metrics:agent:', '');
+    const count = Number(h?.count   ?? 0);
+    const total = Number(h?.totalMs ?? 0);
+    byAgent[name] = { count, avgMs: count > 0 ? Math.round(total / count) : 0 };
   }
 
-  const completedSteps = Object.entries(data.byStep ?? {})
-    .filter(([, s]) => s.status !== 'running')
-    .map(([stepId, s]) => ({
-      stepId,
-      agent      : s.agentName,
-      durationMs : s.durationMs,
-      status     : s.status,
+  const recentSteps = stepRaws
+    .filter(({ h }) => h?.status && h.status !== 'running')
+    .map(({ id, h }) => ({
+      stepId:     id,
+      agent:      h.agentName,
+      durationMs: Number(h.durationMs ?? 0),
+      status:     h.status,
     }));
 
   return {
-    total       : data.total,
-    success     : data.success,
-    failed      : data.failed,
-    retries     : data.retries,
-    successRate : data.total > 0 ? +((data.success / data.total) * 100).toFixed(1) : 0,
-    avgLatency  : Math.round(avgLatency),
+    total,
+    success,
+    failed,
+    retries,
+    successRate: total > 0 ? +((success / total) * 100).toFixed(1) : 0,
+    avgLatency,
     byAgent,
-    recentSteps : completedSteps.slice(-50),
+    recentSteps,
   };
 }
