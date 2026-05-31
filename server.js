@@ -1,110 +1,71 @@
-// ─── server.js — key rotation / revocation additions ─────────────────────────
+// ─── server.js — metrics endpoint additions ───────────────────────────────────
 //
-// Add this import alongside the other engine imports at the top of server.js:
+// Add these two imports alongside the other engine imports at the top of server.js:
 //
-//   import { createKey, revokeKey, listKeys } from './engine/key-store.js';
+//   import { renderPrometheus, renderOtel } from './engine/metrics.js';
 //
-// Then add these three routes anywhere after the express app is created.
-// They use the same requireApiKey / assertTenantAccess guards already present
-// on the other management routes (POST /tenants, etc.).
+// Then add these routes anywhere after the express app is created.
+// Neither endpoint requires auth — standard practice for /metrics scrapers.
+// If you want auth, wrap each handler in requireApiKey.
 //
-// ─── Key management routes ────────────────────────────────────────────────────
 
 /**
- * POST /tenants/:id/keys
+ * GET /metrics
  *
- * Create a new API key for a tenant (rotate without restart).
- * The raw key is returned exactly once — store it immediately.
+ * Prometheus text-format exposition (format 0.0.4).
+ * Scraped by Prometheus, Grafana Agent, VictoriaMetrics, Datadog Agent, etc.
  *
- * Body (optional JSON):
- *   { label?: string, expiresAt?: number }   expiresAt = ms epoch
+ * Exposes:
+ *   aegis_jobs_total / success / failed / retries        — all-time counters
+ *   aegis_success_rate / avg_latency_ms                  — all-time rates
+ *   aegis_agent_jobs_total / avg_latency_ms{agent}       — per-agent gauges
+ *   aegis_window_jobs_total / success_rate{window}       — 1m / 5m / 1h rollups
+ *   aegis_latency_p50_ms / p95_ms / p99_ms{window}       — windowed percentiles
  *
- * Response:
- *   { keyId, rawKey, label, createdAt, expiresAt }
- *
- * Example:
- *   curl -X POST /tenants/acme/keys \
- *        -H 'Authorization: Bearer <current-key>' \
- *        -d '{"label":"prod rotation 2026-05"}'
+ * Prometheus scrape config example:
+ *   - job_name: aegis
+ *     static_configs:
+ *       - targets: ['localhost:3000']
+ *     metrics_path: /metrics
  */
-app.post('/tenants/:id/keys', async (req, res) => {
+app.get('/metrics', async (req, res) => {
   try {
-    const tenantId = req.params.id;
-
-    // Auth: caller must present a valid key for this tenant
-    await requireApiKey(req, res, () => {}, tenantId);
-    if (res.headersSent) return;
-    if (!assertTenantAccess(req, tenantId, res)) return;
-
-    const { label = '', expiresAt = null } = req.body ?? {};
-
-    const { keyId, rawKey, record } = await createKey(tenantId, { label, expiresAt });
-
-    res.status(201).json({
-      keyId,
-      rawKey,          // only time the raw key is ever returned
-      label:     record.label,
-      createdAt: record.createdAt,
-      expiresAt: record.expiresAt,
-    });
+    const body = await renderPrometheus();
+    // Content-Type required by Prometheus; charset must be UTF-8
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(body);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).type('text/plain').send(`# ERROR: ${err.message}\n`);
   }
 });
 
 /**
- * GET /tenants/:id/keys
+ * GET /metrics/json
  *
- * List all keys for a tenant (metadata only — no raw keys or hashes).
+ * OpenTelemetry-compatible JSON (OTLP/JSON ResourceMetrics shape).
+ * Consumed by:
+ *   - OTEL Collector HTTP receiver (forward to any OTEL backend)
+ *   - Dashboards that prefer JSON over Prometheus scraping
+ *   - Custom alerting / reporting tools
  *
- * Response:
- *   { keys: [{ keyId, label, createdAt, expiresAt, revokedAt }] }
+ * Response shape:
+ *   { resourceMetrics: [{ resource, scopeMetrics: [{ metrics: [...] }] }] }
+ *
+ * Each metric entry is a gauge dataPoint with attributes for window/agent,
+ * allowing any OTEL-aware tool to slice by dimension without extra config.
+ *
+ * OTEL Collector pipeline example (otel-collector-config.yaml):
+ *   receivers:
+ *     otlphttp:
+ *       endpoint: "http://aegis:3000/metrics/json"
+ *   exporters:
+ *     otlp:
+ *       endpoint: "https://your-otel-backend"
  */
-app.get('/tenants/:id/keys', async (req, res) => {
+app.get('/metrics/json', async (req, res) => {
   try {
-    const tenantId = req.params.id;
-
-    await requireApiKey(req, res, () => {}, tenantId);
-    if (res.headersSent) return;
-    if (!assertTenantAccess(req, tenantId, res)) return;
-
-    const keys = await listKeys(tenantId);
-    res.json({ keys });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * DELETE /tenants/:id/keys/:keyId
- *
- * Revoke a key immediately.
- * Takes effect on the very next request — no process restart required.
- * The record is tombstoned (revokedAt set) rather than deleted so the
- * audit trail is preserved.
- *
- * Response:
- *   { revoked: true, keyId }
- *
- * Zero-downtime rotation workflow:
- *   1. POST /tenants/:id/keys          → get new rawKey, distribute to services
- *   2. DELETE /tenants/:id/keys/:oldId → old key rejected immediately
- */
-app.delete('/tenants/:id/keys/:keyId', async (req, res) => {
-  try {
-    const { id: tenantId, keyId } = req.params;
-
-    await requireApiKey(req, res, () => {}, tenantId);
-    if (res.headersSent) return;
-    if (!assertTenantAccess(req, tenantId, res)) return;
-
-    const ok = await revokeKey(tenantId, keyId);
-
-    if (!ok) {
-      return res.status(404).json({ error: `Key "${keyId}" not found for tenant "${tenantId}".` });
-    }
-
-    res.json({ revoked: true, keyId });
+    const body = await renderOtel();
+    res.json(body);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
