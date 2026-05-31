@@ -17,6 +17,10 @@ const VALID_AGENTS = new Set([
   'test-writer',
   'security-editor',
   'review-guard',
+  // meta-reviewer is the fallback agent used by retry-policy.js on attempt 3+.
+  // It must be listed here so parsePlan() accepts plans that reference it, and
+  // so the error message in validation never incorrectly names it "unknown".
+  'meta-reviewer',
 ]);
 
 /**
