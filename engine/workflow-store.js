@@ -337,3 +337,66 @@ export async function resolveReview(workflowId, stepId, resolution, note = '') {
   await redis.set(reviewKey, JSON.stringify(record));
   return record;
 }
+
+// ─── Workflow listing ─────────────────────────────────────────────────────────
+
+/**
+ * 📋 List workflows with optional filtering and pagination.
+ *
+ * Uses SCAN to iterate over all `aegis:workflow:meta:*` keys so it is
+ * non-blocking even on large Redis instances (no KEYS call).
+ *
+ * @param {object} opts
+ * @param {string}   [opts.status]      - filter by status (running | paused | cancelled | completed | failed | needs-review)
+ * @param {string}   [opts.tenantId]    - filter by tenant
+ * @param {number}   [opts.limit=50]    - max workflows to return (applied after filters)
+ * @param {string}   [opts.cursor='0']  - SCAN cursor for pagination (pass value returned by previous call)
+ * @returns {{ workflows: object[], nextCursor: string }}
+ *   nextCursor is '0' when the full keyspace has been traversed.
+ */
+export async function listWorkflows({
+  status    = null,
+  tenantId  = null,
+  limit     = 50,
+  cursor    = '0'
+} = {}) {
+  const collected = [];
+  let   scanCursor = cursor;
+
+  // SCAN until we have enough results or exhaust the keyspace.
+  // Each SCAN call returns ~100 keys (Redis default COUNT hint).
+  do {
+    const [nextCursor, keys] = await redis.scan(
+      scanCursor,
+      'MATCH', `${META_PREFIX}*`,
+      'COUNT', 100
+    );
+    scanCursor = nextCursor;
+
+    if (!keys.length) continue;
+
+    // Batch-fetch all meta records in this page
+    const pipeline = redis.pipeline();
+    for (const key of keys) pipeline.get(key);
+    const results = await pipeline.exec();
+
+    for (const [err, raw] of results) {
+      if (err || !raw) continue;
+      const meta = JSON.parse(raw);
+
+      if (status   && meta.status   !== status)   continue;
+      if (tenantId && meta.tenantId !== tenantId) continue;
+
+      collected.push(meta);
+      if (collected.length >= limit) break;
+    }
+  } while (scanCursor !== '0' && collected.length < limit);
+
+  // Sort newest-first by default
+  collected.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+
+  return {
+    workflows:  collected,
+    nextCursor: scanCursor   // '0' = fully traversed; anything else = more pages
+  };
+}
