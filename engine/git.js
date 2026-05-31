@@ -1,397 +1,226 @@
-import { Worker } from 'bullmq';
-import { acquireLock, releaseLock } from '../engine/lock.js';
-import { applyPatch, parsePatch } from '../engine/code-writer.js';
-import { getTaskQueue, getDeadLetterQueue, addStep } from '../engine/queue.js';
-import {
-  ensureWorkflowBranch,
-  commitChanges,
-  rollbackLastCommit,
-  finaliseWorkflow,
-  removeWorkflowWorktree,   // NEW: clean up worktree on cancellation
-} from '../engine/git.js';
-import { getOperationId, isApplied, markApplied } from '../engine/idempotency.js';
-import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from '../engine/metrics.js';
-import { startSpan, attachPatch, attachTestResult, endSpan } from '../engine/tracer.js';
-import { runAgent } from '../engine/agent-runner.js';
-import { runReviewPipeline } from '../engine/review-system.js';
-import { runTests } from '../engine/test-runner.js';
-import { storeMemory } from '../engine/vector-memory.js';
-import { createJob, updateJob, incrementRetries } from '../engine/job-store.js';
-import {
-  updateStep,
-  getRunnableSteps,
-  getWorkflowStatus,
-  isWorkflowTimedOut,
-  cancelWorkflow,
-  flagForReview,
-} from '../engine/workflow-store.js';
-import { resolvePolicy, calcDelay, agentForAttempt } from '../engine/retry-policy.js';
-import { needsApproval, approvalModeActive }         from '../engine/approval-gate.js';
-import { acquireSlot, clearSlots } from '../engine/concurrency.js';
-import { DEFAULT_TENANT, assertTenantId } from '../engine/tenant.js';
-import IORedis from 'ioredis';
+/**
+ * engine/git.js — Git operations for per-workflow worktrees
+ *
+ * Each workflow runs in an isolated git worktree so concurrent workflows never
+ * touch the same working directory.  All functions that shell out to git are
+ * synchronous (spawnSync) because they are called inside BullMQ job handlers
+ * where async git subprocess management adds no value.
+ *
+ * Exports
+ * ───────
+ *   worktreeDir(tenantId)                         → string | null
+ *   ensureWorkflowBranch(workflowId, tenantId)    → { cwd, lock }
+ *   commitChanges(message, cwd)                   → void
+ *   rollbackLastCommit(cwd)                       → void
+ *   revertStepCommit(workflowId, stepId, cwd)     → { reverted, commitHash } (NEW)
+ *   finaliseWorkflow(workflowId, tenantId)        → { merged, conflicts }
+ *   removeWorkflowWorktree(workflowId, tenantId)  → Promise<void>
+ */
 
-const connection = new IORedis();
+import { execFileSync, spawnSync } from 'child_process';
+import fs   from 'fs';
+import path from 'path';
+import { acquireLock, releaseLock } from './lock.js';
 
-const PAUSE_POLL_INTERVAL = 3000;
-const PAUSE_POLL_MAX_WAIT = 10 * 60 * 1000;
+// ─── Config ───────────────────────────────────────────────────────────────────
 
-async function waitIfPaused(workflowId) {
-  let waited = 0;
-  while (true) {
-    const status = await getWorkflowStatus(workflowId);
-    if (status !== 'paused') return status !== 'cancelled';
-    if (waited >= PAUSE_POLL_MAX_WAIT) return false;
-    await new Promise(r => setTimeout(r, PAUSE_POLL_INTERVAL));
-    waited += PAUSE_POLL_INTERVAL;
+const REPO_ROOT      = path.resolve(process.env.AEGIS_REPO_ROOT ?? process.cwd());
+const WORKTREES_BASE = path.resolve(process.env.AEGIS_WORKTREES ?? path.join(REPO_ROOT, '.aegis-worktrees'));
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function git(args, cwd = REPO_ROOT) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf-8' });
+  if (result.status !== 0) {
+    throw new Error(`git ${args[0]} failed: ${(result.stderr ?? '').trim()}`);
+  }
+  return (result.stdout ?? '').trim();
+}
+
+/**
+ * Return the absolute path of a tenant's base worktree, or null when the
+ * worktrees directory does not exist yet (first workflow run).
+ */
+export function worktreeDir(tenantId) {
+  const dir = path.join(WORKTREES_BASE, tenantId);
+  return fs.existsSync(dir) ? dir : null;
+}
+
+// ─── Per-workflow branch ──────────────────────────────────────────────────────
+
+/**
+ * Ensure the per-workflow branch + worktree exist and return the cwd together
+ * with a held lock.  The lock prevents two steps of the same workflow from
+ * writing concurrently.
+ *
+ * Branch name:   aegis/<tenantId>/<workflowId>
+ * Worktree path: <WORKTREES_BASE>/<tenantId>/<workflowId>
+ */
+export async function ensureWorkflowBranch(workflowId, tenantId) {
+  const branch   = `aegis/${tenantId}/${workflowId}`;
+  const cwd      = path.join(WORKTREES_BASE, tenantId, workflowId);
+  const lockName = `worktree:${workflowId}`;
+
+  const lock = await acquireLock(lockName, tenantId);
+
+  try {
+    if (!fs.existsSync(cwd)) {
+      // Create the base worktree directory for the tenant if needed
+      fs.mkdirSync(path.join(WORKTREES_BASE, tenantId), { recursive: true });
+
+      // Create an isolated worktree on a new branch tracking tenant base
+      const baseBranch = `aegis-tenant/${tenantId}`;
+      const baseExists = spawnSync('git', ['rev-parse', '--verify', baseBranch], {
+        cwd: REPO_ROOT, encoding: 'utf-8',
+      }).status === 0;
+
+      if (baseExists) {
+        git(['worktree', 'add', '-b', branch, cwd, baseBranch]);
+      } else {
+        // First workflow for this tenant — branch from HEAD
+        git(['worktree', 'add', '-b', branch, cwd, 'HEAD']);
+      }
+    }
+  } catch (err) {
+    await releaseLock(lock);
+    throw err;
+  }
+
+  return { cwd, lock };
+}
+
+// ─── Commit / rollback ────────────────────────────────────────────────────────
+
+/**
+ * Stage all changes in `cwd` and create a commit with the given message.
+ * The message is also used by revertStepCommit() to identify the right commit,
+ * so always use the canonical format "Aegis: <stepId>".
+ */
+export function commitChanges(message, cwd) {
+  git(['add', '-A'], cwd);
+  git(['commit', '--allow-empty', '-m', message], cwd);
+}
+
+/**
+ * Undo the most recent commit in the worktree (test-failure rollback path).
+ * Working-tree changes are discarded; the branch tip moves back one commit.
+ */
+export function rollbackLastCommit(cwd) {
+  git(['reset', '--hard', 'HEAD~1'], cwd);
+}
+
+// ─── Step-level rewind (NEW) ──────────────────────────────────────────────────
+
+/**
+ * Revert the commit that was created for a specific step, without rewinding
+ * any commits that came after it (i.e. a proper `git revert`, not a reset).
+ *
+ * Strategy
+ * ────────
+ * 1. Walk the log of the workflow branch looking for the commit whose message
+ *    matches "Aegis: <stepId>".
+ * 2. Run `git revert --no-edit <hash>` to create a new "undo" commit while
+ *    preserving later history.
+ * 3. Return the original commit hash so the caller can store it in the step
+ *    record for audit / re-apply purposes.
+ *
+ * If the commit is not found (step never committed, or already reverted) the
+ * function returns { reverted: false, commitHash: null }.
+ *
+ * @param {string} workflowId
+ * @param {string} stepId
+ * @param {string} cwd   - absolute path to the workflow worktree
+ * @returns {{ reverted: boolean, commitHash: string|null }}
+ */
+export function revertStepCommit(workflowId, stepId, cwd) {
+  const expectedMsg = `Aegis: ${stepId}`;
+
+  // git log --format="%H %s" lists "<hash> <subject>" one per line
+  let log;
+  try {
+    log = git(['log', '--format=%H %s', '--ancestry-path'], cwd);
+  } catch {
+    return { reverted: false, commitHash: null };
+  }
+
+  const commitHash = log
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .find(line => line.slice(41) === expectedMsg)   // 40-char hash + space
+    ?.slice(0, 40) ?? null;
+
+  if (!commitHash) {
+    return { reverted: false, commitHash: null };
+  }
+
+  try {
+    git(['revert', '--no-edit', commitHash], cwd);
+  } catch (err) {
+    // Revert may fail if there are merge conflicts — surface the error
+    throw new Error(`git revert failed for step "${stepId}" (commit ${commitHash}): ${err.message}`);
+  }
+
+  return { reverted: true, commitHash };
+}
+
+// ─── Finalise / cleanup ───────────────────────────────────────────────────────
+
+/**
+ * Merge the workflow branch into the tenant base branch.
+ * Acquires the tenant-level lock to serialise concurrent merges.
+ *
+ * @returns {{ merged: boolean, conflicts: string[] }}
+ */
+export async function finaliseWorkflow(workflowId, tenantId) {
+  const branch     = `aegis/${tenantId}/${workflowId}`;
+  const baseBranch = `aegis-tenant/${tenantId}`;
+  const lockName   = `tenant-merge:${tenantId}`;
+
+  const lock = await acquireLock(lockName, tenantId);
+
+  try {
+    // Ensure the base branch exists (create it on first workflow for this tenant)
+    const baseExists = spawnSync('git', ['rev-parse', '--verify', baseBranch], {
+      cwd: REPO_ROOT, encoding: 'utf-8',
+    }).status === 0;
+
+    if (!baseExists) {
+      git(['branch', baseBranch, 'HEAD']);
+    }
+
+    // Merge the workflow branch; --no-ff preserves history
+    try {
+      execFileSync('git', ['merge', '--no-ff', '-m', `Aegis merge: ${workflowId}`, branch], {
+        cwd: REPO_ROOT, encoding: 'utf-8',
+      });
+    } catch {
+      // Collect conflicting files and abort
+      const conflicts = git(['diff', '--name-only', '--diff-filter=U'], REPO_ROOT)
+        .split('\n').filter(Boolean);
+      git(['merge', '--abort'], REPO_ROOT);
+      return { merged: false, conflicts };
+    }
+
+    return { merged: true, conflicts: [] };
+  } finally {
+    await releaseLock(lock);
   }
 }
 
-// ─── Per-tenant worker factory ────────────────────────────────────────────────
-// BullMQ workers bind to a single named queue at construction time.
-// Since each tenant gets its own queue ("aegis-tasks:{tenantId}"), we must
-// spawn one Worker instance per tenant rather than one global worker on the
-// bare "aegis-tasks" queue (which no tenant ever writes to).
-//
-// Workers are created lazily on first job and cached for the process lifetime.
-// In a horizontally-scaled deployment every worker process subscribes to the
-// same set of queues, so any process can pick up any tenant's jobs.
+/**
+ * Remove the per-workflow worktree and delete the workflow branch.
+ * Best-effort — does not throw on failure.
+ */
+export async function removeWorkflowWorktree(workflowId, tenantId) {
+  const worktreePath = path.join(WORKTREES_BASE, tenantId, workflowId);
+  const branch       = `aegis/${tenantId}/${workflowId}`;
 
-const _workers = new Map();
+  try {
+    git(['worktree', 'remove', '--force', worktreePath]);
+  } catch { /* already removed or never created */ }
 
-function getWorker(tenantId) {
-  assertTenantId(tenantId);
-  if (_workers.has(tenantId)) return _workers.get(tenantId);
-
-  const queueName = `aegis-tasks:${tenantId}`;
-
-  const worker = new Worker(
-    queueName,
-    async (job) => {
-      const { step, workflowId, tenantId: jobTenantId } = job.data;
-
-      // tenantId in job.data is the authoritative source — it was set by
-      // addStep() in queue.js and survives queue serialisation unchanged.
-      const tenant = jobTenantId ?? tenantId;
-
-      // ─── Control check #1: entry gate ──────────────────────────────────────
-      const entryStatus = await getWorkflowStatus(workflowId);
-
-      if (entryStatus === 'cancelled') {
-        // Clean up the per-workflow worktree if it exists. Best-effort — the
-        // workflow may not have reached the git layer yet.
-        removeWorkflowWorktree(workflowId, tenant).catch(() => {});
-        return { skipped: true, reason: 'workflow cancelled' };
-      }
-
-      if (entryStatus === 'paused') {
-        const shouldContinue = await waitIfPaused(workflowId);
-        if (!shouldContinue) {
-          removeWorkflowWorktree(workflowId, tenant).catch(() => {});
-          return { skipped: true, reason: 'workflow cancelled during pause' };
-        }
-      }
-
-      if (await isWorkflowTimedOut(workflowId)) {
-        await cancelWorkflow(workflowId, 'timeout');
-        removeWorkflowWorktree(workflowId, tenant).catch(() => {});
-        throw new Error(`Workflow ${workflowId} exceeded configured timeout`);
-      }
-
-      // ─── Concurrency gate ───────────────────────────────────────────────────
-      const priority = job.opts?.priority ?? 5;
-      const slot = await acquireSlot(workflowId, job.id, priority);
-
-      try {
-        // ✅ mark step running — inside slot so count is accurate
-        await updateStep(workflowId, step.id, 'running');
-
-        await recordStart(job.id);
-        // Create the job record first so getJob() and GET /jobs return a result
-        // immediately — before any status transition fires.
-        await createJob(job.id, step, tenant);
-        await updateJob(job.id, { status: 'running' }, tenant);
-        await startSpan(workflowId, step.id, step.description ?? step.id, 'pending');
-
-        const policy = resolvePolicy(step);
-
-        let attempt   = 0;
-        let success   = false;
-        let lastError = '';
-        let lastPatch = '';
-
-        while (attempt < policy.maxAttempts && !success) {
-          attempt++;
-
-          const delay = calcDelay(policy, attempt);
-          if (delay > 0) await new Promise(r => setTimeout(r, delay));
-
-          // ─── Control check #2: per-retry gate ────────────────────────────
-          const loopStatus = await getWorkflowStatus(workflowId);
-
-          if (loopStatus === 'cancelled') {
-            await updateStep(workflowId, step.id, 'failed');
-            removeWorkflowWorktree(workflowId, tenant).catch(() => {});
-            return { skipped: true, reason: 'workflow cancelled mid-retry' };
-          }
-
-          if (loopStatus === 'paused') {
-            const shouldContinue = await waitIfPaused(workflowId);
-            if (!shouldContinue) {
-              await updateStep(workflowId, step.id, 'failed');
-              removeWorkflowWorktree(workflowId, tenant).catch(() => {});
-              return { skipped: true, reason: 'workflow cancelled during pause' };
-            }
-          }
-
-          if (await isWorkflowTimedOut(workflowId)) {
-            await cancelWorkflow(workflowId, 'timeout');
-            await updateStep(workflowId, step.id, 'failed');
-            removeWorkflowWorktree(workflowId, tenant).catch(() => {});
-            throw new Error(`Workflow ${workflowId} timed out during retry ${attempt}`);
-          }
-
-          await incrementRetries(job.id, tenant);
-          await recordRetry();
-
-          const activeAgent = agentForAttempt(step, policy, attempt);
-          await recordStepStart(step.id, activeAgent);
-          await startSpan(workflowId, step.id, step.description ?? step.id, activeAgent);
-
-          // 🔍 Structured context — agent-runner handles memory lookup internally
-          const agentContext = {
-            files: step.files ?? [],
-            error: attempt > 1 ? lastError : undefined,
-            patch: attempt > 1 ? lastPatch  : undefined,
-          };
-
-          const taskDescription =
-            attempt === 1
-              ? step.description
-              : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}`;
-
-          const result = await runAgent(
-            activeAgent,
-            taskDescription,
-            agentContext,
-            tenant
-          );
-
-          if (!result.includes('PATCH:')) {
-            await recordFailure(job.id);
-            await updateJob(job.id, { status: 'failed', result: 'No patch generated' }, tenant);
-            await updateStep(workflowId, step.id, 'failed');
-            throw new Error('No patch generated');
-          }
-
-          const patch = result.split('PATCH:')[1].trim();
-          lastPatch = patch;
-          await attachPatch(workflowId, step.id, patch);
-
-          // Parse the patch to extract file + content early — needed for the
-          // scoped review pipeline and for acquireLock below.
-          const { file, content } = parsePatch(patch);
-          const opId = getOperationId(workflowId, step.id, patch);
-
-          // acquireLock guards file-level writes across workflows that might
-          // touch the same file path within the same tenant.
-          // ensureWorkflowBranch creates the per-workflow worktree (once) and
-          // then acquires the per-workflow lock for the apply+commit window.
-          // Different workflows never contend on each other's lock.
-          const fileLock = await acquireLock(file, tenant);
-
-          // worktreeLock is released inside the finally block below.
-          // Declared outside the inner try so rollback can also use cwd.
-          let worktreeLock = null;
-          let cwd = null;
-
-          try {
-            ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
-
-            // Run the structural + lint + baseline-test review pipeline now that
-            // cwd is known. Lint and the baseline test execute inside the
-            // per-workflow worktree (cwd), fully isolated from other workflows.
-            const review = runReviewPipeline(patch, cwd, file);
-            if (!review.ok) {
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: review.message }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error('System review failed');
-            }
-
-            const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
-            if (!aiReview.includes('APPROVED')) {
-              await recordFailure(job.id);
-              await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
-              await updateStep(workflowId, step.id, 'failed');
-              throw new Error('AI review rejected');
-            }
-
-            if (await isApplied(opId, tenant)) {
-              await updateJob(job.id, { status: 'completed', result: 'skipped (already applied)' }, tenant);
-              await recordSuccess(job.id);
-              await updateStep(workflowId, step.id, 'completed');
-              success = true;
-              try { await worktreeLock.release(); } catch { /* best-effort */ }
-              worktreeLock = null;
-              await releaseLock(fileLock);
-              break;
-            }
-
-            // —— Approval gate ————————————————————
-            // When MODE=approval or CLAUDE_AUTONOMY=false the patch has passed
-            // all automated checks but still needs a human sign-off before it
-            // is written to disk. Flag the step for review and return early.
-            const gate = needsApproval(step);
-            if (gate) {
-              await flagForReview(workflowId, step.id, {
-                ...gate,
-                patch,
-                agent      : activeAgent,
-                description: step.description,
-                flaggedAt  : Date.now(),
-              });
-              await updateStep(workflowId, step.id, 'needs-review');
-              await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
-              try { await worktreeLock.release(); } catch { /* best-effort */ }
-              worktreeLock = null;
-              return { awaitingApproval: true, reason: gate.reason };
-            }
-
-            // FIX: pass cwd to applyPatch so the write lands in the
-            // per-workflow worktree, not PROJECT_ROOT (the default fallback).
-            applyPatch(file, content, cwd);
-            commitChanges(`Aegis: ${step.id}`, cwd);
-
-            // Run tests inside the per-workflow worktree, scoped to the changed
-            // file. Concurrent workflows use different cwd values and never
-            // share a test run.
-            const testResult = runTests(cwd, [file]);
-            await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
-
-            if (testResult.success) {
-              success = true;
-
-              await storeMemory(step.description, patch, tenant);
-              await markApplied(opId, tenant);
-
-              await updateJob(job.id, { status: 'completed', result: 'success' }, tenant);
-              await recordSuccess(job.id);
-              await recordStepEnd(step.id, 'success');
-              await endSpan(workflowId, step.id, 'success');
-
-              await updateStep(workflowId, step.id, 'completed');
-
-              // 🚀 DAG progression — next steps inherit priority and tenant
-              const nextSteps = await getRunnableSteps(workflowId);
-              for (const next of nextSteps) {
-                await addStep(workflowId, next, job.opts?.priority ?? 5, tenant);
-              }
-
-              // When no more steps remain the workflow is complete —
-              // merge the workflow branch into the tenant base branch.
-              // finaliseWorkflow acquires the tenant lock internally, so we
-              // release our per-workflow lock first to avoid ordering issues.
-              if (nextSteps.length === 0) {
-                try { await worktreeLock.release(); } catch { /* best-effort */ }
-                worktreeLock = null;
-
-                const mergeResult = await finaliseWorkflow(workflowId, tenant);
-
-                if (!mergeResult.merged) {
-                  // Merge conflicts detected — the workflow branch is left intact
-                  // so a human can inspect or manually resolve. Flag for review.
-                  await flagForReview(workflowId, 'merge', {
-                    reason: 'merge-conflict',
-                    description: 'Workflow completed but could not be merged into the tenant base branch due to conflicts with a concurrent workflow.',
-                    conflicts: mergeResult.conflicts,
-                    branch: `aegis/${tenant}/${workflowId}`,
-                    baseBranch: `aegis-tenant/${tenant}`,
-                    flaggedAt: Date.now(),
-                  });
-                  await updateStep(workflowId, step.id, 'needs-review');
-                  await updateJob(job.id, {
-                    status: 'needs-review',
-                    result: `Merge conflicts: ${mergeResult.conflicts.join(', ')}`,
-                  }, tenant);
-                }
-              }
-
-            } else {
-              lastError = testResult.output;
-              rollbackLastCommit(cwd);
-            }
-
-          } finally {
-            if (worktreeLock) {
-              try { await worktreeLock.release(); } catch { /* best-effort */ }
-            }
-            await releaseLock(fileLock);
-          }
-        } // end while
-
-        if (!success) {
-          await recordFailure(job.id);
-          await recordStepEnd(step.id, 'failure');
-          await endSpan(workflowId, step.id, 'failure');
-
-          await updateJob(job.id, { status: 'failed', result: lastError }, tenant);
-          await updateStep(workflowId, step.id, 'failed');
-
-          const dlq = getDeadLetterQueue(tenant);
-          await dlq.add('failed-step', {
-            originalJobId: job.id,
-            workflowId,
-            step,
-            error: lastError,
-            attemptsExhausted: attempt,
-            policy
-          });
-
-          throw new Error('Step failed after retries');
-        }
-
-        return { success: true };
-
-      } finally {
-        // ─── Always release the concurrency slot ──────────────────────────
-        await slot.release();
-      }
-    },
-    { connection }
-  );
-
-  worker.on('failed', async (job, err) => {
-    const tenant = job?.data?.tenantId ?? tenantId;
-    const dlq = getDeadLetterQueue(tenant);
-    await dlq.add('failed-step', {
-      originalJobId: job.id,
-      workflowId: job.data.workflowId,
-      step: job.data.step,
-      error: err.message,
-      attemptsExhausted: job.attemptsMade,
-      policy: job.data.step ? resolvePolicy(job.data.step) : null
-    });
-  });
-
-  _workers.set(tenantId, worker);
-  return worker;
+  try {
+    git(['branch', '-D', branch]);
+  } catch { /* branch may already be deleted */ }
 }
-
-// ─── Bootstrap ────────────────────────────────────────────────────────────────
-
-const TENANTS = (process.env.AEGIS_TENANTS ?? DEFAULT_TENANT)
-  .split(',')
-  .map(t => t.trim())
-  .filter(Boolean);
-
-for (const tenant of TENANTS) {
-  getWorker(tenant);
-  console.log(`[agent-worker] Listening on aegis-tasks:${tenant}`);
-}
-
-if (approvalModeActive) {
-  console.log('[agent-worker] Approval gate ACTIVE — patches will be held for human review before apply');
-}
-
-export { getWorker };
