@@ -15,7 +15,9 @@
  *   2. Percentile computation — p50/p95/p99 derived from bucketed latency
  *      samples within any requested time window, not the full history.
  *   3. Prometheus text-format export — GET /metrics (scraped by Prometheus,
- *      Grafana Agent, etc.)
+ *      Grafana Agent, etc.) — produced by prom-client for spec compliance,
+ *      _total suffixes on counters, # TYPE declarations, and default Node.js
+ *      process/GC/event-loop metrics.
  *   4. OTEL-compatible JSON export — GET /metrics/json (OpenTelemetry
  *      Collector HTTP receiver, dashboards, custom tooling).
  *
@@ -47,8 +49,119 @@
  */
 
 import IORedis from 'ioredis';
+import {
+  Registry,
+  collectDefaultMetrics,
+  Counter,
+  Gauge,
+} from 'prom-client';
 
 const redis = new IORedis();
+
+// ─── prom-client registry ─────────────────────────────────────────────────────
+
+/**
+ * Dedicated registry so we don't pollute any global default registry that
+ * other libraries might also use.  collectDefaultMetrics() attaches Node.js
+ * process/GC/event-loop metrics to this registry automatically.
+ */
+export const register = new Registry();
+
+// Attach default Node.js process metrics (memory, CPU, event-loop lag, GC …)
+collectDefaultMetrics({ register });
+
+// ─── All-time counters (prom-client Counter → gets _total suffix automatically)
+
+const jobsTotal = new Counter({
+  name: 'aegis_jobs_total',
+  help: 'Total jobs submitted',
+  registers: [register],
+});
+
+const jobsSuccess = new Counter({
+  name: 'aegis_jobs_success_total',
+  help: 'Total jobs succeeded',
+  registers: [register],
+});
+
+const jobsFailed = new Counter({
+  name: 'aegis_jobs_failed_total',
+  help: 'Total jobs failed',
+  registers: [register],
+});
+
+const jobsRetries = new Counter({
+  name: 'aegis_jobs_retries_total',
+  help: 'Total retry attempts',
+  registers: [register],
+});
+
+// ─── All-time gauges
+
+const successRateGauge = new Gauge({
+  name: 'aegis_success_rate',
+  help: 'All-time success rate (0–100)',
+  registers: [register],
+});
+
+const avgLatencyGauge = new Gauge({
+  name: 'aegis_avg_latency_ms',
+  help: 'All-time average job latency in milliseconds',
+  registers: [register],
+});
+
+// ─── Per-agent gauges (label: agent)
+
+const agentJobsGauge = new Gauge({
+  name: 'aegis_agent_jobs_completed_total',
+  help: 'Jobs completed by agent',
+  labelNames: ['agent'],
+  registers: [register],
+});
+
+const agentAvgLatencyGauge = new Gauge({
+  name: 'aegis_agent_avg_latency_ms',
+  help: 'Average job latency in milliseconds by agent',
+  labelNames: ['agent'],
+  registers: [register],
+});
+
+// ─── Windowed gauges (label: window)
+
+const windowJobsGauge = new Gauge({
+  name: 'aegis_window_jobs_total',
+  help: 'Jobs submitted in time window',
+  labelNames: ['window'],
+  registers: [register],
+});
+
+const windowSuccessRateGauge = new Gauge({
+  name: 'aegis_window_success_rate',
+  help: 'Success rate (0–100) in time window',
+  labelNames: ['window'],
+  registers: [register],
+});
+
+const windowLatencyP50 = new Gauge({
+  name: 'aegis_window_latency_p50_ms',
+  help: 'Latency p50 in milliseconds for time window',
+  labelNames: ['window'],
+  registers: [register],
+});
+
+const windowLatencyP95 = new Gauge({
+  name: 'aegis_window_latency_p95_ms',
+  help: 'Latency p95 in milliseconds for time window',
+  labelNames: ['window'],
+  registers: [register],
+});
+
+const windowLatencyP99 = new Gauge({
+  name: 'aegis_window_latency_p99_ms',
+  help: 'Latency p99 in milliseconds for time window',
+  labelNames: ['window'],
+  registers: [register],
+});
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -210,6 +323,7 @@ export async function recordStart(jobId) {
     redis.set(K.start(jobId), Date.now().toString(), 'EX', START_TTL_S),
     incWindowCounter('total'),
   ]);
+  jobsTotal.inc();
 }
 
 export async function recordRetry() {
@@ -217,6 +331,7 @@ export async function recordRetry() {
     redis.hincrby(K.counters, 'retries', 1),
     incWindowCounter('retries'),
   ]);
+  jobsRetries.inc();
 }
 
 export async function recordSuccess(jobId) {
@@ -237,6 +352,7 @@ export async function recordSuccess(jobId) {
     await pipeline.exec();
     await incWindowCounter('success');
   }
+  jobsSuccess.inc();
 }
 
 export async function recordFailure(jobId) {
@@ -257,6 +373,7 @@ export async function recordFailure(jobId) {
     await pipeline.exec();
     await incWindowCounter('failed');
   }
+  jobsFailed.inc();
 }
 
 export async function recordStepStart(stepId, agentName) {
@@ -371,64 +488,40 @@ export async function getMetrics() {
 
 /**
  * Render all metrics as Prometheus text format (exposition format 0.0.4).
- * Intended for GET /metrics — scraped by Prometheus, Grafana Agent, VictoriaMetrics, etc.
+ * Uses prom-client so output is fully spec-compliant:
+ *   • counters carry the _total suffix
+ *   • every metric has a # HELP and # TYPE line
+ *   • default Node.js process/GC/event-loop metrics are included automatically
+ *
+ * Mount this on GET /metrics and set the Content-Type header to the value
+ * returned by register.contentType  ("text/plain; version=0.0.4; charset=utf-8").
  *
  * @returns {Promise<string>}
  */
 export async function renderPrometheus() {
   const m = await getMetrics();
-  const lines = [];
 
-  const g = (name, help, type, value, labels = '') => {
-    lines.push(`# HELP aegis_${name} ${help}`);
-    lines.push(`# TYPE aegis_${name} ${type}`);
-    lines.push(`aegis_${name}${labels ? `{${labels}}` : ''} ${value}`);
-  };
+  // Push current Redis-derived values into prom-client gauges so they are
+  // reflected in the scrape output alongside the default Node.js metrics.
+  successRateGauge.set(m.successRate);
+  avgLatencyGauge.set(m.avgLatency);
 
-  // All-time counters
-  g('jobs_total',   'Total jobs submitted',    'counter', m.total);
-  g('jobs_success', 'Total jobs succeeded',    'counter', m.success);
-  g('jobs_failed',  'Total jobs failed',       'counter', m.failed);
-  g('jobs_retries', 'Total retry attempts',    'counter', m.retries);
-  g('success_rate', 'All-time success rate %', 'gauge',   m.successRate);
-  g('avg_latency_ms', 'All-time average latency ms', 'gauge', m.avgLatency);
-
-  // Per-agent gauges
-  lines.push('# HELP aegis_agent_jobs_total Jobs completed by agent');
-  lines.push('# TYPE aegis_agent_jobs_total gauge');
   for (const [agent, stats] of Object.entries(m.byAgent)) {
-    lines.push(`aegis_agent_jobs_total{agent="${agent}"} ${stats.count}`);
-  }
-  lines.push('# HELP aegis_agent_avg_latency_ms Average latency ms by agent');
-  lines.push('# TYPE aegis_agent_avg_latency_ms gauge');
-  for (const [agent, stats] of Object.entries(m.byAgent)) {
-    lines.push(`aegis_agent_avg_latency_ms{agent="${agent}"} ${stats.avgMs}`);
+    agentJobsGauge.set({ agent }, stats.count);
+    agentAvgLatencyGauge.set({ agent }, stats.avgMs);
   }
 
-  // Windowed counters
-  lines.push('# HELP aegis_window_jobs_total Jobs in time window');
-  lines.push('# TYPE aegis_window_jobs_total gauge');
   for (const [win, data] of Object.entries(m.windows)) {
-    lines.push(`aegis_window_jobs_total{window="${win}"} ${data.total}`);
+    windowJobsGauge.set({ window: win }, data.total);
+    windowSuccessRateGauge.set({ window: win }, data.successRate);
+    windowLatencyP50.set({ window: win }, data.latency.p50 ?? 0);
+    windowLatencyP95.set({ window: win }, data.latency.p95 ?? 0);
+    windowLatencyP99.set({ window: win }, data.latency.p99 ?? 0);
   }
 
-  lines.push('# HELP aegis_window_success_rate Success rate % in time window');
-  lines.push('# TYPE aegis_window_success_rate gauge');
-  for (const [win, data] of Object.entries(m.windows)) {
-    lines.push(`aegis_window_success_rate{window="${win}"} ${data.successRate}`);
-  }
-
-  // Windowed latency percentiles
-  for (const pct of ['p50', 'p95', 'p99']) {
-    lines.push(`# HELP aegis_latency_${pct}_ms Latency ${pct} in time window (ms)`);
-    lines.push(`# TYPE aegis_latency_${pct}_ms gauge`);
-    for (const [win, data] of Object.entries(m.windows)) {
-      lines.push(`aegis_latency_${pct}_ms{window="${win}"} ${data.latency[pct] ?? 0}`);
-    }
-  }
-
-  lines.push('');  // trailing newline required by Prometheus spec
-  return lines.join('\n');
+  // prom-client serialises all registered metrics (including default Node.js
+  // process metrics) to the Prometheus text exposition format.
+  return register.metrics();
 }
 
 // ─── OTEL-compatible JSON export ─────────────────────────────────────────────
@@ -468,8 +561,8 @@ export async function renderOtel() {
 
   // Per-agent
   for (const [agent, stats] of Object.entries(m.byAgent)) {
-    metrics.push(makeGauge('aegis.agent.jobs',       'Jobs by agent',          stats.count,  { agent }));
-    metrics.push(makeGauge('aegis.agent.avg_latency_ms', 'Avg latency by agent', stats.avgMs, { agent }));
+    metrics.push(makeGauge('aegis.agent.jobs',           'Jobs by agent',          stats.count,  { agent }));
+    metrics.push(makeGauge('aegis.agent.avg_latency_ms', 'Avg latency by agent',   stats.avgMs,  { agent }));
   }
 
   // Windowed
