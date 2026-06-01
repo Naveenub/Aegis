@@ -25,7 +25,7 @@ import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { acquireLock, releaseLock } from './lock.js';
 import { applyPatch, parsePatch } from './code-writer.js';
-import { getTaskQueue, getDeadLetterQueue, addStep } from './queue.js';
+import { getDeadLetterQueue, addStep } from './queue.js';
 import { getOperationId, isApplied, markApplied } from './idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from './metrics.js';
 import { startSpan, attachPatch, attachTestResult, endSpan } from './tracer.js';
@@ -43,9 +43,9 @@ import {
   flagForReview,
 } from './workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
-import { needsApproval, approvalModeActive, notifyApprovalRequired } from './approval-gate.js';
-import { acquireSlot, clearSlots } from './concurrency.js';
-import { DEFAULT_TENANT, assertTenantId } from './tenant.js';
+import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
+import { acquireSlot } from './concurrency.js';
+import { assertTenantId } from './tenant.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
