@@ -18,22 +18,16 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// ─── Mock fs ──────────────────────────────────────────────────────────────────
-const mockAppendFileSync = vi.fn();
-const mockReadFileSync   = vi.fn(() => '');
-const mockExistsSync     = vi.fn(() => false);
-const mockMkdirSync      = vi.fn();
+// ─── Mock ioredis ─────────────────────────────────────────────────────────────
+const mockRpush  = vi.fn(async () => 1);
+const mockLrange = vi.fn(async () => []);
 
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
-    appendFileSync: mockAppendFileSync,
-    readFileSync:   mockReadFileSync,
-    existsSync:     mockExistsSync,
-    mkdirSync:      mockMkdirSync,
-  };
-});
+vi.mock('ioredis', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    rpush:  mockRpush,
+    lrange: mockLrange,
+  })),
+}));
 
 // ─── Mock agent-runner ────────────────────────────────────────────────────────
 vi.mock('../engine/agent-runner.js', () => ({
@@ -354,9 +348,9 @@ describe('scoreResponse — unknown agent', () => {
   });
 });
 
-// ─── evalAgent (dryRun) ───────────────────────────────────────────────────────
+// ─── evalAgent (via mocked runAgent) ─────────────────────────────────────────
 
-describe('evalAgent — dryRun mode', () => {
+describe('evalAgent — with mocked runAgent returning stubs', () => {
   it('passes all cases for debugger using the stub response', async () => {
     const result = await evalAgent('debugger', AGENT_CASES.debugger, { dryRun: true });
     expect(result.agent).toBe('debugger');
@@ -393,21 +387,20 @@ describe('evalAgent — dryRun mode', () => {
     }
   });
 
-  it('marks an agent as failed when stub is replaced with empty string', async () => {
+  it('marks an agent as failed when runAgent returns empty string', async () => {
     const cases = [{ id: 'bad', task: 'fix something', context: {} }];
-    // Pass empty string as the stub — score will be 0
     vi.doMock('../engine/agent-runner.js', () => ({
       runAgent: vi.fn(async () => ''),
     }));
-    const result = await evalAgent('debugger', cases, { dryRun: false });
+    const result = await evalAgent('debugger', cases, { dryRun: true });
     // Empty response → score 0 → case fails → agent fails
     expect(result.cases[0].passed).toBe(false);
   });
 });
 
-// ─── evalAll (dryRun) ─────────────────────────────────────────────────────────
+// ─── evalAll (dryRun skips Redis, runAgent is mocked) ────────────────────────
 
-describe('evalAll — dryRun mode', () => {
+describe('evalAll — dryRun skips Redis history, runAgent mocked', () => {
   it('returns a report with passed=true when all stubs are correct', async () => {
     const report = await evalAll({ dryRun: true });
     expect(report.passed).toBe(true);
@@ -435,49 +428,38 @@ describe('evalAll — dryRun mode', () => {
 
 describe('recordEvalResult', () => {
   beforeEach(() => {
-    mockAppendFileSync.mockReset();
-    mockExistsSync.mockReset();
-    mockMkdirSync.mockReset();
+    mockRpush.mockReset();
+    mockRpush.mockResolvedValue(1);
   });
 
-  it('creates the directory when it does not exist', () => {
-    mockExistsSync.mockReturnValue(false);
-    recordEvalResult({ agent: 'debugger', passed: true, passCount: 2, totalCases: 2, cases: [] });
-    expect(mockMkdirSync).toHaveBeenCalledWith(
-      expect.stringContaining('.claude'),
-      expect.objectContaining({ recursive: true })
-    );
+  it('calls redis.rpush with the eval history key', async () => {
+    await recordEvalResult({ agent: 'debugger', passed: true, passCount: 2, totalCases: 2, cases: [] });
+    expect(mockRpush).toHaveBeenCalledOnce();
+    const [key] = mockRpush.mock.calls[0];
+    expect(key).toBe('aegis:eval-history');
   });
 
-  it('does not create directory when it already exists', () => {
-    mockExistsSync.mockReturnValue(true);
-    recordEvalResult({ agent: 'debugger', passed: true, passCount: 2, totalCases: 2, cases: [] });
-    expect(mockMkdirSync).not.toHaveBeenCalled();
-  });
-
-  it('appends a valid JSONL line', () => {
-    mockExistsSync.mockReturnValue(true);
-    recordEvalResult({
+  it('pushes a valid JSON string', async () => {
+    await recordEvalResult({
       agent:      'debugger',
       passed:     true,
       passCount:  2,
       totalCases: 2,
       cases:      [{ caseId: 'c1', passed: true, score: 8, notes: [] }],
     });
-    expect(mockAppendFileSync).toHaveBeenCalledOnce();
-    const [, content] = mockAppendFileSync.mock.calls[0];
-    const parsed = JSON.parse(content.trim());
+    expect(mockRpush).toHaveBeenCalledOnce();
+    const [, content] = mockRpush.mock.calls[0];
+    const parsed = JSON.parse(content);
     expect(parsed.agent).toBe('debugger');
     expect(parsed.passed).toBe(true);
     expect(typeof parsed.ts).toBe('string');
   });
 
-  it('does not throw when appendFileSync fails', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockAppendFileSync.mockImplementation(() => { throw new Error('disk full'); });
-    expect(() =>
+  it('does not throw when rpush fails', async () => {
+    mockRpush.mockRejectedValue(new Error('redis unavailable'));
+    await expect(
       recordEvalResult({ agent: 'debugger', passed: true, passCount: 1, totalCases: 1, cases: [] })
-    ).not.toThrow();
+    ).resolves.not.toThrow();
   });
 });
 
@@ -485,40 +467,31 @@ describe('recordEvalResult', () => {
 
 describe('readEvalHistory', () => {
   beforeEach(() => {
-    mockReadFileSync.mockReset();
-    mockExistsSync.mockReset();
+    mockLrange.mockReset();
+    mockLrange.mockResolvedValue([]);
   });
 
-  it('returns empty array when file does not exist', () => {
-    mockExistsSync.mockReturnValue(false);
-    const result = readEvalHistory();
+  it('returns empty array when Redis returns no entries', async () => {
+    const result = await readEvalHistory();
     expect(result).toEqual([]);
   });
 
-  it('returns parsed JSONL records', () => {
-    mockExistsSync.mockReturnValue(true);
+  it('returns parsed records from Redis', async () => {
     const record = { ts: new Date().toISOString(), agent: 'debugger', passed: true, passCount: 2, total: 2, cases: [] };
-    mockReadFileSync.mockReturnValue(JSON.stringify(record) + '\n');
-    const result = readEvalHistory();
+    mockLrange.mockResolvedValue([JSON.stringify(record)]);
+    const result = await readEvalHistory();
     expect(result).toHaveLength(1);
     expect(result[0].agent).toBe('debugger');
   });
 
-  it('returns at most n records', () => {
-    mockExistsSync.mockReturnValue(true);
-    const lines = Array.from({ length: 30 }, (_, i) =>
-      JSON.stringify({ ts: new Date().toISOString(), agent: 'debugger', passed: true, passCount: 1, total: 1, cases: [], seq: i })
-    ).join('\n');
-    mockReadFileSync.mockReturnValue(lines);
-    const result = readEvalHistory(5);
-    expect(result).toHaveLength(5);
-    expect(result[result.length - 1].seq).toBe(29);
+  it('passes the correct lrange arguments for n=5', async () => {
+    await readEvalHistory(5);
+    expect(mockLrange).toHaveBeenCalledWith('aegis:eval-history', -5, -1);
   });
 
-  it('returns empty array when file content is unparseable', () => {
-    mockExistsSync.mockReturnValue(true);
-    mockReadFileSync.mockReturnValue('not json\nalso not json\n');
-    // Should not throw; returns empty
-    expect(() => readEvalHistory()).not.toThrow();
+  it('returns empty array when lrange throws', async () => {
+    mockLrange.mockRejectedValue(new Error('redis down'));
+    const result = await readEvalHistory();
+    expect(result).toEqual([]);
   });
 });
