@@ -131,6 +131,7 @@ import {
   ensureWorkflowBranch,
   commitChanges,
   rollbackLastCommit,
+  revertStepCommit,
   finaliseWorkflow,
   removeWorkflowWorktree,
   getWorker,
@@ -318,7 +319,88 @@ describe('rollbackLastCommit()', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 5. finaliseWorkflow()
+// 5. revertStepCommit()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('revertStepCommit()', () => {
+  const cwd = '/tmp/wt/tenant/wf-revert';
+
+  it('finds the step commit and calls git revert --no-edit with its hash', () => {
+    // git log --grep returns the target hash; git revert succeeds; git rev-parse returns new HEAD
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk('abc1234'))  // git log --grep
+      .mockReturnValueOnce(gitOk())           // git revert --no-edit abc1234
+      .mockReturnValueOnce(gitOk('def5678')); // git rev-parse HEAD
+
+    revertStepCommit('wf-revert', 'step-1', cwd);
+
+    const revertCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'revert'
+    );
+    expect(revertCall).toBeDefined();
+    expect(revertCall[1]).toContain('--no-edit');
+    expect(revertCall[1]).toContain('abc1234');
+  });
+
+  it('returns { commitHash } set to the new HEAD after the revert commit', () => {
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk('abc1234'))  // git log --grep
+      .mockReturnValueOnce(gitOk())           // git revert
+      .mockReturnValueOnce(gitOk('def5678')); // git rev-parse HEAD
+
+    const result = revertStepCommit('wf-revert', 'step-1', cwd);
+    expect(result).toEqual({ commitHash: 'def5678' });
+  });
+
+  it('searches using the canonical "Aegis: <stepId>" commit message format', () => {
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk('abc1234'))
+      .mockReturnValueOnce(gitOk())
+      .mockReturnValueOnce(gitOk('def5678'));
+
+    revertStepCommit('wf-revert', 'my-step-id', cwd);
+
+    const logCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'log'
+    );
+    expect(logCall).toBeDefined();
+    const grepArg = logCall[1].find(a => a.startsWith('--grep='));
+    expect(grepArg).toBe('--grep=Aegis: my-step-id');
+  });
+
+  it('throws when no commit exists for the given stepId', () => {
+    // git log returns empty stdout → no commit found
+    spawnSyncMock.mockReturnValueOnce(gitOk(''));
+
+    expect(() => revertStepCommit('wf-revert', 'missing-step', cwd))
+      .toThrow(/no commit found/i);
+  });
+
+  it('throws when git revert fails (e.g. merge conflict)', () => {
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk('abc1234'))       // git log finds the commit
+      .mockReturnValueOnce(gitFail('CONFLICT'));    // git revert fails
+
+    expect(() => revertStepCommit('wf-revert', 'step-conflict', cwd))
+      .toThrow(/revert failed/i);
+  });
+
+  it('passes the correct cwd to all git sub-commands', () => {
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk('abc1234'))
+      .mockReturnValueOnce(gitOk())
+      .mockReturnValueOnce(gitOk('def5678'));
+
+    revertStepCommit('wf-revert', 'step-1', cwd);
+
+    for (const [bin, , opts] of spawnSyncMock.mock.calls) {
+      if (bin === 'git') expect(opts.cwd).toBe(cwd);
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. finaliseWorkflow()
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('finaliseWorkflow()', () => {
@@ -374,7 +456,7 @@ describe('finaliseWorkflow()', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 6. removeWorkflowWorktree()
+// 7. removeWorkflowWorktree()
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('removeWorkflowWorktree()', () => {
@@ -417,7 +499,7 @@ describe('removeWorkflowWorktree()', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 7. getWorker() — tenant validation and caching (unchanged behaviour)
+// 8. getWorker() — tenant validation and caching (unchanged behaviour)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('getWorker()', () => {
