@@ -19,7 +19,7 @@
  * Usage (one-off, from CLI or CI)
  * ────────────────────────────────
  *   import { evalAll } from './engine/prompt-eval.js';
- *   const report = await evalAll({ dryRun: false });
+ *   const report = await evalAll();
  *   console.log(report.summary);
  *
  * Usage (in CI, non-zero exit on regression)
@@ -29,6 +29,13 @@
  *       .then(m => m.evalAll())
  *       .then(r => { if (!r.passed) process.exit(1); });
  *   "
+ *
+ * dryRun option
+ * ─────────────
+ *   { dryRun: true } skips writing to Redis eval history but still calls the
+ *   real agent via runAgent(). This is safe for local smoke-runs where Redis
+ *   is unavailable. It does NOT substitute stub responses — use the unit-test
+ *   suite (tests/prompt-eval.test.js) with a mocked agent-runner for that.
  *
  * Scoring rubrics (per agent type)
  * ─────────────────────────────────
@@ -619,8 +626,10 @@ export function scoreResponse(agent, raw, expectNull = false) {
  * @param {string}    agent    - agent name
  * @param {object[]}  cases    - array of test case objects
  * @param {object}    [opts]
- * @param {boolean}   [opts.dryRun=false]   - score without calling the real API
- *                                            (uses a fixed stub response per agent)
+ * @param {boolean}   [opts.dryRun=false]   - when true, skips writing to Redis
+ *                                            eval history but still calls the
+ *                                            real agent via runAgent(). Safe for
+ *                                            local smoke-runs without Redis.
  * @param {string}    [opts.tenantId]        - passed through to runAgent()
  * @returns {Promise<object>} eval result for this agent
  */
@@ -632,15 +641,11 @@ export async function evalAgent(agent, cases, opts = {}) {
     let raw;
     let apiError = null;
 
-    if (dryRun) {
-      raw = STUB_RESPONSES[agent] ?? '';
-    } else {
-      try {
-        raw = await runAgent(agent, tc.task, tc.context ?? {}, tenantId);
-      } catch (err) {
-        apiError = err.message;
-        raw = '';
-      }
+    try {
+      raw = await runAgent(agent, tc.task, tc.context ?? {}, tenantId);
+    } catch (err) {
+      apiError = err.message;
+      raw = '';
     }
 
     const { score, notes } = scoreResponse(agent, raw, tc.expectNull ?? false);
@@ -660,13 +665,19 @@ export async function evalAgent(agent, cases, opts = {}) {
   const passCount  = results.filter(r => r.passed).length;
   const agentPassed = passCount / results.length >= AGENT_PASS_RATE;
 
-  return {
+  const evalResult = {
     agent,
     passed:    agentPassed,
     passCount,
     totalCases: results.length,
     cases:     results,
   };
+
+  if (!dryRun) {
+    await recordEvalResult(evalResult);
+  }
+
+  return evalResult;
 }
 
 /**
@@ -684,7 +695,6 @@ export async function evalAll(opts = {}) {
     logger.info({ agent }, '[prompt-eval] evaluating agent');
     const result = await evalAgent(agent, cases, opts);
     agentResults.push(result);
-    await recordEvalResult(result);
   }
 
   const allPassed = agentResults.every(r => r.passed);
