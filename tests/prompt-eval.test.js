@@ -19,8 +19,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mock ioredis ─────────────────────────────────────────────────────────────
-const mockRpush  = vi.fn(async () => 1);
-const mockLrange = vi.fn(async () => []);
+// vi.mock() factories are hoisted above all const declarations by vitest's
+// transformer. mockRpush/mockLrange must therefore be created via vi.hoisted()
+// so they exist at hoist-time, avoiding a TDZ ReferenceError.
+const { mockRpush, mockLrange } = vi.hoisted(() => ({
+  mockRpush:  vi.fn(async () => 1),
+  mockLrange: vi.fn(async () => []),
+}));
 
 vi.mock('ioredis', () => ({
   default: vi.fn().mockImplementation(() => ({
@@ -54,6 +59,9 @@ import {
   PASS_THRESHOLD,
   MAX_SCORE,
 } from '../engine/prompt-eval.js';
+
+// Import the already-mocked runAgent so individual tests can override its behaviour.
+import { runAgent } from '../engine/agent-runner.js';
 
 // ─── scoreResponse — PATCH agents ────────────────────────────────────────────
 
@@ -389,9 +397,9 @@ describe('evalAgent — with mocked runAgent returning stubs', () => {
 
   it('marks an agent as failed when runAgent returns empty string', async () => {
     const cases = [{ id: 'bad', task: 'fix something', context: {} }];
-    vi.doMock('../engine/agent-runner.js', () => ({
-      runAgent: vi.fn(async () => ''),
-    }));
+    // vi.doMock() cannot affect the runAgent already bound inside evalAgent.
+    // Instead, override the live vi.fn() spy for this one call.
+    runAgent.mockImplementationOnce(async () => '');
     const result = await evalAgent('debugger', cases, { dryRun: true });
     // Empty response → score 0 → case fails → agent fails
     expect(result.cases[0].passed).toBe(false);
