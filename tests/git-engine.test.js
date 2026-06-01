@@ -452,8 +452,8 @@ describe('finaliseWorkflow()', () => {
 
     await finaliseWorkflow('wf-lock', 'tenant-l');
     expect(acquireLockMock).toHaveBeenCalledWith('tenant-merge:tenant-l', 'tenant-l');
-    // lock is released in finally block
-    expect(mockLock.release).toHaveBeenCalled();
+    // lock is released via releaseLock() in the finally block
+    expect(releaseLockMock).toHaveBeenCalled();
   });
 });
 
