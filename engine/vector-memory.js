@@ -300,7 +300,7 @@ async function computeIDF(tenantId, queryTerms) {
   const results  = await pipe.exec();
   const docCount = parseFloat(results[0][1] ?? '1');
   const totalLen = parseFloat(results[1][1] ?? '1');
-  const avgdl    = totalLen / Math.max(docCount, 1);
+  void totalLen; // avgdl is used by bm25Score via _rerank, not here
 
   const idfMap = new Map();
   for (let i = 0; i < queryTerms.length; i++) {
@@ -343,7 +343,7 @@ function cosineSimilarity(a, b) {
 // in-process using cosine similarity + BM25 + recency.  This is O(n) and not
 // suitable for large corpora, but it keeps the system functional with plain Redis.
 
-async function _hscanSearch(tenantId, queryVec, topK) {
+async function _hscanSearch(tenantId, queryVec, _topK) {
   const prefix = memoryPrefix(tenantId);
   const candidates = [];
 
