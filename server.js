@@ -19,8 +19,6 @@
  *   POST   /cancel                             Cancel a running workflow
  *   GET    /workflows                          List workflows (filterable)
  *   GET    /workflows/:workflowId              Get workflow status + steps
- *   POST   /workflows/:workflowId/steps/:stepId/rewind   Step-level undo
- *   GET    /workflows/:workflowId/rewind-history         Rewind audit trail
  *   GET    /concurrency/:workflowId            Live concurrency slot status
  *   GET    /jobs                               List jobs (tenant-scoped)
  *   GET    /jobs/:jobId                        Get a single job
@@ -59,11 +57,9 @@ import {
   cancelWorkflow,
   getReviewQueue,
   resolveReview,
-  rewindStep,
-  getRewindHistory,
 } from './engine/workflow-store.js';
 import { slotStatus }                        from './engine/concurrency.js';
-import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
+import { ensureWorkflowBranch } from './engine/git.js';
 import {
   listTenants,
   getTenant,
@@ -248,88 +244,6 @@ app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
     res.json(workflow);
   } catch (err) {
     console.error('[GET /workflows/:workflowId]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Step Rewind ──────────────────────────────────────────────────────────────
-
-/**
- * POST /workflows/:workflowId/steps/:stepId/rewind
- * Revert a completed step's git commit and reset it (plus downstream
- * completed steps) back to `pending` so they re-execute on next resume.
- *
- * Body:    { tenantId?: string, reason?: string }
- * Returns: { ok: true, workflowId, stepId, resetSteps: string[], commitHash: string|null }
- *
- * Errors:
- *   400 — step not completed, or workflow not in a rewindable state
- *   404 — workflow or step not found
- *   409 — git revert produced a merge conflict (resolve manually)
- */
-app.post(
-  '/workflows/:workflowId/steps/:stepId/rewind',
-  (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
-  async (req, res) => {
-    const { workflowId, stepId } = req.params;
-    const { tenantId, reason }   = req.body ?? {};
-    const tenant = tenantId ?? req.resolvedTenantId;
-
-    try {
-      // Acquire worktree lock before reverting so no concurrent step runs
-      // while git revert is in progress.
-      let worktreeLock = null;
-      let cwd          = null;
-
-      try {
-        ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
-      } catch {
-        // Worktree not yet created — step never committed; skip git revert.
-      }
-
-      let commitHash = null;
-
-      if (cwd) {
-        try {
-          const result = revertStepCommit(workflowId, stepId, cwd);
-          commitHash = result.commitHash;
-        } catch (gitErr) {
-          return res.status(409).json({
-            error: `git revert failed — resolve conflicts manually: ${gitErr.message}`,
-          });
-        } finally {
-          if (worktreeLock) {
-            try { await worktreeLock.release(); } catch { /* best-effort */ }
-          }
-        }
-      }
-
-      const result = await rewindStep(workflowId, stepId, { commitHash, reason });
-
-      if (!result.ok) {
-        const statusCode = result.reason?.includes('not found') ? 404 : 400;
-        return res.status(statusCode).json({ error: result.reason });
-      }
-
-      res.json({ ok: true, workflowId, stepId, resetSteps: result.resetSteps, commitHash });
-
-    } catch (err) {
-      console.error('[POST /workflows/:workflowId/steps/:stepId/rewind]', err);
-      res.status(500).json({ error: err.message });
-    }
-  },
-);
-
-/**
- * GET /workflows/:workflowId/rewind-history
- * Return the rewind audit trail for a workflow, newest first.
- */
-app.get('/workflows/:workflowId/rewind-history', requireApiKey, async (req, res) => {
-  try {
-    const history = await getRewindHistory(req.params.workflowId);
-    res.json({ history });
-  } catch (err) {
-    console.error('[GET /workflows/:workflowId/rewind-history]', err);
     res.status(500).json({ error: err.message });
   }
 });
