@@ -21,8 +21,7 @@
  * controllable lock stub.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import path from 'path';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mock external I/O ────────────────────────────────────────────────────────
 
