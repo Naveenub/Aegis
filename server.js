@@ -53,7 +53,7 @@ import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
 import {
-  getWorkflow,
+
   getWorkflowStatus,
   listWorkflows,
   resumeWorkflow,
