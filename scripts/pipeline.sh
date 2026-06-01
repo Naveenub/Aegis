@@ -211,14 +211,16 @@ SUBMIT_RESPONSE=$(curl -sf --max-time 30 \
   exit 1
 }
 
-SUBMIT_STATUS=$(echo "$SUBMIT_RESPONSE" | jq -r '.status // "unknown"')
-if [[ "$SUBMIT_STATUS" != "submitted" ]]; then
-  fail "Unexpected submission response:"
-  echo "$SUBMIT_RESPONSE" | jq . >&2
+# POST /task returns { workflowId: string, status: "submitted" }.
+# Extract workflowId from the JSON object; a missing or null value means the
+# submission failed even if the HTTP status was 2xx.
+WORKFLOW_ID=$(echo "$SUBMIT_RESPONSE" | jq -r '.workflowId // empty')
+if [[ -z "$WORKFLOW_ID" || "$WORKFLOW_ID" == "null" ]]; then
+  fail "Task submission did not return a workflowId — unexpected response:"
+  echo "$SUBMIT_RESPONSE" >&2
   exit 1
 fi
 
-WORKFLOW_ID=$(echo "$SUBMIT_RESPONSE" | jq -r '.workflowId')
 success "Task submitted — workflow ID: ${BOLD}$WORKFLOW_ID${RESET}"
 
 # ─── poll for workflow completion ─────────────────────────────────────────────
@@ -234,7 +236,7 @@ while [[ $ELAPSED -lt $TIMEOUT ]]; do
   ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
 
   WF_RESPONSE=$(curl -sf --max-time 10 \
-    "$BASE_URL/workflow/$WORKFLOW_ID" \
+    "$BASE_URL/workflows/$WORKFLOW_ID" \
     -H "x-api-key: $AEGIS_API_KEY" \
     2>&1) || {
     warn "Workflow poll failed (will retry) — elapsed ${ELAPSED}s"
