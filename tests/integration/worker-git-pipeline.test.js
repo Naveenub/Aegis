@@ -31,7 +31,7 @@
  *   Timeout mid-retry   — isWorkflowTimedOut=true inside retry loop → throws + cancels
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'path';
 
 // ─── Mock external I/O ────────────────────────────────────────────────────────
@@ -331,26 +331,32 @@ describe('Review rejected path: patch blocked before write', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Merge conflict → flagForReview
+// Merge conflict resolution (direct, rebase, fallback)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Merge conflict path: finalise returns conflicts', () => {
+describe('Merge conflict path: finalise returns conflicts (flag strategy)', () => {
+  beforeEach(() => {
+    process.env.AEGIS_MERGE_STRATEGY = 'flag';
+  });
+  afterEach(() => {
+    delete process.env.AEGIS_MERGE_STRATEGY;
+  });
+
   it('returns merged=false with conflict file list when merge fails', async () => {
     execFileSyncMock.mockImplementationOnce(() => {
       throw new Error('CONFLICT (content): Merge conflict in engine/foo.js');
     });
-    // git diff --name-only for conflict list
     spawnSyncMock
-      .mockReturnValueOnce(gitOk())                         // rev-parse base branch
-      .mockReturnValueOnce(gitOk('engine/foo.js'))          // diff --name-only
-      .mockReturnValueOnce(gitOk());                        // merge --abort
+      .mockReturnValueOnce(gitOk())                // rev-parse base branch
+      .mockReturnValueOnce(gitOk('engine/foo.js')) // diff --name-only
+      .mockReturnValueOnce(gitOk());               // merge --abort
 
     const result = await finaliseWorkflow(WORKFLOW, TENANT);
     expect(result.merged).toBe(false);
     expect(result.conflicts).toBeInstanceOf(Array);
   });
 
-  it('should trigger flagForReview when the caller detects a conflict', async () => {
+  it('triggers flagForReview when the caller detects a conflict', async () => {
     execFileSyncMock.mockImplementationOnce(() => { throw new Error('CONFLICT'); });
     spawnSyncMock
       .mockReturnValueOnce(gitOk())
@@ -359,7 +365,6 @@ describe('Merge conflict path: finalise returns conflicts', () => {
 
     const result = await finaliseWorkflow(WORKFLOW, TENANT);
 
-    // Simulate the worker's post-finalise check
     if (!result.merged) {
       await flagForReviewMock(WORKFLOW, 'merge', {
         reason: 'merge-conflict',
@@ -372,6 +377,92 @@ describe('Merge conflict path: finalise returns conflicts', () => {
       'merge',
       expect.objectContaining({ reason: 'merge-conflict' })
     );
+  });
+});
+
+// ─── Auto-rebase strategy ─────────────────────────────────────────────────────
+
+describe('Auto-rebase strategy: merge fails then rebase resolves', () => {
+  beforeEach(() => {
+    process.env.AEGIS_MERGE_STRATEGY = 'rebase';
+  });
+  afterEach(() => {
+    delete process.env.AEGIS_MERGE_STRATEGY;
+  });
+
+  it('returns merged=true with resolvedVia="rebase" when rebase succeeds', async () => {
+    // First execFileSync call = initial --no-ff merge → fails (conflict)
+    execFileSyncMock
+      .mockImplementationOnce(() => { throw new Error('CONFLICT'); }) // initial merge
+      .mockReturnValueOnce('');                                        // git rebase succeeds
+      // --ff-only merge after rebase is the third execFileSync call
+    execFileSyncMock.mockReturnValueOnce('');
+
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk())                // rev-parse base branch
+      .mockReturnValueOnce(gitOk('engine/foo.js')) // diff --name-only (conflict list)
+      .mockReturnValueOnce(gitOk())                // merge --abort
+      .mockReturnValueOnce(gitOk())                // git fetch (local ref update)
+      .mockReturnValueOnce(gitOk('def9012'));       // git rev-parse HEAD (rebased tip)
+      // update-ref and ff-only merge follow via execFileSync / spawnSync
+
+    // Allow update-ref and any remaining spawnSync calls to succeed
+    spawnSyncMock.mockReturnValue(gitOk());
+
+    const result = await finaliseWorkflow(WORKFLOW, TENANT);
+    expect(result.merged).toBe(true);
+    expect(result.resolvedVia).toBe('rebase');
+    expect(result.conflicts).toHaveLength(0);
+  });
+
+  it('falls back to merged=false when both merge and rebase fail', async () => {
+    execFileSyncMock
+      .mockImplementationOnce(() => { throw new Error('CONFLICT'); })  // initial merge
+      .mockImplementationOnce(() => { throw new Error('CONFLICT'); }); // rebase fails
+
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk())                // rev-parse base branch
+      .mockReturnValueOnce(gitOk('engine/foo.js')) // diff --name-only
+      .mockReturnValueOnce(gitOk())                // merge --abort
+      .mockReturnValueOnce(gitOk())                // git fetch
+      // rebase throws (handled by execFileSyncMock above)
+      .mockReturnValueOnce(gitOk());               // rebase --abort
+
+    const result = await finaliseWorkflow(WORKFLOW, TENANT);
+    expect(result.merged).toBe(false);
+    expect(result.conflicts).toBeInstanceOf(Array);
+  });
+
+  it('does not call flagForReview when rebase resolves the conflict', async () => {
+    execFileSyncMock
+      .mockImplementationOnce(() => { throw new Error('CONFLICT'); })
+      .mockReturnValueOnce('')   // rebase
+      .mockReturnValueOnce(''); // ff-only merge
+
+    spawnSyncMock.mockReturnValue(gitOk('def9012'));
+
+    const result = await finaliseWorkflow(WORKFLOW, TENANT);
+
+    if (result.merged) {
+      // worker does NOT call flagForReview on success
+    } else {
+      await flagForReviewMock(WORKFLOW, 'merge', { reason: 'merge-conflict', conflicts: result.conflicts });
+    }
+
+    expect(flagForReviewMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Direct merge (default happy path) ───────────────────────────────────────
+
+describe('Direct merge: resolvedVia="direct" on a clean merge', () => {
+  it('returns resolvedVia="direct" when the initial merge succeeds', async () => {
+    spawnSyncMock.mockReturnValue(gitOk());
+    execFileSyncMock.mockReturnValue('');
+
+    const result = await finaliseWorkflow(WORKFLOW, TENANT);
+    expect(result.merged).toBe(true);
+    expect(result.resolvedVia).toBe('direct');
   });
 });
 
