@@ -202,7 +202,9 @@ export function revertStepCommit(workflowId, stepId, cwd) {
 //   resolvedVia is present (and set to "direct" or "rebase") only when
 //   merged === true, so callers can log/metric the resolution path.
 
-const MERGE_STRATEGY = (process.env.AEGIS_MERGE_STRATEGY ?? 'rebase').trim().toLowerCase();
+// MERGE_STRATEGY is read lazily inside finaliseWorkflow so that tests (and
+// runtime config changes) can override AEGIS_MERGE_STRATEGY via process.env
+// without needing to reload the module.
 
 /**
  * Merge the workflow branch into the tenant base branch.
@@ -219,6 +221,7 @@ const MERGE_STRATEGY = (process.env.AEGIS_MERGE_STRATEGY ?? 'rebase').trim().toL
  * @returns {{ merged: boolean, conflicts: string[], resolvedVia?: string }}
  */
 export async function finaliseWorkflow(workflowId, tenantId) {
+  const mergeStrategy = (process.env.AEGIS_MERGE_STRATEGY ?? 'rebase').trim().toLowerCase();
   const branch     = `aegis/${tenantId}/${workflowId}`;
   const baseBranch = `aegis-tenant/${tenantId}`;
   const lockName   = `tenant-merge:${tenantId}`;
@@ -248,7 +251,7 @@ export async function finaliseWorkflow(workflowId, tenantId) {
         .split('\n').filter(Boolean);
       git(['merge', '--abort'], REPO_ROOT);
 
-      if (MERGE_STRATEGY !== 'rebase') {
+      if (mergeStrategy !== 'rebase') {
         // "flag" strategy — skip auto-resolution, hand off to human review.
         return { merged: false, conflicts };
       }
