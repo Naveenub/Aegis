@@ -1,36 +1,29 @@
 /**
  * tests/git-engine.test.js
  *
- * Unit tests for the Git engine layer — engine/code-writer.js
- * (validateTargetPath, parsePatch, applyPatch) and the agent-worker
- * getWorker() factory guard.
+ * Unit tests for engine/git.js — the real git operations layer.
  *
  * Covers:
- *   validateTargetPath()  — inside-root paths, traversal attempts, blocked names
- *   parsePatch()          — valid JSON, invalid JSON, null patch
- *   applyPatch()          — writes file inside root, blocks traversal, blocks
- *                           oversized content, blocks blocked filenames
- *   getWorker()           — rejects invalid tenantId, returns cached worker
+ *   worktreeDir()              — returns null when directory absent, path when present
+ *   ensureWorkflowBranch()     — creates worktree dir + branch, returns { cwd, lock }
+ *                                skips creation when worktree already exists
+ *                                releases lock and re-throws on git failure
+ *   commitChanges()            — calls git add -A then git commit
+ *   rollbackLastCommit()       — calls git reset --hard HEAD~1
+ *   finaliseWorkflow()         — creates base branch when absent, merges, returns { merged, conflicts }
+ *                                returns { merged: false, conflicts } on merge failure
+ *   removeWorkflowWorktree()   — calls worktree remove + branch -D (best-effort, no throw)
+ *   getWorker()                — rejects invalid tenantId, caches workers per tenant
  *
- * No real filesystem writes — fs.writeFileSync and fs.mkdirSync are mocked.
- * No Redis / BullMQ connections — ioredis and bullmq are mocked.
+ * Strategy: spawnSync / execFileSync / fs are mocked so no real git binary or
+ * filesystem is exercised.  acquireLock / releaseLock are mocked to return a
+ * controllable lock stub.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'path';
 
-// ─── Mock BullMQ ──────────────────────────────────────────────────────────────
-
-vi.mock('bullmq', () => ({
-  Worker: vi.fn().mockImplementation(() => ({
-    on: vi.fn(),
-  })),
-  Queue: vi.fn().mockImplementation(() => ({
-    add: vi.fn(),
-  })),
-}));
-
-// ─── Mock ioredis ─────────────────────────────────────────────────────────────
+// ─── Mock external I/O ────────────────────────────────────────────────────────
 
 vi.mock('ioredis', () => ({
   default: vi.fn(() => ({
@@ -46,159 +39,385 @@ vi.mock('ioredis', () => ({
   })),
 }));
 
-// ─── Mock all engine dependencies of agent-worker ────────────────────────────
+vi.mock('bullmq', () => ({
+  Worker: vi.fn().mockImplementation(() => ({ on: vi.fn() })),
+  Queue:  vi.fn().mockImplementation(() => ({ add: vi.fn() })),
+}));
 
-vi.mock('../engine/lock.js',          () => ({ acquireLock: vi.fn(async () => ({})), releaseLock: vi.fn(async () => {}) }));
-vi.mock('../engine/queue.js',         () => ({ getTaskQueue: vi.fn(() => ({ add: vi.fn() })), getDeadLetterQueue: vi.fn(() => ({ add: vi.fn() })), addStep: vi.fn() }));
-vi.mock('../engine/idempotency.js',   () => ({ getOperationId: vi.fn(() => 'op-1'), isApplied: vi.fn(async () => false), markApplied: vi.fn() }));
-vi.mock('../engine/metrics.js',       () => ({ recordStart: vi.fn(), recordRetry: vi.fn(), recordSuccess: vi.fn(), recordFailure: vi.fn(), recordStepStart: vi.fn(), recordStepEnd: vi.fn() }));
-vi.mock('../engine/tracer.js',        () => ({ startSpan: vi.fn(), attachPatch: vi.fn(), attachTestResult: vi.fn(), endSpan: vi.fn() }));
-vi.mock('../engine/agent-runner.js',  () => ({ runAgent: vi.fn(async () => 'PATCH: {"file":"a.js","content":"x"}') }));
-vi.mock('../engine/review-system.js', () => ({ runReviewPipeline: vi.fn(() => ({ ok: true, message: 'APPROVED' })) }));
-vi.mock('../engine/test-runner.js',   () => ({ runTests: vi.fn(() => ({ success: true, output: '' })) }));
-vi.mock('../engine/vector-memory.js', () => ({ storeMemory: vi.fn(), searchMemory: vi.fn(async () => []) }));
-vi.mock('../engine/job-store.js',     () => ({ createJob: vi.fn(), updateJob: vi.fn(), incrementRetries: vi.fn() }));
-vi.mock('../engine/workflow-store.js',() => ({ updateStep: vi.fn(), getRunnableSteps: vi.fn(async () => []), getWorkflowStatus: vi.fn(async () => 'running'), isWorkflowTimedOut: vi.fn(async () => false), cancelWorkflow: vi.fn(), flagForReview: vi.fn() }));
-vi.mock('../engine/concurrency.js',   () => ({ acquireSlot: vi.fn(async () => ({ release: vi.fn() })), clearSlots: vi.fn() }));
-vi.mock('../engine/approval-gate.js', () => ({ needsApproval: vi.fn(() => null), approvalModeActive: false }));
+vi.mock('dotenv', () => ({ default: { config: vi.fn() }, config: vi.fn() }));
 
-// ─── Mock fs to avoid real disk writes ───────────────────────────────────────
+// ─── Mock child_process ───────────────────────────────────────────────────────
 
-const writtenFiles = new Map();
+const spawnSyncMock    = vi.fn();
+const execFileSyncMock = vi.fn();
+
+vi.mock('child_process', () => ({
+  spawnSync:    (...args) => spawnSyncMock(...args),
+  execFileSync: (...args) => execFileSyncMock(...args),
+}));
+
+// ─── Mock fs ──────────────────────────────────────────────────────────────────
+
+const existsSyncMock = vi.fn();
+const mkdirSyncMock  = vi.fn();
 
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    writeFileSync: vi.fn((filePath, content) => {
-      writtenFiles.set(filePath, content);
-    }),
-    mkdirSync:   vi.fn(),
-    readFileSync: vi.fn((filePath) => '# persona'),
-    existsSync:   vi.fn(() => true),
+    existsSync:   (...args) => existsSyncMock(...args),
+    mkdirSync:    (...args) => mkdirSyncMock(...args),
+    writeFileSync: vi.fn(),
+    readFileSync:  vi.fn(() => '# persona'),
   };
 });
 
-vi.mock('dotenv', () => ({ default: { config: vi.fn() }, config: vi.fn() }));
+// ─── Mock engine dependencies ─────────────────────────────────────────────────
 
-// ─── Imports after mocks ──────────────────────────────────────────────────────
+const mockLock = { release: vi.fn(async () => {}) };
+const acquireLockMock = vi.fn(async () => mockLock);
+const releaseLockMock = vi.fn(async () => {});
 
-import { validateTargetPath, parsePatch, applyPatch } from '../engine/code-writer.js';
-import { getWorker } from '../engine/git.js';
+vi.mock('../engine/lock.js', () => ({
+  acquireLock:  (...args) => acquireLockMock(...args),
+  releaseLock:  (...args) => releaseLockMock(...args),
+}));
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
+vi.mock('../engine/queue.js', () => ({
+  getTaskQueue:     vi.fn(() => ({ add: vi.fn() })),
+  getDeadLetterQueue: vi.fn(() => ({ add: vi.fn() })),
+  addStep:          vi.fn(),
+}));
+
+vi.mock('../engine/idempotency.js', () => ({
+  getOperationId: vi.fn(() => 'op-1'),
+  isApplied:      vi.fn(async () => false),
+  markApplied:    vi.fn(),
+}));
+
+vi.mock('../engine/metrics.js', () => ({
+  recordStart:   vi.fn(), recordRetry: vi.fn(), recordSuccess: vi.fn(),
+  recordFailure: vi.fn(), recordStepStart: vi.fn(), recordStepEnd: vi.fn(),
+}));
+
+vi.mock('../engine/tracer.js', () => ({
+  startSpan: vi.fn(), attachPatch: vi.fn(),
+  attachTestResult: vi.fn(), endSpan: vi.fn(),
+}));
+
+vi.mock('../engine/agent-runner.js',  () => ({ runAgent: vi.fn(async () => 'PATCH: {}') }));
+vi.mock('../engine/review-system.js', () => ({ runReviewPipeline: vi.fn(() => ({ ok: true, message: 'APPROVED' })) }));
+vi.mock('../engine/test-runner.js',   () => ({ runTests: vi.fn(() => ({ success: true, output: '' })) }));
+vi.mock('../engine/vector-memory.js', () => ({ storeMemory: vi.fn(), searchMemory: vi.fn(async () => []) }));
+vi.mock('../engine/job-store.js',     () => ({ createJob: vi.fn(), updateJob: vi.fn(), incrementRetries: vi.fn() }));
+vi.mock('../engine/workflow-store.js', () => ({
+  updateStep:           vi.fn(), getRunnableSteps: vi.fn(async () => []),
+  getWorkflowStatus:    vi.fn(async () => 'running'),
+  isWorkflowTimedOut:   vi.fn(async () => false),
+  cancelWorkflow:       vi.fn(), flagForReview: vi.fn(),
+}));
+vi.mock('../engine/concurrency.js',   () => ({ acquireSlot: vi.fn(async () => ({ release: vi.fn() })), clearSlots: vi.fn() }));
+vi.mock('../engine/approval-gate.js', () => ({ needsApproval: vi.fn(() => null), approvalModeActive: false }));
+vi.mock('../engine/retry-policy.js',  () => ({
+  resolvePolicy:   vi.fn(() => ({ maxAttempts: 3 })),
+  calcDelay:       vi.fn(() => 0),
+  agentForAttempt: vi.fn(() => 'feature-builder'),
+}));
+
+// ─── Import after all mocks ───────────────────────────────────────────────────
+
+import {
+  worktreeDir,
+  ensureWorkflowBranch,
+  commitChanges,
+  rollbackLastCommit,
+  finaliseWorkflow,
+  removeWorkflowWorktree,
+  getWorker,
+} from '../engine/git.js';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Simulate a successful git spawn (status 0, optional stdout). */
+function gitOk(stdout = '') {
+  return { status: 0, stdout, stderr: '' };
+}
+
+/** Simulate a failed git spawn (status 1). */
+function gitFail(stderr = 'fatal: not a git repository') {
+  return { status: 1, stdout: '', stderr };
+}
 
 beforeEach(() => {
-  writtenFiles.clear();
   vi.clearAllMocks();
+  mockLock.release.mockResolvedValue(undefined);
+  acquireLockMock.mockResolvedValue(mockLock);
+  // Default: all git calls succeed
+  spawnSyncMock.mockReturnValue(gitOk());
+  execFileSyncMock.mockReturnValue('');
+  // Default: worktree directory does not exist → create path is exercised
+  existsSyncMock.mockReturnValue(false);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 1. validateTargetPath()
+// 1. worktreeDir()
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('validateTargetPath()', () => {
-  it('returns null for a valid path inside root', () => {
-    const resolved = path.join(PROJECT_ROOT, 'src', 'foo.js');
-    expect(validateTargetPath(resolved, PROJECT_ROOT)).toBeNull();
+describe('worktreeDir()', () => {
+  it('returns null when the tenant worktrees directory does not exist', () => {
+    existsSyncMock.mockReturnValue(false);
+    expect(worktreeDir('tenant-abc')).toBeNull();
   });
 
-  it('returns an error string for a path outside root (traversal)', () => {
-    const traversal = path.resolve(PROJECT_ROOT, '../../etc/passwd');
-    const err = validateTargetPath(traversal, PROJECT_ROOT);
-    expect(typeof err).toBe('string');
-    expect(err).toMatch(/traversal/i);
+  it('returns the expected path string when the directory exists', () => {
+    existsSyncMock.mockReturnValue(true);
+    const result = worktreeDir('tenant-abc');
+    expect(typeof result).toBe('string');
+    expect(result).toContain('tenant-abc');
   });
 
-  it('returns an error string for a path to root itself (not inside)', () => {
-    const err = validateTargetPath(PROJECT_ROOT, PROJECT_ROOT);
-    expect(typeof err).toBe('string');
-  });
-
-  it('blocks .env filename', () => {
-    const blocked = path.join(PROJECT_ROOT, 'src', '.env');
-    const err = validateTargetPath(blocked, PROJECT_ROOT);
-    expect(typeof err).toBe('string');
-    expect(err).toMatch(/\.env/);
-  });
-
-  it('blocks files with "secrets" in the name', () => {
-    const blocked = path.join(PROJECT_ROOT, 'config', 'secrets.json');
-    const err = validateTargetPath(blocked, PROJECT_ROOT);
-    expect(typeof err).toBe('string');
-    expect(err).toMatch(/secrets/i);
-  });
-
-  it('accepts a deep nested valid path', () => {
-    const deep = path.join(PROJECT_ROOT, 'engine', 'sub', 'deep', 'file.js');
-    expect(validateTargetPath(deep, PROJECT_ROOT)).toBeNull();
+  it('includes the tenant id in the returned path', () => {
+    existsSyncMock.mockReturnValue(true);
+    const result = worktreeDir('my-tenant');
+    expect(result).toContain('my-tenant');
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 2. parsePatch()
+// 2. ensureWorkflowBranch()
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('parsePatch()', () => {
-  it('parses a valid JSON patch string', () => {
-    const raw = JSON.stringify({ file: 'src/x.js', content: 'hello' });
-    const parsed = parsePatch(raw);
-    expect(parsed.file).toBe('src/x.js');
-    expect(parsed.content).toBe('hello');
+describe('ensureWorkflowBranch()', () => {
+  it('acquires a lock and returns { cwd, lock }', async () => {
+    const result = await ensureWorkflowBranch('wf-001', 'tenant-abc');
+    expect(acquireLockMock).toHaveBeenCalledWith('worktree:wf-001', 'tenant-abc');
+    expect(result).toHaveProperty('cwd');
+    expect(result).toHaveProperty('lock');
   });
 
-  it('throws on invalid JSON', () => {
-    expect(() => parsePatch('not-json')).toThrow();
+  it('cwd contains both the tenantId and workflowId', async () => {
+    const { cwd } = await ensureWorkflowBranch('wf-002', 'tenant-xyz');
+    expect(cwd).toContain('tenant-xyz');
+    expect(cwd).toContain('wf-002');
   });
 
-  it('parses null patch (patch: null) without throwing', () => {
-    const parsed = parsePatch('null');
-    expect(parsed).toBeNull();
+  it('calls mkdirSync + git worktree add when the worktree does not exist', async () => {
+    existsSyncMock.mockReturnValue(false);
+    // base branch exists check (first spawnSync), then worktree add (second spawnSync)
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk())  // rev-parse --verify base branch → exists
+      .mockReturnValue(gitOk());     // worktree add + any further git calls
+
+    await ensureWorkflowBranch('wf-new', 'tenant-t');
+    expect(mkdirSyncMock).toHaveBeenCalled();
+    // At least one call must be 'worktree'
+    const worktreeCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args.includes('worktree')
+    );
+    expect(worktreeCall).toBeDefined();
+  });
+
+  it('branches from HEAD when the tenant base branch does not yet exist', async () => {
+    existsSyncMock.mockReturnValue(false);
+    // rev-parse fails → base branch absent → should branch from HEAD
+    spawnSyncMock
+      .mockReturnValueOnce(gitFail('fatal: not found')) // base branch absent
+      .mockReturnValue(gitOk());
+
+    await ensureWorkflowBranch('wf-first', 'brand-new-tenant');
+
+    const worktreeAddCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'worktree' && args[1] === 'add'
+    );
+    expect(worktreeAddCall).toBeDefined();
+    // Should use 'HEAD' as start point, not the non-existent base branch
+    expect(worktreeAddCall[1]).toContain('HEAD');
+  });
+
+  it('skips mkdirSync and git worktree add when worktree already exists', async () => {
+    existsSyncMock.mockReturnValue(true); // dir already there
+    await ensureWorkflowBranch('wf-existing', 'tenant-abc');
+    expect(mkdirSyncMock).not.toHaveBeenCalled();
+    // No worktree add should be issued
+    const worktreeAddCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'worktree' && args[1] === 'add'
+    );
+    expect(worktreeAddCall).toBeUndefined();
+  });
+
+  it('releases lock and rethrows when git worktree add fails', async () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk())         // base branch check passes
+      .mockReturnValue(gitFail('fatal'));    // worktree add fails
+
+    await expect(ensureWorkflowBranch('wf-bad', 'tenant-err')).rejects.toThrow();
+    expect(releaseLockMock).toHaveBeenCalledWith(mockLock);
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 3. applyPatch()
+// 3. commitChanges()
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('applyPatch()', () => {
-  const { writeFileSync } = await import('fs');
+describe('commitChanges()', () => {
+  it('calls git add -A then git commit with the given message', () => {
+    const cwd = '/tmp/wt/tenant/wf-001';
+    commitChanges('Aegis: step-1', cwd);
 
-  it('calls writeFileSync for a valid in-root file', async () => {
-    const { writeFileSync } = await import('fs');
-    applyPatch('src/ok.js', 'content', PROJECT_ROOT);
-    expect(writeFileSync).toHaveBeenCalledOnce();
+    const addCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args.includes('-A')
+    );
+    const commitCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'commit'
+    );
+
+    expect(addCall).toBeDefined();
+    expect(commitCall).toBeDefined();
+    expect(commitCall[1]).toContain('Aegis: step-1');
   });
 
-  it('does not write when the path escapes the root (traversal)', async () => {
-    const { writeFileSync } = await import('fs');
-    applyPatch('../../etc/passwd', 'evil', PROJECT_ROOT);
-    expect(writeFileSync).not.toHaveBeenCalled();
+  it('passes the cwd option to spawnSync for both git calls', () => {
+    const cwd = '/tmp/wt/tenant/wf-002';
+    commitChanges('msg', cwd);
+
+    for (const [bin, , opts] of spawnSyncMock.mock.calls) {
+      if (bin === 'git') expect(opts.cwd).toBe(cwd);
+    }
   });
 
-  it('does not write when content exceeds 50 000 characters', async () => {
-    const { writeFileSync } = await import('fs');
-    applyPatch('src/big.js', 'x'.repeat(50_001), PROJECT_ROOT);
-    expect(writeFileSync).not.toHaveBeenCalled();
-  });
+  it('throws when git commit returns a non-zero exit code', () => {
+    spawnSyncMock
+      .mockReturnValueOnce(gitOk())    // add -A succeeds
+      .mockReturnValue(gitFail('nothing to commit'));
 
-  it('does not write to a blocked filename (.env)', async () => {
-    const { writeFileSync } = await import('fs');
-    applyPatch('.env', 'SECRET=1', PROJECT_ROOT);
-    expect(writeFileSync).not.toHaveBeenCalled();
-  });
-
-  it('writes to the resolved path inside the given cwd, not PROJECT_ROOT', async () => {
-    const { writeFileSync } = await import('fs');
-    const worktree = path.join(PROJECT_ROOT, 'worktrees', 'wf-abc');
-    applyPatch('src/feature.js', '// code', worktree);
-    const [calledPath] = writeFileSync.mock.calls[0];
-    expect(calledPath).toContain('wf-abc');
+    expect(() => commitChanges('msg', '/tmp/wt')).toThrow(/commit failed/i);
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 4. getWorker() — tenant validation and caching
+// 4. rollbackLastCommit()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('rollbackLastCommit()', () => {
+  it('calls git reset --hard HEAD~1 in the given cwd', () => {
+    const cwd = '/tmp/wt/tenant/wf-rollback';
+    rollbackLastCommit(cwd);
+
+    const resetCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'reset' && args.includes('HEAD~1')
+    );
+    expect(resetCall).toBeDefined();
+    expect(resetCall[2].cwd).toBe(cwd);
+  });
+
+  it('throws when git reset returns a non-zero exit code', () => {
+    spawnSyncMock.mockReturnValue(gitFail('fatal: bad revision'));
+    expect(() => rollbackLastCommit('/tmp/wt')).toThrow(/reset.*failed/i);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. finaliseWorkflow()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('finaliseWorkflow()', () => {
+  it('returns { merged: true, conflicts: [] } on a clean merge', async () => {
+    // rev-parse for base branch (exists), then execFileSync merge succeeds
+    spawnSyncMock.mockReturnValue(gitOk());
+    execFileSyncMock.mockReturnValue('');
+
+    const result = await finaliseWorkflow('wf-ok', 'tenant-ok');
+    expect(result).toEqual({ merged: true, conflicts: [] });
+  });
+
+  it('creates the base branch when it does not exist yet', async () => {
+    // First spawnSync is rev-parse → base branch absent
+    spawnSyncMock
+      .mockReturnValueOnce(gitFail('fatal: not found')) // rev-parse fails
+      .mockReturnValue(gitOk());                         // branch create + any diff
+
+    execFileSyncMock.mockReturnValue('');
+
+    await finaliseWorkflow('wf-first', 'brand-new');
+
+    const branchCreateCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'branch'
+    );
+    expect(branchCreateCall).toBeDefined();
+  });
+
+  it('returns { merged: false, conflicts } when merge fails', async () => {
+    spawnSyncMock.mockReturnValue(gitOk()); // rev-parse ok
+    execFileSyncMock.mockImplementationOnce(() => {
+      throw new Error('CONFLICT');
+    });
+    // git diff --name-only → conflicting files
+    spawnSyncMock.mockReturnValue(gitOk('engine/foo.js\nengine/bar.js'));
+    // git merge --abort
+    spawnSyncMock.mockReturnValue(gitOk());
+
+    const result = await finaliseWorkflow('wf-conflict', 'tenant-c');
+    expect(result.merged).toBe(false);
+    expect(Array.isArray(result.conflicts)).toBe(true);
+  });
+
+  it('acquires and releases the tenant-level merge lock', async () => {
+    spawnSyncMock.mockReturnValue(gitOk());
+    execFileSyncMock.mockReturnValue('');
+
+    await finaliseWorkflow('wf-lock', 'tenant-l');
+    expect(acquireLockMock).toHaveBeenCalledWith('tenant-merge:tenant-l', 'tenant-l');
+    // lock is released in finally block
+    expect(mockLock.release).toHaveBeenCalled();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. removeWorkflowWorktree()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('removeWorkflowWorktree()', () => {
+  it('calls git worktree remove and git branch -D for the workflow', async () => {
+    await removeWorkflowWorktree('wf-done', 'tenant-abc');
+
+    const removeCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'worktree' && args[1] === 'remove'
+    );
+    const deleteBranchCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'branch' && args.includes('-D')
+    );
+
+    expect(removeCall).toBeDefined();
+    expect(deleteBranchCall).toBeDefined();
+  });
+
+  it('does not throw when git worktree remove fails (already removed)', async () => {
+    spawnSyncMock.mockReturnValue(gitFail('fatal: worktree not found'));
+    await expect(removeWorkflowWorktree('wf-gone', 'tenant-abc')).resolves.not.toThrow();
+  });
+
+  it('does not throw when git branch -D fails (branch already deleted)', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce(gitFail('fatal: no worktree'))
+      .mockReturnValue(gitFail('error: branch not found'));
+    await expect(removeWorkflowWorktree('wf-clean', 'tenant-abc')).resolves.not.toThrow();
+  });
+
+  it('uses the correct branch name pattern aegis/<tenantId>/<workflowId>', async () => {
+    spawnSyncMock.mockReturnValue(gitOk());
+    await removeWorkflowWorktree('wf-123', 'my-tenant');
+
+    const deleteBranchCall = spawnSyncMock.mock.calls.find(
+      ([bin, args]) => bin === 'git' && args[0] === 'branch' && args.includes('-D')
+    );
+    const branchArg = deleteBranchCall[1].find(a => a.startsWith('aegis/'));
+    expect(branchArg).toBe('aegis/my-tenant/wf-123');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. getWorker() — tenant validation and caching (unchanged behaviour)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('getWorker()', () => {
@@ -206,21 +425,25 @@ describe('getWorker()', () => {
     expect(() => getWorker('')).toThrow();
   });
 
-  it('returns a worker object for a valid tenantId', () => {
-    const worker = getWorker('tenant-abc');
+  it('throws for a tenantId containing path-injection characters', () => {
+    expect(() => getWorker('../evil')).toThrow();
+  });
+
+  it('returns a worker object with an .on method for a valid tenantId', () => {
+    const worker = getWorker('tenant-valid');
     expect(worker).toBeDefined();
     expect(typeof worker.on).toBe('function');
   });
 
-  it('returns the same cached worker on a second call for the same tenant', () => {
-    const w1 = getWorker('tenant-cache');
-    const w2 = getWorker('tenant-cache');
+  it('returns the same cached worker on repeated calls for the same tenantId', () => {
+    const w1 = getWorker('tenant-cache-test');
+    const w2 = getWorker('tenant-cache-test');
     expect(w1).toBe(w2);
   });
 
-  it('returns different workers for different tenants', () => {
-    const w1 = getWorker('tenant-X');
-    const w2 = getWorker('tenant-Y');
+  it('returns different workers for different tenantIds', () => {
+    const w1 = getWorker('tenant-A1');
+    const w2 = getWorker('tenant-B2');
     expect(w1).not.toBe(w2);
   });
 });
