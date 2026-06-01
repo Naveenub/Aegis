@@ -777,7 +777,7 @@ the return in an optional-chain so a missing job returns undefined gracefully.
 PATCH:
 {
   "file": "engine/job-store.js",
-  "content": "export function getJob(id) {\n  const jobs = loadJobs();\n  return jobs.find(j => j.id === id)?.id ?? null;\n}"
+  "content": "export function getJob(id) {\\n  const jobs = loadJobs();\\n  return jobs.find(j => j.id === id)?.id ?? null;\\n}"
 }`,
 
   'feature-builder': `Design: The /health endpoint is a lightweight liveness probe that returns the
@@ -790,7 +790,7 @@ existing JSON conventions in server.js.
 PATCH:
 {
   "file": "server.js",
-  "content": "app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: process.uptime() }));\n"
+  "content": "app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: process.uptime() }));\\n"
 }`,
 
   refactorer: `Changes:
@@ -801,7 +801,7 @@ PATCH:
 PATCH:
 {
   "file": "engine/processor.js",
-  "content": "async function markJob(job, status) { job.status = status; await saveJob(job); }\nexport async function processJob(job) {\n  if (!job || job.status !== 'pending') return;\n  try {\n    const result = await runStep(job.step);\n    if (!result) return;\n    await markJob(job, result.ok ? 'done' : 'failed');\n    return { success: result.ok, reason: result.error };\n  } catch (e) {\n    await markJob(job, 'error');\n    throw e;\n  }\n}"
+  "content": "async function markJob(job, status) { job.status = status; await saveJob(job); }\\nexport async function processJob(job) {\\n  if (!job || job.status !== 'pending') return;\\n  try {\\n    const result = await runStep(job.step);\\n    if (!result) return;\\n    await markJob(job, result.ok ? 'done' : 'failed');\\n    return { success: result.ok, reason: result.error };\\n  } catch (e) {\\n    await markJob(job, 'error');\\n    throw e;\\n  }\\n}"
 }`,
 
   'test-writer': `import { describe, it, expect, vi } from 'vitest';
@@ -839,7 +839,7 @@ files on the server (e.g. /etc/passwd, .env, private keys).
 PATCH:
 {
   "file": "server.js",
-  "content": "import path from 'path';\nconst SAFE_ROOT = path.resolve('./public');\napp.get('/file', (req, res) => {\n  const requested = path.resolve(SAFE_ROOT, req.query.path ?? '');\n  if (!requested.startsWith(SAFE_ROOT + path.sep)) return res.status(403).json({ error: 'Forbidden' });\n  try { res.send(fs.readFileSync(requested, 'utf-8')); } catch { res.status(404).json({ error: 'Not found' }); }\n});"
+  "content": "import path from 'path';\\nconst SAFE_ROOT = path.resolve('./public');\\napp.get('/file', (req, res) => {\\n  const requested = path.resolve(SAFE_ROOT, req.query.path ?? '');\\n  if (!requested.startsWith(SAFE_ROOT + path.sep)) return res.status(403).json({ error: 'Forbidden' });\\n  try { res.send(fs.readFileSync(requested, 'utf-8')); } catch { res.status(404).json({ error: 'Not found' }); }\\n});"
 }`,
 
   'review-guard': `APPROVED`,
