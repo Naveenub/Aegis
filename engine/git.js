@@ -12,7 +12,6 @@
  *   ensureWorkflowBranch(workflowId, tenantId)    → { cwd, lock }
  *   commitChanges(message, cwd)                   → void
  *   rollbackLastCommit(cwd)                       → void
- *   revertStepCommit(workflowId, stepId, cwd)     → { reverted, commitHash }
  *   finaliseWorkflow(workflowId, tenantId)        → { merged, conflicts }
  *   removeWorkflowWorktree(workflowId, tenantId)  → Promise<void>
  *   getWorker(tenantId)                           → Worker  (BullMQ worker factory)
@@ -118,8 +117,7 @@ export async function ensureWorkflowBranch(workflowId, tenantId) {
 
 /**
  * Stage all changes in `cwd` and create a commit with the given message.
- * The message is also used by revertStepCommit() to identify the right commit,
- * so always use the canonical format "Aegis: <stepId>".
+ * Always use the canonical format "Aegis: <stepId>".
  */
 export function commitChanges(message, cwd) {
   git(['add', '-A'], cwd);
@@ -132,61 +130,6 @@ export function commitChanges(message, cwd) {
  */
 export function rollbackLastCommit(cwd) {
   git(['reset', '--hard', 'HEAD~1'], cwd);
-}
-
-// ─── Step-level rewind ────────────────────────────────────────────────────────
-
-/**
- * Revert the commit that was created for a specific step, without rewinding
- * any commits that came after it (i.e. a proper `git revert`, not a reset).
- *
- * Strategy
- * ────────
- * 1. Walk the log of the workflow branch looking for the commit whose message
- *    matches "Aegis: <stepId>".
- * 2. Run `git revert --no-edit <hash>` to create a new "undo" commit while
- *    preserving later history.
- * 3. Return the original commit hash so the caller can store it in the step
- *    record for audit / re-apply purposes.
- *
- * If the commit is not found (step never committed, or already reverted) the
- * function returns { reverted: false, commitHash: null }.
- *
- * @param {string} workflowId
- * @param {string} stepId
- * @param {string} cwd   - absolute path to the workflow worktree
- * @returns {{ reverted: boolean, commitHash: string|null }}
- */
-export function revertStepCommit(workflowId, stepId, cwd) {
-  const expectedMsg = `Aegis: ${stepId}`;
-
-  // git log --format="%H %s" lists "<hash> <subject>" one per line
-  let log;
-  try {
-    log = git(['log', '--format=%H %s', '--ancestry-path'], cwd);
-  } catch {
-    return { reverted: false, commitHash: null };
-  }
-
-  const commitHash = log
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .find(line => line.slice(41) === expectedMsg)   // 40-char hash + space
-    ?.slice(0, 40) ?? null;
-
-  if (!commitHash) {
-    return { reverted: false, commitHash: null };
-  }
-
-  try {
-    git(['revert', '--no-edit', commitHash], cwd);
-  } catch (err) {
-    // Revert may fail if there are merge conflicts — surface the error
-    throw new Error(`git revert failed for step "${stepId}" (commit ${commitHash}): ${err.message}`);
-  }
-
-  return { reverted: true, commitHash };
 }
 
 // ─── Finalise / cleanup ───────────────────────────────────────────────────────
