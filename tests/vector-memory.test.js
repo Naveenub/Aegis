@@ -14,7 +14,7 @@
  * score filtering) is exercised through a controlled FT.SEARCH mock response.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Redis mock ────────────────────────────────────────────────────────────────
 
@@ -38,7 +38,6 @@ const redisMock = {
 
 // pipeline returns a mini-pipeline that collects calls
 function makePipeline() {
-  const ops = [];
   const p = {
     hset:     vi.fn(() => p),
     expire:   vi.fn(() => p),
@@ -76,7 +75,6 @@ import {
   storeMemory,
   searchMemory,
   evictExpiredMemory,
-  getVectorCapabilities,
 } from '../engine/vector-memory.js';
 
 // ─── Reset between tests ──────────────────────────────────────────────────────
@@ -153,7 +151,6 @@ describe('evictExpiredMemory()', () => {
     redisMock.zrangebyscore = vi.fn(async () => []);
     const before = Date.now();
     await evictExpiredMemory('default');
-    const after = Date.now();
 
     const [, min, max] = redisMock.zrangebyscore.mock.calls[0];
     expect(min).toBe('-inf');
