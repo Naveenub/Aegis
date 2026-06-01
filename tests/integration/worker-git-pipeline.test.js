@@ -90,7 +90,7 @@ const mockLock        = { release: vi.fn(async () => {}) };
 const acquireLockMock = vi.fn(async () => mockLock);
 const releaseLockMock = vi.fn(async () => {});
 
-vi.mock('../engine/lock.js', () => ({
+vi.mock('../../engine/lock.js', () => ({
   acquireLock: (...a) => acquireLockMock(...a),
   releaseLock: (...a) => releaseLockMock(...a),
 }));
@@ -110,27 +110,27 @@ const acquireSlotMock       = vi.fn(async () => ({ release: vi.fn() }));
 const isAppliedMock         = vi.fn(async () => false);
 const markAppliedMock       = vi.fn();
 
-vi.mock('../engine/agent-runner.js',  () => ({ runAgent: (...a) => runAgentMock(...a) }));
-vi.mock('../engine/review-system.js', () => ({ runReviewPipeline: (...a) => runReviewPipelineMock(...a) }));
-vi.mock('../engine/test-runner.js',   () => ({ runTests: (...a) => runTestsMock(...a) }));
-vi.mock('../engine/vector-memory.js', () => ({ storeMemory: (...a) => storeMemoryMock(...a), searchMemory: vi.fn(async () => []) }));
-vi.mock('../engine/job-store.js',     () => ({ createJob: vi.fn(), updateJob: vi.fn(), incrementRetries: vi.fn() }));
-vi.mock('../engine/metrics.js',       () => ({ recordStart: vi.fn(), recordRetry: vi.fn(), recordSuccess: vi.fn(), recordFailure: vi.fn(), recordStepStart: vi.fn(), recordStepEnd: vi.fn() }));
-vi.mock('../engine/tracer.js',        () => ({ startSpan: vi.fn(), attachPatch: vi.fn(), attachTestResult: vi.fn(), endSpan: vi.fn() }));
-vi.mock('../engine/concurrency.js',   () => ({ acquireSlot: (...a) => acquireSlotMock(...a), clearSlots: vi.fn() }));
-vi.mock('../engine/approval-gate.js', () => ({ needsApproval: vi.fn(() => null), approvalModeActive: false }));
-vi.mock('../engine/idempotency.js',   () => ({
+vi.mock('../../engine/agent-runner.js',  () => ({ runAgent: (...a) => runAgentMock(...a) }));
+vi.mock('../../engine/review-system.js', () => ({ runReviewPipeline: (...a) => runReviewPipelineMock(...a) }));
+vi.mock('../../engine/test-runner.js',   () => ({ runTests: (...a) => runTestsMock(...a) }));
+vi.mock('../../engine/vector-memory.js', () => ({ storeMemory: (...a) => storeMemoryMock(...a), searchMemory: vi.fn(async () => []) }));
+vi.mock('../../engine/job-store.js',     () => ({ createJob: vi.fn(), updateJob: vi.fn(), incrementRetries: vi.fn() }));
+vi.mock('../../engine/metrics.js',       () => ({ recordStart: vi.fn(), recordRetry: vi.fn(), recordSuccess: vi.fn(), recordFailure: vi.fn(), recordStepStart: vi.fn(), recordStepEnd: vi.fn() }));
+vi.mock('../../engine/tracer.js',        () => ({ startSpan: vi.fn(), attachPatch: vi.fn(), attachTestResult: vi.fn(), endSpan: vi.fn() }));
+vi.mock('../../engine/concurrency.js',   () => ({ acquireSlot: (...a) => acquireSlotMock(...a), clearSlots: vi.fn() }));
+vi.mock('../../engine/approval-gate.js', () => ({ needsApproval: vi.fn(() => null), approvalModeActive: false }));
+vi.mock('../../engine/idempotency.js',   () => ({
   getOperationId: vi.fn(() => 'op-id'),
   isApplied:      (...a) => isAppliedMock(...a),
   markApplied:    (...a) => markAppliedMock(...a),
 }));
-vi.mock('../engine/retry-policy.js',  () => ({
+vi.mock('../../engine/retry-policy.js',  () => ({
   resolvePolicy:   vi.fn(() => ({ maxAttempts: 3, backoff: 'fixed', delay: 0 })),
   calcDelay:       vi.fn(() => 0),
   agentForAttempt: vi.fn(() => 'feature-builder'),
 }));
 
-vi.mock('../engine/workflow-store.js', () => ({
+vi.mock('../../engine/workflow-store.js', () => ({
   updateStep:          (...a) => updateStepMock(...a),
   getRunnableSteps:    (...a) => getRunnableStepsMock(...a),
   getWorkflowStatus:   (...a) => getWorkflowStatusMock(...a),
@@ -139,7 +139,7 @@ vi.mock('../engine/workflow-store.js', () => ({
   flagForReview:       (...a) => flagForReviewMock(...a),
 }));
 
-vi.mock('../engine/queue.js', () => ({
+vi.mock('../../engine/queue.js', () => ({
   getTaskQueue:       vi.fn(() => ({ add: vi.fn() })),
   getDeadLetterQueue: vi.fn(() => ({ add: vi.fn() })),
   addStep:            (...a) => addStepMock(...a),
@@ -153,12 +153,12 @@ import {
   rollbackLastCommit,
   finaliseWorkflow,
   removeWorkflowWorktree,
-} from '../engine/git.js';
+} from '../../engine/git.js';
 
-import { applyPatch, parsePatch } from '../engine/code-writer.js';
-import { runAgent }               from '../engine/agent-runner.js';
-import { runReviewPipeline }      from '../engine/review-system.js';
-import { runTests }               from '../engine/test-runner.js';
+import { applyPatch, parsePatch } from '../../engine/code-writer.js';
+import { runAgent }               from '../../engine/agent-runner.js';
+import { runReviewPipeline }      from '../../engine/review-system.js';
+import { runTests }               from '../../engine/test-runner.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
