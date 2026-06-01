@@ -53,31 +53,47 @@ const WEIGHTS = {
 };
 
 // ─── BM25 parameters ──────────────────────────────────────────────────────────
-// k1 controls term-frequency saturation; b controls document-length normalisation.
-// Okapi BM25 paper defaults (k1=1.5, b=0.75) work well for short code/text blobs.
-// Override via env:
-//   AEGIS_BM25_K1  (default: 1.5)
-//   AEGIS_BM25_B   (default: 0.75)
 const BM25_K1 = parseFloat(process.env.AEGIS_BM25_K1 ?? '1.5');
 const BM25_B  = parseFloat(process.env.AEGIS_BM25_B  ?? '0.75');
 
-// Redis key that stores the per-tenant BM25 corpus stats (IDF, avgdl).
-// Format: HASH with fields  avgdl, docCount, idf:<term>
 function bm25StatsKey(tenantId) {
   return `aegis:memory:bm25stats:${tenantId}`;
 }
 
+// ─── Redis Stack capability cache ─────────────────────────────────────────────
+// Probed lazily on first use via _probeRedisSearch().  Once set, the value is
+// never reset during the process lifetime — Redis Stack availability does not
+// change at runtime.
+//
+// null  = not yet probed
+// true  = FT.* commands are available
+// false = plain Redis — HSCAN fallback path is used instead
+let _redisSearchAvailable = null;
+
+async function _probeRedisSearch() {
+  if (_redisSearchAvailable !== null) return _redisSearchAvailable;
+  try {
+    await redis.call('FT._LIST');
+    _redisSearchAvailable = true;
+  } catch (err) {
+    const isUnknown =
+      err.message?.includes('ERR unknown command') ||
+      err.message?.includes('unknown command');
+    _redisSearchAvailable = !isUnknown;
+    if (!_redisSearchAvailable) {
+      console.warn(
+        '[vector-memory] ⚠️  Redis Stack (RediSearch) is not available — ' +
+        'falling back to HSCAN-based brute-force cosine search.\n' +
+        '  Semantic search will work but is O(n) and does not scale beyond ~10 k entries.\n' +
+        '  Upgrade to Redis Stack for production:\n' +
+        '    docker run -p 6379:6379 redis/redis-stack-server:latest'
+      );
+    }
+  }
+  return _redisSearchAvailable;
+}
+
 // ─── Adaptive weight feedback ─────────────────────────────────────────────────
-// When a caller marks a retrieved memory as helpful or unhelpful via
-// recordMemoryFeedback(), the per-tenant weights in Redis are nudged in the
-// direction that produced the result.  This gives a lightweight feedback loop
-// without a full offline training pipeline.
-//
-// Weight deltas are small (FEEDBACK_STEP) and clamped to [0.05, 0.90] so no
-// single component can dominate.  The raw counts are stored separately so the
-// adjustment is always proportional and can be inspected / reset.
-//
-// Redis key: aegis:memory:weights:{tenantId}  HASH  cosine, bm25, recency
 const FEEDBACK_STEP = parseFloat(process.env.AEGIS_MEMORY_FEEDBACK_STEP ?? '0.02');
 const WEIGHT_MIN    = 0.05;
 const WEIGHT_MAX    = 0.90;
@@ -86,10 +102,6 @@ function weightKey(tenantId) {
   return `aegis:memory:weights:${tenantId}`;
 }
 
-/**
- * Load per-tenant learned weights from Redis, falling back to the normalised
- * env-var defaults when no feedback has been recorded yet.
- */
 async function loadWeights(tenantId) {
   try {
     const stored = await redis.hgetall(weightKey(tenantId));
@@ -106,25 +118,15 @@ async function loadWeights(tenantId) {
   return { ...WEIGHTS };
 }
 
-/**
- * Record whether the top-ranked memory retrieved with a given component mix
- * was helpful.  Nudges that component's weight up or down by FEEDBACK_STEP
- * and persists the new weights for this tenant.
- *
- * @param {string} tenantId
- * @param {'cosine'|'bm25'|'recency'} leadingComponent  - which signal ranked this result first
- * @param {boolean} helpful                              - true = reinforce, false = penalise
- */
 export async function recordMemoryFeedback(tenantId, leadingComponent, helpful) {
   assertTenantId(tenantId);
   const w = await loadWeights(tenantId);
 
-  if (!(leadingComponent in w)) return; // guard against bad caller input
+  if (!(leadingComponent in w)) return;
 
   const delta = helpful ? +FEEDBACK_STEP : -FEEDBACK_STEP;
   w[leadingComponent] = Math.min(WEIGHT_MAX, Math.max(WEIGHT_MIN, w[leadingComponent] + delta));
 
-  // Renormalise so the three weights always sum to 1.0
   const sum = w.cosine + w.bm25 + w.recency;
   w.cosine  = w.cosine  / sum;
   w.bm25    = w.bm25    / sum;
@@ -148,28 +150,43 @@ function memoryPrefix(tenantId) { return `memory:${tenantId}:`; }
 
 export async function initVectorIndex(tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
-  const idx    = indexName(tenantId);
-  const prefix = memoryPrefix(tenantId);
 
-  try {
-    await redis.call(
-      'FT.CREATE', idx,
-      'ON', 'HASH',
-      'PREFIX', '1', prefix,
-      'SCHEMA',
-        'text',     'TEXT',
-        'patch',    'TEXT',
-        'storedAt', 'NUMERIC', 'SORTABLE',
-        'termFreq', 'TEXT',           // space-separated "term:count" pairs for BM25
-        'docLen',   'NUMERIC',        // token count for BM25 length normalisation
-        'vector',   'VECTOR', 'HNSW', '6',
-          'TYPE', 'FLOAT32',
-          'DIM',  VECTOR_DIM,
-          'DISTANCE_METRIC', 'COSINE'
-    );
-  } catch {
-    // index already exists — fine
+  // Probe first so we know what Redis supports before trying FT.CREATE.
+  const hasSearch = await _probeRedisSearch();
+
+  if (hasSearch) {
+    const idx    = indexName(tenantId);
+    const prefix = memoryPrefix(tenantId);
+
+    try {
+      await redis.call(
+        'FT.CREATE', idx,
+        'ON', 'HASH',
+        'PREFIX', '1', prefix,
+        'SCHEMA',
+          'text',     'TEXT',
+          'patch',    'TEXT',
+          'storedAt', 'NUMERIC', 'SORTABLE',
+          'termFreq', 'TEXT',
+          'docLen',   'NUMERIC',
+          'vector',   'VECTOR', 'HNSW', '6',
+            'TYPE', 'FLOAT32',
+            'DIM',  VECTOR_DIM,
+            'DISTANCE_METRIC', 'COSINE'
+      );
+    } catch (err) {
+      // "Index already exists" is normal on restart — silently continue.
+      // Any other error (permissions, OOM, schema change) is worth surfacing.
+      const alreadyExists =
+        err.message?.includes('Index already exists') ||
+        err.message?.includes('already exists');
+      if (!alreadyExists) {
+        console.warn(`[vector-memory] FT.CREATE warning for tenant "${tenantId}":`, err.message);
+      }
+    }
   }
+  // When Redis Stack is absent we still register the tenant and run eviction —
+  // hashes are stored on plain Redis and the HSCAN fallback handles search.
 
   _activeTenants.add(tenantId);
   await evictExpiredMemory(tenantId);
@@ -219,10 +236,6 @@ async function embed(text) {
 
 // ─── BM25 helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Tokenise text into lowercase alphanumeric terms, filtering stop-words.
- * This mirrors what is stored at index time so IDF counts are consistent.
- */
 const STOP_WORDS = new Set([
   'the','a','an','and','or','but','in','on','at','to','for','of','with',
   'is','are','was','were','be','been','being','have','has','had','do','does',
@@ -238,27 +251,16 @@ function tokenise(text) {
     .filter(t => t.length > 1 && !STOP_WORDS.has(t));
 }
 
-/**
- * Build a term-frequency map from an array of tokens.
- * @returns {Map<string, number>}
- */
 function buildTF(tokens) {
   const tf = new Map();
   for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
   return tf;
 }
 
-/**
- * Serialise a TF map to a space-separated "term:count" string for Redis storage.
- * Example: "fix:3 null:2 pointer:1"
- */
 function serialiseTF(tf) {
   return [...tf.entries()].map(([t, c]) => `${t}:${c}`).join(' ');
 }
 
-/**
- * Deserialise the stored "term:count" string back to a Map.
- */
 function deserialiseTF(str) {
   const tf = new Map();
   for (const pair of (str ?? '').split(' ')) {
@@ -271,26 +273,13 @@ function deserialiseTF(str) {
   return tf;
 }
 
-/**
- * Update per-tenant BM25 corpus statistics (IDF numerators and avgdl).
- *
- * Called inside storeMemory() after writing the document hash.  Uses Redis
- * HINCRBY so concurrent writes are safe without any additional locking.
- *
- * Stats stored:
- *   docCount          — total documents in the corpus
- *   avgdl             — running average document length (approximated)
- *   idf:<term>        — number of documents containing this term (df)
- */
 async function updateBM25Stats(tenantId, tf, docLen) {
   const statsKey  = bm25StatsKey(tenantId);
   const pipeline  = redis.pipeline();
 
   pipeline.hincrbyfloat(statsKey, 'docCount', 1);
-  // Running avgdl approximation: store cumulative length, divide on read.
   pipeline.hincrbyfloat(statsKey, 'totalLen', docLen);
 
-  // Increment df (document frequency) for each unique term in this document
   for (const term of tf.keys()) {
     pipeline.hincrbyfloat(statsKey, `idf:${term}`, 1);
   }
@@ -298,16 +287,6 @@ async function updateBM25Stats(tenantId, tf, docLen) {
   await pipeline.exec();
 }
 
-/**
- * Compute IDF (inverse document frequency) scores for a set of query terms
- * using the stored corpus statistics.
- *
- * IDF(t) = log((N - df(t) + 0.5) / (df(t) + 0.5) + 1)   [Robertson IDF]
- *
- * @param {string}   tenantId
- * @param {string[]} queryTerms
- * @returns {Promise<Map<string, number>>}  term → IDF score
- */
 async function computeIDF(tenantId, queryTerms) {
   if (!queryTerms.length) return new Map();
 
@@ -333,17 +312,6 @@ async function computeIDF(tenantId, queryTerms) {
   return idfMap;
 }
 
-/**
- * Compute the BM25 score for a single document against query terms.
- *
- * BM25(d,q) = Σ IDF(t) * (tf(t,d) * (k1+1)) / (tf(t,d) + k1*(1 - b + b*|d|/avgdl))
- *
- * @param {Map<string, number>} docTF   - term frequencies in the document
- * @param {number}              docLen  - document length in tokens
- * @param {number}              avgdl   - corpus average document length
- * @param {Map<string, number>} idfMap  - pre-computed IDF scores
- * @returns {number}  raw BM25 score (not normalised)
- */
 function bm25Score(docTF, docLen, avgdl, idfMap) {
   let score = 0;
   for (const [term, idf] of idfMap) {
@@ -356,7 +324,79 @@ function bm25Score(docTF, docLen, avgdl, idfMap) {
   return score;
 }
 
-// ─── Capability probe ─────────────────────────────────────────────────────────
+// ─── In-process cosine similarity ─────────────────────────────────────────────
+// Used by the HSCAN fallback path when Redis Stack is not available.
+
+function cosineSimilarity(a, b) {
+  let dot = 0, magA = 0, magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot  += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+// ─── HSCAN fallback search ────────────────────────────────────────────────────
+// When Redis Stack is absent, scan all hash keys for this tenant and rank them
+// in-process using cosine similarity + BM25 + recency.  This is O(n) and not
+// suitable for large corpora, but it keeps the system functional with plain Redis.
+
+async function _hscanSearch(tenantId, queryVec, topK) {
+  const prefix = memoryPrefix(tenantId);
+  const candidates = [];
+
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 100);
+    cursor = nextCursor;
+
+    if (!keys.length) continue;
+
+    // Fetch all fields for each matching key in parallel
+    const fetched = await Promise.all(
+      keys.map(async (key) => {
+        try {
+          return { key, fields: await redis.hgetall(key) };
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    for (const hit of fetched) {
+      if (!hit?.fields?.vector || !hit.fields.storedAt) continue;
+
+      // Deserialise the stored Float32 vector buffer back to a number array
+      let storedVec;
+      try {
+        const buf = Buffer.isBuffer(hit.fields.vector)
+          ? hit.fields.vector
+          : Buffer.from(hit.fields.vector, 'binary');
+        const fa = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+        storedVec = Array.from(fa);
+      } catch {
+        continue; // corrupt entry — skip
+      }
+
+      if (storedVec.length !== VECTOR_DIM) continue;
+
+      candidates.push({
+        text:     hit.fields.text     ?? '',
+        patch:    hit.fields.patch    ?? '',
+        storedAt: hit.fields.storedAt ?? '0',
+        termFreq: hit.fields.termFreq ?? '',
+        docLen:   hit.fields.docLen   ?? '0',
+        cosine:   cosineSimilarity(queryVec, storedVec),
+      });
+    }
+  } while (cursor !== '0');
+
+  return candidates;
+}
+
+// ─── Capability probe (public) ────────────────────────────────────────────────
 
 export async function getVectorCapabilities() {
   const warnings = [];
@@ -378,32 +418,17 @@ export async function getVectorCapabilities() {
     }
   }
 
-  let redisSearch = false;
-  try {
-    await redis.call('FT._LIST');
-    redisSearch = true;
-  } catch (err) {
-    const isUnknownCommand =
-      err.message?.includes('ERR unknown command') ||
-      err.message?.includes('unknown command') ||
-      err.message?.includes('NOSCRIPT');
-
-    if (isUnknownCommand) {
-      warnings.push(
-        'Redis Stack (RediSearch module) is not available — vector memory search is disabled. ' +
-        'Upgrade to Redis Stack to enable semantic memory:\n' +
-        '  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
-        'Without Redis Stack, past-fix context will never be surfaced to agents.'
-      );
-    } else {
-      warnings.push(
-        `Redis Stack probe returned an unexpected error (may be transient): ${err.message}`
-      );
-      redisSearch = true;
-    }
+  const redisSearch = await _probeRedisSearch();
+  if (!redisSearch) {
+    warnings.push(
+      'Redis Stack (RediSearch module) is not available — using HSCAN brute-force fallback. ' +
+      'Search is functional but O(n); upgrade to Redis Stack for production:\n' +
+      '  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
+      'Without Redis Stack, past-fix context is surfaced via full-scan cosine search.'
+    );
   }
 
-  const embeddings = openai && redisSearch;
+  const embeddings = openai; // embeddings work independently of Redis Stack
   return { openai, redisSearch, embeddings, warnings };
 }
 
@@ -414,9 +439,14 @@ export async function logVectorCapabilityWarnings() {
   }
   if (!caps.embeddings) {
     console.warn(
-      '[vector-memory] ℹ️  Vector memory is DEGRADED. ' +
+      '[vector-memory] ℹ️  Vector memory is DEGRADED (no embeddings). ' +
       'Workflows will still run — agents simply receive no past-fix context. ' +
       'See README § "Vector Memory (Redis Stack + OpenAI)" for setup instructions.'
+    );
+  } else if (!caps.redisSearch) {
+    console.warn(
+      '[vector-memory] ℹ️  Vector memory is running in FALLBACK mode (HSCAN). ' +
+      'Semantic search is active but O(n). Upgrade to Redis Stack for production use.'
     );
   }
   return caps;
@@ -424,12 +454,6 @@ export async function logVectorCapabilityWarnings() {
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
-/**
- * Store a memory entry with a TTL.
- *
- * In addition to the cosine vector, we now store BM25 term-frequency data so
- * keyword signals are available at search time without a second embedding call.
- */
 export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
@@ -439,7 +463,6 @@ export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
   const storedAt = Date.now();
   const id       = `${memoryPrefix(tenantId)}${storedAt}_${Math.random().toString(36).slice(2, 7)}`;
 
-  // BM25 prep
   const tokens  = tokenise(text + ' ' + patch);
   const tf      = buildTF(tokens);
   const docLen  = tokens.length;
@@ -495,109 +518,39 @@ function recencyScore(storedAtMs) {
   return Math.pow(2, -ageMs / RECENCY_HALFLIFE_MS);
 }
 
-// ─── Search ───────────────────────────────────────────────────────────────────
+// ─── Shared reranking logic ───────────────────────────────────────────────────
+// Used by both the FT.SEARCH path and the HSCAN fallback so BM25 + recency +
+// adaptive-weight scoring is always applied regardless of Redis flavour.
 
-/**
- * Search memory and return the top-K results ranked by a three-way hybrid score.
- *
- * Scoring pipeline
- * ────────────────
- * 1. Over-fetch  — KNN retrieves topK × OVERFETCH_FACTOR raw candidates via
- *    approximate nearest-neighbour search on the vector index.
- *
- * 2. BM25        — For each candidate, compute a BM25 score against query terms
- *    using stored term-frequency data and per-tenant IDF statistics.
- *    BM25 raw scores are normalised to [0, 1] within the candidate set so they
- *    are on the same scale as cosine similarity and recency.
- *
- * 3. Hybrid score — Weighted blend of three signals:
- *      qualityScore = W_cosine  * cosineSimilarity
- *                   + W_bm25    * bm25Normalised
- *                   + W_recency * recencyScore
- *    Weights default to 0.50 / 0.30 / 0.20 and can be overridden via env vars.
- *    Per-tenant learned weights (from recordMemoryFeedback()) take precedence
- *    over the env-var defaults once any feedback has been recorded.
- *
- * 4. Filter & sort — Drop candidates below MIN_QUALITY_SCORE, sort descending,
- *    return the top topK entries.
- *
- * Each result includes cosine, bm25Normalised, recency, and qualityScore so
- * callers can inspect which signal drove the ranking and feed back via
- * recordMemoryFeedback().
- *
- * @param {string} query
- * @param {number} topK
- * @param {string} tenantId
- * @returns {object[]}
- */
-export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
-  assertTenantId(tenantId);
-
-  const queryVec = await embed(query);
-  if (!queryVec) return [];
-
-  const idx        = indexName(tenantId);
-  const fetchCount = topK * OVERFETCH_FACTOR;
-
-  // ── 1. Vector KNN over-fetch ──────────────────────────────────────────────
-  const res = await redis.call(
-    'FT.SEARCH', idx,
-    `*=>[KNN ${fetchCount} @vector $vec AS __dist]`,
-    'PARAMS', '2', 'vec',
-    Buffer.from(new Float32Array(queryVec).buffer),
-    'SORTBY', '__dist',
-    'RETURN', '7', 'text', 'patch', 'storedAt', '__dist', 'termFreq', 'docLen', 'score',
-    'DIALECT', '2'
-  );
-
-  // Parse the flat FT.SEARCH response
-  const candidates = [];
-  for (let i = 1; i < res.length; i += 2) {
-    const fields = res[i + 1];
-    const item   = {};
-    for (let j = 0; j < fields.length; j += 2) item[fields[j]] = fields[j + 1];
-    candidates.push(item);
-  }
-
+async function _rerank(candidates, queryTerms, tenantId, topK) {
   if (!candidates.length) return [];
 
-  // ── 2. BM25 scoring ───────────────────────────────────────────────────────
-  const queryTerms = tokenise(query);
-  const idfMap     = await computeIDF(tenantId, queryTerms);
-
-  // Fetch corpus avgdl for BM25 normalisation
+  const idfMap    = await computeIDF(tenantId, queryTerms);
   const statsKey  = bm25StatsKey(tenantId);
   const statsRaw  = await redis.hmget(statsKey, 'docCount', 'totalLen');
   const docCount  = parseFloat(statsRaw[0] ?? '1');
   const totalLen  = parseFloat(statsRaw[1] ?? '1');
   const avgdl     = totalLen / Math.max(docCount, 1);
 
-  // Compute raw BM25 scores for all candidates
   const withScores = candidates.map(item => {
-    const docTF    = deserialiseTF(item.termFreq);
-    const docLen   = parseInt(item.docLen ?? '0', 10);
-    const distance = parseFloat(item.__dist ?? '1');
-    const cosine   = Math.max(0, 1 - distance);
-    const recency  = recencyScore(parseInt(item.storedAt ?? '0', 10));
-    const rawBM25  = bm25Score(docTF, docLen, avgdl, idfMap);
+    const docTF   = deserialiseTF(item.termFreq);
+    const docLen  = parseInt(item.docLen ?? '0', 10);
+    const cosine  = item.cosine;                           // pre-computed by caller
+    const recency = recencyScore(parseInt(item.storedAt ?? '0', 10));
+    const rawBM25 = bm25Score(docTF, docLen, avgdl, idfMap);
     return { item, cosine, recency, rawBM25 };
   });
 
-  // ── 3. Normalise BM25 to [0, 1] within the candidate set ─────────────────
   const maxBM25 = Math.max(...withScores.map(s => s.rawBM25), 1e-9);
+  const w       = await loadWeights(tenantId);
 
-  // Load per-tenant learned weights (falls back to env-var defaults)
-  const w = await loadWeights(tenantId);
-
-  // ── 4. Hybrid scoring, filter, sort ──────────────────────────────────────
-  const ranked = withScores
+  return withScores
     .map(({ item, cosine, recency, rawBM25 }) => {
       const bm25Normalised = rawBM25 / maxBM25;
       const qualityScore   = w.cosine  * cosine
                            + w.bm25    * bm25Normalised
                            + w.recency * recency;
 
-      // Identify which signal contributed most (for feedback routing)
       const contributions = [
         { component: 'cosine',  value: w.cosine  * cosine         },
         { component: 'bm25',    value: w.bm25    * bm25Normalised },
@@ -609,17 +562,90 @@ export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
         text:             item.text,
         patch:            item.patch,
         storedAt:         item.storedAt,
-        similarity:       cosine,          // kept for backwards compat
+        similarity:       cosine,
         cosine,
         bm25:             bm25Normalised,
         recency,
         qualityScore,
-        leadingComponent, // callers pass this to recordMemoryFeedback()
+        leadingComponent,
       };
     })
     .filter(item => item.qualityScore >= MIN_QUALITY_SCORE)
     .sort((a, b) => b.qualityScore - a.qualityScore)
     .slice(0, topK);
+}
 
-  return ranked;
+// ─── Search ───────────────────────────────────────────────────────────────────
+//
+// Two code paths, same output contract:
+//
+//   Redis Stack available → FT.SEARCH KNN over-fetch → shared _rerank()
+//   Plain Redis           → HSCAN brute-force cosine → shared _rerank()
+//
+// BM25 + recency + adaptive weights are applied identically on both paths.
+// The only difference is retrieval speed and ANN vs exact cosine.
+
+export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
+  assertTenantId(tenantId);
+
+  const queryVec = await embed(query);
+  if (!queryVec) return [];
+
+  const queryTerms = tokenise(query);
+  const hasSearch  = await _probeRedisSearch();
+
+  if (hasSearch) {
+    // ── Redis Stack path: KNN over-fetch via FT.SEARCH ──────────────────────
+    const idx        = indexName(tenantId);
+    const fetchCount = topK * OVERFETCH_FACTOR;
+
+    let res;
+    try {
+      res = await redis.call(
+        'FT.SEARCH', idx,
+        `*=>[KNN ${fetchCount} @vector $vec AS __dist]`,
+        'PARAMS', '2', 'vec',
+        Buffer.from(new Float32Array(queryVec).buffer),
+        'SORTBY', '__dist',
+        'RETURN', '7', 'text', 'patch', 'storedAt', '__dist', 'termFreq', 'docLen', 'score',
+        'DIALECT', '2'
+      );
+    } catch (err) {
+      // FT.SEARCH failed at runtime (e.g. index not yet created for this tenant,
+      // or Redis Stack was removed from the server).  Flip the cached flag and
+      // fall through to the HSCAN path so the call still returns useful results.
+      const isUnknown =
+        err.message?.includes('ERR unknown command') ||
+        err.message?.includes('unknown command');
+      if (isUnknown) {
+        _redisSearchAvailable = false;
+        console.warn('[vector-memory] FT.SEARCH failed — switching to HSCAN fallback:', err.message);
+      } else {
+        // Non-capability error (e.g. index missing, malformed query) — surface it.
+        console.warn('[vector-memory] FT.SEARCH error:', err.message);
+        return [];
+      }
+
+      // Fall through to HSCAN below
+      const fallbackCandidates = await _hscanSearch(tenantId, queryVec, topK);
+      return _rerank(fallbackCandidates, queryTerms, tenantId, topK);
+    }
+
+    // Parse the flat FT.SEARCH response: [count, key1, [field, val, ...], key2, ...]
+    const candidates = [];
+    for (let i = 1; i < res.length; i += 2) {
+      const fields = res[i + 1];
+      const item   = {};
+      for (let j = 0; j < fields.length; j += 2) item[fields[j]] = fields[j + 1];
+      const distance = parseFloat(item.__dist ?? '1');
+      item.cosine    = Math.max(0, 1 - distance); // convert L2 distance to cosine similarity
+      candidates.push(item);
+    }
+
+    return _rerank(candidates, queryTerms, tenantId, topK);
+  }
+
+  // ── HSCAN fallback path: brute-force cosine on plain Redis ─────────────────
+  const candidates = await _hscanSearch(tenantId, queryVec, topK * OVERFETCH_FACTOR);
+  return _rerank(candidates, queryTerms, tenantId, topK);
 }
