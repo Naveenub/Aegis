@@ -43,7 +43,7 @@ import {
   flagForReview,
 } from './workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
-import { needsApproval, approvalModeActive } from './approval-gate.js';
+import { needsApproval, approvalModeActive, notifyApprovalRequired } from './approval-gate.js';
 import { acquireSlot, clearSlots } from './concurrency.js';
 import { DEFAULT_TENANT, assertTenantId } from './tenant.js';
 
@@ -440,6 +440,11 @@ export function getWorker(tenantId) {
               });
               await updateStep(workflowId, step.id, 'needs-review');
               await updateJob(job.id, { status: 'needs-review', result: gate.reason }, tenant);
+              // Push outbound notification so humans are alerted without polling.
+              await notifyApprovalRequired(workflowId, step.id, {
+                ...gate,
+                description: step.description,
+              });
               try { await worktreeLock.release(); } catch { /* best-effort */ }
               worktreeLock = null;
               return { awaitingApproval: true, reason: gate.reason };
