@@ -83,7 +83,7 @@ async function pruneExpiredSlots(workflowId) {
 /**
  * Return the number of currently active (non-expired) slots.
  */
-async function activeSlotCount(workflowId) {
+export async function activeSlotCount(workflowId) {
   await pruneExpiredSlots(workflowId);
   return redis.zcard(semKey(workflowId));
 }
