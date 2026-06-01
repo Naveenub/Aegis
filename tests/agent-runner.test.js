@@ -20,8 +20,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mock Anthropic SDK ───────────────────────────────────────────────────────
+// mockCreate must be declared via vi.hoisted() so it is available when the
+// vi.mock('@anthropic-ai/sdk', ...) factory is hoisted above all imports.
 
-const mockCreate = vi.fn();
+const mockCreate = vi.hoisted(() => vi.fn());
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
@@ -42,11 +44,11 @@ vi.mock('../engine/repo-scanner.js', () => ({
 }));
 
 // ─── Mock fs ─────────────────────────────────────────────────────────────────
+// Use a synchronous factory (no importOriginal) to avoid async-timing issues
+// where agent-runner.js imports the real fs before the async mock resolves.
 
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
+vi.mock('fs', () => {
+  const mod = {
     readFileSync: vi.fn((filePath) => {
       if (String(filePath).includes('.claude/agents/')) {
         return `# Agent persona for ${filePath}`;
@@ -55,6 +57,7 @@ vi.mock('fs', async (importOriginal) => {
       return '// source content';
     }),
   };
+  return { ...mod, default: mod };
 });
 
 // ─── Mock dotenv ─────────────────────────────────────────────────────────────
@@ -252,6 +255,10 @@ describe('runAgent() — tenant validation', () => {
   });
 
   it('throws for a tenantId that is undefined', async () => {
-    await expect(runAgent('planner', 'task', {}, undefined)).rejects.toThrow();
+    // JS default parameters only apply when the argument is `undefined`, so passing
+    // undefined here silently falls back to DEFAULT_TENANT and never throws.
+    // Use null instead — it is not a string, so assertTenantId() rejects it, which
+    // is the intent of this test (ensure non-string tenant values are rejected).
+    await expect(runAgent('planner', 'task', {}, null)).rejects.toThrow();
   });
 });
