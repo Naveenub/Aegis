@@ -28,9 +28,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
-      - run: npm ci
+      - run: npm install
 
       - name: Lint
         run: npm run lint
@@ -61,13 +60,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
-      - run: npm ci
+      - run: npm install
 
       - name: Run agent prompt eval
         run: npm run eval
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Point at the GitHub Actions Redis service
           REDIS_URL: redis://localhost:6379
