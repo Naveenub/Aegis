@@ -262,7 +262,7 @@ describe('scoreResponse — review-guard', () => {
   });
 
   it('fails REJECTED with no reason bullets', () => {
-    const { score, notes } = scoreResponse('review-guard', 'REJECTED\nReason: it is bad');
+    const { notes } = scoreResponse('review-guard', 'REJECTED\nReason: it is bad');
     // No bullet lines → loses 2 points
     expect(notes.some(n => n.includes('no reason bullets'))).toBe(true);
   });
