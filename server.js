@@ -71,6 +71,7 @@ import {
   seedTenantsFromEnv,
 } from './engine/tenant-registry.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
+import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import {
@@ -685,6 +686,10 @@ app.use((err, _req, res, _next) => {
 async function start() {
   // Seed tenants from AEGIS_TENANTS env var before accepting traffic.
   await seedTenantsFromEnv();
+
+  // Probe and log vector memory capability warnings at startup so operators
+  // know immediately if OPENAI_API_KEY or Redis Stack is missing.
+  await logVectorCapabilityWarnings();
 
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);
