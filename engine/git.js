@@ -12,6 +12,7 @@
  *   ensureWorkflowBranch(workflowId, tenantId)    → { cwd, lock }
  *   commitChanges(message, cwd)                   → void
  *   rollbackLastCommit(cwd)                       → void
+ *   revertStepCommit(workflowId, stepId, cwd)     → { commitHash }
  *   finaliseWorkflow(workflowId, tenantId)        → { merged, conflicts }
  *   removeWorkflowWorktree(workflowId, tenantId)  → Promise<void>
  *   getWorker(tenantId)                           → Worker  (BullMQ worker factory)
@@ -130,6 +131,50 @@ export function commitChanges(message, cwd) {
  */
 export function rollbackLastCommit(cwd) {
   git(['reset', '--hard', 'HEAD~1'], cwd);
+}
+
+// ─── Step revert ──────────────────────────────────────────────────────────────
+
+/**
+ * Find the commit created for `stepId` (message "Aegis: <stepId>") and revert
+ * it via `git revert --no-edit`.  The revert itself becomes a new commit whose
+ * hash is returned so the caller can record it.
+ *
+ * Throws when:
+ *   • no commit with the expected message exists in the worktree history
+ *   • `git revert` exits non-zero (e.g. merge conflict)
+ *
+ * @param {string} workflowId  – used only for error messages
+ * @param {string} stepId      – the step whose commit should be reverted
+ * @param {string} cwd         – absolute path of the workflow worktree
+ * @returns {{ commitHash: string }}
+ */
+export function revertStepCommit(workflowId, stepId, cwd) {
+  const expectedMessage = `Aegis: ${stepId}`;
+
+  // Walk the log looking for the commit that carries this step's message.
+  // --fixed-strings avoids regex interpretation of stepId characters.
+  const found = git(
+    ['log', '--fixed-strings', `--grep=${expectedMessage}`, '--format=%H', '-1'],
+    cwd,
+  );
+
+  if (!found) {
+    throw new Error(
+      `No commit found for step "${stepId}" in workflow "${workflowId}". ` +
+      `Expected a commit with message "${expectedMessage}".`,
+    );
+  }
+
+  const targetHash = found.trim();
+
+  // Revert the commit non-interactively; this creates a new "Revert …" commit.
+  git(['revert', '--no-edit', targetHash], cwd);
+
+  // Return the hash of the newly created revert commit (HEAD after the revert).
+  const commitHash = git(['rev-parse', 'HEAD'], cwd);
+
+  return { commitHash };
 }
 
 // ─── Finalise / cleanup ───────────────────────────────────────────────────────
