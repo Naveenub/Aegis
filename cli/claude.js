@@ -48,7 +48,7 @@ function sleep(ms) {
  * @param {string} tenantId
  * @returns {Promise<object|null>}
  */
-async function pollUntilDone(workflowId, tenantId) {
+async function pollUntilDone(workflowId, _tenantId) {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
