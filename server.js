@@ -13,42 +13,46 @@
  *
  * Routes
  * ──────
- *   GET  /health                  Liveness check (no auth)
- *   POST /task                    Submit a new task
- *   POST /resume                  Resume a paused workflow
- *   POST /cancel                  Cancel a running workflow
- *   GET  /jobs                    List jobs (tenant-scoped)
- *   GET  /jobs/:jobId             Get a single job
- *   GET  /traces                  List workflow traces
- *   GET  /traces/:traceId         Get a single trace
- *   GET  /workflows               List workflows (with optional filters)
- *   GET  /workflows/:workflowId   Get workflow status
- *   GET  /review-queue            Pending human-review items
- *   POST /review-queue/resolve    Resolve a review item
- *   GET  /metrics                 Prometheus text export
- *   GET  /metrics/json            OTEL-compatible JSON export
- *   GET  /api/metrics             Structured metrics (dashboard internal)
- *   GET  /dashboard               Observability UI (single-page HTML)
- *   GET  /tenants                 List registered tenants
- *   POST /tenants                 Register a new tenant
- *   GET  /tenants/:id             Get tenant metadata
- *   GET  /tenants/:id/keys        List API keys for a tenant
- *   POST /tenants/:id/keys        Create an API key for a tenant
- *   DELETE /tenants/:id/keys/:kid Revoke an API key
+ *   GET    /health                              Liveness check (no auth)
+ *   POST   /task                               Submit a new task
+ *   POST   /resume                             Resume a paused workflow
+ *   POST   /cancel                             Cancel a running workflow
+ *   GET    /workflows                          List workflows (filterable)
+ *   GET    /workflows/:workflowId              Get workflow status + steps
+ *   POST   /workflows/:workflowId/steps/:stepId/rewind   Step-level undo
+ *   GET    /workflows/:workflowId/rewind-history         Rewind audit trail
+ *   GET    /concurrency/:workflowId            Live concurrency slot status
+ *   GET    /jobs                               List jobs (tenant-scoped)
+ *   GET    /jobs/:jobId                        Get a single job
+ *   GET    /traces                             List workflow traces
+ *   GET    /traces/:traceId                    Get a single trace
+ *   GET    /review-queue                       Pending human-review items
+ *   POST   /review-queue/resolve               Resolve a review item
+ *   GET    /metrics                            Prometheus text export
+ *   GET    /metrics/json                       OTEL-compatible JSON export
+ *   GET    /api/metrics                        Structured metrics (dashboard)
+ *   GET    /dashboard                          Observability UI (HTML)
+ *   GET    /tenants                            List registered tenants
+ *   POST   /tenants                            Register a new tenant
+ *   GET    /tenants/:id                        Get tenant metadata
+ *   GET    /tenants/:id/keys                   List API keys for a tenant
+ *   POST   /tenants/:id/keys                   Create an API key
+ *   DELETE /tenants/:id/keys/:kid              Revoke an API key
  */
 
 import 'dotenv/config';
-import { readFileSync }            from 'fs';
-import { fileURLToPath }           from 'url';
-import { dirname, join }           from 'path';
-import express                     from 'express';
+import { readFileSync }  from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import express           from 'express';
 
 // ─── Engine imports ───────────────────────────────────────────────────────────
-import { runSystem }               from './engine/orchestrator.js';
-import { getJob, listJobs }        from './engine/job-store.js';
-import { getTrace, listTraces }    from './engine/tracer.js';
+import { runSystem }                          from './engine/orchestrator.js';
+import { getJob, listJobs }                  from './engine/job-store.js';
+import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
 import {
+  getWorkflow,
   getWorkflowStatus,
   listWorkflows,
   resumeWorkflow,
@@ -58,19 +62,15 @@ import {
   rewindStep,
   getRewindHistory,
 } from './engine/workflow-store.js';
+import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { acquireLock, releaseLock } from './engine/lock.js';
 import {
   listTenants,
   getTenant,
   registerTenant,
   seedTenantsFromEnv,
 } from './engine/tenant-registry.js';
-import {
-  createKey,
-  revokeKey,
-  listKeys,
-} from './engine/key-store.js';
+import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import {
@@ -78,7 +78,7 @@ import {
   optionalApiKey,
   assertTenantAccess,
 } from './middleware/auth.js';
-import { taskRateLimiter }         from './middleware/rate-limit.js';
+import { taskRateLimiter } from './middleware/rate-limit.js';
 
 // ─── Dashboard HTML (read once at startup) ────────────────────────────────────
 const __filename     = fileURLToPath(import.meta.url);
@@ -119,7 +119,11 @@ app.get('/health', (_req, res) => {
  * POST /task
  * Submit a new task to the multi-agent orchestrator.
  *
- * Body: { task: string, tenantId?: string, priority?: number }
+ * Body:    { task: string, tenantId?: string, priority?: number }
+ * Returns: { workflowId: string, status: 'submitted' }
+ *
+ * The response shape { workflowId, status: 'submitted' } is what
+ * scripts/pipeline.sh checks for — do not change it.
  */
 app.post(
   '/task',
@@ -133,11 +137,11 @@ app.post(
     }
 
     try {
-      const result = await runSystem(task.trim(), {
+      const workflowId = await runSystem(task.trim(), {
         tenantId: tenantId ?? req.resolvedTenantId,
         priority,
       });
-      res.status(202).json(result);
+      res.status(202).json({ workflowId, status: 'submitted' });
     } catch (err) {
       console.error('[POST /task]', err);
       res.status(500).json({ error: err.message });
@@ -184,17 +188,14 @@ app.post(
   '/cancel',
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
   async (req, res) => {
-    const { workflowId, tenantId, reason } = req.body ?? {};
+    const { workflowId, reason } = req.body ?? {};
 
     if (!workflowId) {
       return res.status(400).json({ error: '`workflowId` is required.' });
     }
 
     try {
-      await cancelWorkflow(
-        workflowId,
-        reason ?? 'user request',
-      );
+      await cancelWorkflow(workflowId, reason ?? 'user request');
       res.json({ ok: true, workflowId });
     } catch (err) {
       console.error('[POST /cancel]', err);
@@ -203,17 +204,62 @@ app.post(
   },
 );
 
+// ─── Workflows ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /workflows
+ * List workflows with optional filters.
+ *
+ * Query: ?status=<status>&tenantId=<id>&limit=<n>&cursor=<cursor>
+ */
+app.get(
+  '/workflows',
+  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
+  async (req, res) => {
+    const { status, tenantId, cursor } = req.query;
+    const limit = parseInt(req.query.limit ?? '50', 10);
+
+    try {
+      const result = await listWorkflows({
+        status:   status   ?? null,
+        tenantId: tenantId ?? req.resolvedTenantId ?? null,
+        limit,
+        cursor:   cursor   ?? '0',
+      });
+      res.json(result);
+    } catch (err) {
+      console.error('[GET /workflows]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+/**
+ * GET /workflows/:workflowId
+ * Get the status and step details of a single workflow.
+ */
+app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
+  try {
+    const workflow = await getWorkflowStatus(req.params.workflowId);
+    if (!workflow) {
+      return res.status(404).json({ error: `Workflow ${req.params.workflowId} not found.` });
+    }
+    res.json(workflow);
+  } catch (err) {
+    console.error('[GET /workflows/:workflowId]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Step Rewind ──────────────────────────────────────────────────────────────
 
 /**
  * POST /workflows/:workflowId/steps/:stepId/rewind
- * Revert a completed step's git commit and reset it (plus any downstream
- * completed steps) back to `pending` so they are re-executed on resume.
+ * Revert a completed step's git commit and reset it (plus downstream
+ * completed steps) back to `pending` so they re-execute on next resume.
  *
- * Body: { tenantId?: string, reason?: string }
- *
- * Returns:
- *   { ok: true, workflowId, stepId, resetSteps: string[], commitHash: string|null }
+ * Body:    { tenantId?: string, reason?: string }
+ * Returns: { ok: true, workflowId, stepId, resetSteps: string[], commitHash: string|null }
  *
  * Errors:
  *   400 — step not completed, or workflow not in a rewindable state
@@ -229,14 +275,15 @@ app.post(
     const tenant = tenantId ?? req.resolvedTenantId;
 
     try {
-      // ── Acquire the worktree lock so no concurrent step runs during the revert ─
+      // Acquire worktree lock before reverting so no concurrent step runs
+      // while git revert is in progress.
       let worktreeLock = null;
       let cwd          = null;
 
       try {
         ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
       } catch {
-        // Worktree not yet created — step was never committed; skip git revert.
+        // Worktree not yet created — step never committed; skip git revert.
       }
 
       let commitHash = null;
@@ -245,8 +292,6 @@ app.post(
         try {
           const result = revertStepCommit(workflowId, stepId, cwd);
           commitHash = result.commitHash;
-          // result.reverted === false means the commit was not found (e.g. the
-          // step failed before writing).  We still reset the step state below.
         } catch (gitErr) {
           return res.status(409).json({
             error: `git revert failed — resolve conflicts manually: ${gitErr.message}`,
@@ -258,7 +303,6 @@ app.post(
         }
       }
 
-      // ── Reset step state in Redis ──────────────────────────────────────────
       const result = await rewindStep(workflowId, stepId, { commitHash, reason });
 
       if (!result.ok) {
@@ -266,13 +310,7 @@ app.post(
         return res.status(statusCode).json({ error: result.reason });
       }
 
-      res.json({
-        ok:         true,
-        workflowId,
-        stepId,
-        resetSteps: result.resetSteps,
-        commitHash,
-      });
+      res.json({ ok: true, workflowId, stepId, resetSteps: result.resetSteps, commitHash });
 
     } catch (err) {
       console.error('[POST /workflows/:workflowId/steps/:stepId/rewind]', err);
@@ -291,6 +329,25 @@ app.get('/workflows/:workflowId/rewind-history', requireApiKey, async (req, res)
     res.json({ history });
   } catch (err) {
     console.error('[GET /workflows/:workflowId/rewind-history]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Concurrency ──────────────────────────────────────────────────────────────
+
+/**
+ * GET /concurrency/:workflowId
+ * Return live concurrency slot status for a workflow.
+ *
+ * Query: ?priority=<0-10>  (default: 5 = NORMAL)
+ */
+app.get('/concurrency/:workflowId', requireApiKey, async (req, res) => {
+  const priority = parseInt(req.query.priority ?? '5', 10);
+  try {
+    const status = await slotStatus(req.params.workflowId, priority);
+    res.json(status);
+  } catch (err) {
+    console.error('[GET /concurrency/:workflowId]', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -385,53 +442,6 @@ app.get('/traces/:traceId', requireApiKey, async (req, res) => {
   }
 });
 
-// ─── Workflows ────────────────────────────────────────────────────────────────
-
-/**
- * GET /workflows
- * List workflows with optional filters.
- *
- * Query: ?status=<status>&tenantId=<id>&limit=<n>&cursor=<cursor>
- */
-app.get(
-  '/workflows',
-  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
-  async (req, res) => {
-    const { status, tenantId, cursor } = req.query;
-    const limit = parseInt(req.query.limit ?? '50', 10);
-
-    try {
-      const result = await listWorkflows({
-        status:   status   ?? null,
-        tenantId: tenantId ?? req.resolvedTenantId ?? null,
-        limit,
-        cursor:   cursor   ?? '0',
-      });
-      res.json(result);
-    } catch (err) {
-      console.error('[GET /workflows]', err);
-      res.status(500).json({ error: err.message });
-    }
-  },
-);
-
-/**
- * GET /workflows/:workflowId
- * Get the status and step details of a single workflow.
- */
-app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
-  try {
-    const workflow = await getWorkflowStatus(req.params.workflowId);
-    if (!workflow) {
-      return res.status(404).json({ error: `Workflow ${req.params.workflowId} not found.` });
-    }
-    res.json(workflow);
-  } catch (err) {
-    console.error('[GET /workflows/:workflowId]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ─── Review queue ─────────────────────────────────────────────────────────────
 
 /**
@@ -521,8 +531,6 @@ app.get('/metrics/json', optionalApiKey, async (_req, res) => {
  * Internal structured metrics object consumed by the dashboard.
  * Returns all-time counters, windowed rollups, latency percentiles,
  * per-agent stats, and recent steps.
- *
- * Auth: requireApiKey (operators should use a read-only key for browser access).
  */
 app.get('/api/metrics', requireApiKey, async (_req, res) => {
   try {
@@ -538,8 +546,7 @@ app.get('/api/metrics', requireApiKey, async (_req, res) => {
 
 /**
  * GET /dashboard
- * Full observability UI — self-contained single-page HTML.
- * Auth: requireApiKey.
+ * Full observability UI — self-contained single-page HTML app.
  */
 app.get('/dashboard', requireApiKey, (_req, res) => {
   res.set('Content-Type', 'text/html; charset=utf-8');
@@ -624,7 +631,7 @@ app.get('/tenants/:id/keys', requireApiKey, async (req, res) => {
  * POST /tenants/:id/keys
  * Create a new API key for a tenant.
  *
- * Body: { label?: string, expiresAt?: number }
+ * Body:    { label?: string, expiresAt?: number }
  * Returns: { keyId, rawKey, tenantId, label, createdAt, expiresAt }
  *
  * rawKey is returned ONCE and never stored — save it immediately.
@@ -665,7 +672,7 @@ app.use((_req, res) => {
   res.status(404).json({ error: 'Not found.' });
 });
 
-// ─── Global error handler ────────────────────────────────────────────────────
+// ─── Global error handler ─────────────────────────────────────────────────────
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {
@@ -680,8 +687,8 @@ async function start() {
   await seedTenantsFromEnv();
 
   app.listen(PORT, () => {
-    console.log(`[server] Aegis API listening on port ${PORT}`);
-    console.log(`[server] Dashboard → http://localhost:${PORT}/dashboard`);
+    console.info(`[server] Aegis API listening on port ${PORT}`);
+    console.info(`[server] Dashboard → http://localhost:${PORT}/dashboard`);
   });
 }
 
