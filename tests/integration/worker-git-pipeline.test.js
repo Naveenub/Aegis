@@ -74,12 +74,16 @@ const mkdirSyncMock     = vi.fn();
 
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal();
-  return {
-    ...actual,
+  const overrides = {
     existsSync:    (...a) => existsSyncMock(...a),
     mkdirSync:     (...a) => mkdirSyncMock(...a),
     writeFileSync: (...a) => writeFileSyncMock(...a),
     readFileSync:  vi.fn(() => '# persona'),
+  };
+  return {
+    ...actual,
+    ...overrides,
+    default: { ...actual.default, ...overrides },
   };
 });
 
