@@ -32,7 +32,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import path from 'path';
 
 // ─── Mock external I/O ────────────────────────────────────────────────────────
 
@@ -169,7 +168,6 @@ const PATCH_JSON = JSON.stringify({ file: 'src/greeting.js', content: 'export co
 const PATCH_RAW  = `PATCH: ${PATCH_JSON}`;
 
 function gitOk(stdout = '') { return { status: 0, stdout, stderr: '' }; }
-function gitFail(stderr = 'fatal')  { return { status: 1, stdout: '', stderr }; }
 
 beforeEach(() => {
   vi.clearAllMocks();
