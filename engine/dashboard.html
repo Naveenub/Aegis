@@ -486,7 +486,7 @@
   <header>
     <div class="logo">Aegis <span>/ Observability</span></div>
     <div class="hdr-sep"></div>
-    <div class="status-dot" id="statusDot" title="Polling active"></div>
+    <div class="status-dot" id="statusDot" title="Connecting…"></div>
     <div class="hdr-time" id="clock">--:--:--</div>
     <button class="btn-refresh" onclick="refresh()">↺ refresh</button>
   </header>
@@ -522,7 +522,7 @@
       <div class="sidebar-footer">
         <div><a href="/metrics" target="_blank">/metrics</a> · Prometheus</div>
         <div style="margin-top:4px"><a href="/metrics/json" target="_blank">/metrics/json</a> · OTEL</div>
-        <div style="margin-top:8px;color:var(--muted)">Auto-refresh 15s</div>
+        <div style="margin-top:8px;color:var(--muted)" id="liveLabel">Connecting…</div>
       </div>
     </nav>
 
@@ -1018,12 +1018,75 @@ async function loadMetricsAndRender(view) {
   }
 }
 
-// ── Refresh + auto-poll ───────────────────────────────────
+// ── Refresh (manual) ─────────────────────────────────────
 async function refresh() {
   await loadView(currentView);
 }
 
-setInterval(() => loadView(currentView), 15_000);
+// ── SSE live-push ─────────────────────────────────────────
+// Replaces the old 15 s setInterval poll.  The server pushes a fresh
+// metrics snapshot and workflow list every 4 seconds over a persistent
+// EventSource connection.  If the connection drops, the browser retries
+// automatically (built-in EventSource reconnect).
+
+let _sseConnected = false;
+
+function connectSSE() {
+  const apiKey = document.cookie.match(/aegis_key=([^;]+)/)?.[1] ?? '';
+  // EventSource doesn't support custom headers, so we pass the key as a
+  // query param which the server reads as a fallback for the /events route.
+  const url = apiKey ? `/events?apiKey=${encodeURIComponent(apiKey)}` : '/events';
+  const es  = new EventSource(url);
+
+  es.addEventListener('metrics', e => {
+    try {
+      const m = JSON.parse(e.data);
+      // Only re-render if the metrics view is active (avoid hidden-tab churn)
+      if (currentView === 'metrics' || currentView === 'agents' || currentView === 'latency') {
+        renderMetricsData(m);
+        renderAgents(m);
+        renderLatency(m);
+      }
+    } catch {}
+  });
+
+  es.addEventListener('workflows', e => {
+    try {
+      const workflows = JSON.parse(e.data);
+      // Store for the traces view; re-render if active
+      _liveWorkflows = workflows;
+      if (currentView === 'traces') renderWorkflows(workflows);
+    } catch {}
+  });
+
+  es.onopen = () => {
+    _sseConnected = true;
+    const dot   = document.getElementById('statusDot');
+    const label = document.getElementById('liveLabel');
+    if (dot)   dot.title = 'Live push active';
+    if (label) label.textContent = 'Live · 4 s push';
+  };
+
+  es.onerror = () => {
+    _sseConnected = false;
+    const dot   = document.getElementById('statusDot');
+    const label = document.getElementById('liveLabel');
+    if (dot)   { dot.title = 'Reconnecting…'; dot.style.background = 'var(--yellow)'; }
+    if (label) label.textContent = 'Reconnecting…';
+    // EventSource retries automatically; restore dot colour on next open
+    es.addEventListener('open', () => {
+      if (dot) dot.style.background = '';
+    }, { once: true });
+  };
+}
+
+// Fallback: if SSE is not supported (very old browsers), keep the 15 s poll
+let _liveWorkflows = null;
+if (typeof EventSource !== 'undefined') {
+  connectSSE();
+} else {
+  setInterval(() => loadView(currentView), 15_000);
+}
 
 // ── Init ──────────────────────────────────────────────────
 loadView('metrics');
