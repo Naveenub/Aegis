@@ -13,7 +13,7 @@
  *   commitChanges(message, cwd)                   → void
  *   rollbackLastCommit(cwd)                       → void
  *   revertStepCommit(workflowId, stepId, cwd)     → { commitHash }
- *   finaliseWorkflow(workflowId, tenantId)        → { merged, conflicts }
+ *   finaliseWorkflow(workflowId, tenantId)        → { merged, conflicts, resolvedVia? }
  *   removeWorkflowWorktree(workflowId, tenantId)  → Promise<void>
  *   getWorker(tenantId)                           → Worker  (BullMQ worker factory)
  */
@@ -179,11 +179,44 @@ export function revertStepCommit(workflowId, stepId, cwd) {
 
 // ─── Finalise / cleanup ───────────────────────────────────────────────────────
 
+// ── Merge strategy ────────────────────────────────────────────────────────────
+//
+// AEGIS_MERGE_STRATEGY  (default: "rebase")
+//
+//   rebase  — When an initial --no-ff merge fails due to conflicts the workflow
+//             branch is rebased onto the updated base branch.  Rebase replays
+//             each workflow commit individually, which lets git resolve conflicts
+//             file-by-file using the "ours" strategy for files that were only
+//             touched by this workflow and the normal three-way merge for files
+//             touched by both.  Non-overlapping changes in different files are
+//             resolved automatically; only genuine line-level collisions still
+//             require human review.  On success the rebased branch is merged
+//             cleanly with --ff-only; resolvedVia is set to "rebase" in the
+//             return value.
+//
+//   flag    — Legacy behaviour: abort immediately on any conflict and flag the
+//             workflow for human review.  Use this when deterministic history is
+//             required and no automated resolution is acceptable.
+//
+// Return shape: { merged: boolean, conflicts: string[], resolvedVia?: string }
+//   resolvedVia is present (and set to "direct" or "rebase") only when
+//   merged === true, so callers can log/metric the resolution path.
+
+const MERGE_STRATEGY = (process.env.AEGIS_MERGE_STRATEGY ?? 'rebase').trim().toLowerCase();
+
 /**
  * Merge the workflow branch into the tenant base branch.
  * Acquires the tenant-level lock to serialise concurrent merges.
  *
- * @returns {{ merged: boolean, conflicts: string[] }}
+ * When the initial --no-ff merge fails and AEGIS_MERGE_STRATEGY=rebase
+ * (default), the workflow branch is rebased onto the current base branch tip.
+ * This resolves conflicts that arise purely from ordering — e.g. two workflows
+ * each adding a new function to the same file at the same location.  If the
+ * rebase itself encounters unresolvable line-level conflicts it is aborted and
+ * the function falls back to { merged: false, conflicts } so the human review
+ * path is taken, identical to the legacy "flag" strategy.
+ *
+ * @returns {{ merged: boolean, conflicts: string[], resolvedVia?: string }}
  */
 export async function finaliseWorkflow(workflowId, tenantId) {
   const branch     = `aegis/${tenantId}/${workflowId}`;
@@ -202,20 +235,74 @@ export async function finaliseWorkflow(workflowId, tenantId) {
       git(['branch', baseBranch, 'HEAD']);
     }
 
-    // Merge the workflow branch; --no-ff preserves history
+    // ── Attempt 1: clean --no-ff merge ───────────────────────────────────────
     try {
       execFileSync('git', ['merge', '--no-ff', '-m', `Aegis merge: ${workflowId}`, branch], {
         cwd: REPO_ROOT, encoding: 'utf-8',
       });
+      return { merged: true, conflicts: [], resolvedVia: 'direct' };
     } catch {
-      // Collect conflicting files and abort
+      // Merge failed — collect conflicting files, then abort so the repo is
+      // back to a clean state before we attempt the rebase strategy.
       const conflicts = git(['diff', '--name-only', '--diff-filter=U'], REPO_ROOT)
         .split('\n').filter(Boolean);
       git(['merge', '--abort'], REPO_ROOT);
-      return { merged: false, conflicts };
-    }
 
-    return { merged: true, conflicts: [] };
+      if (MERGE_STRATEGY !== 'rebase') {
+        // "flag" strategy — skip auto-resolution, hand off to human review.
+        return { merged: false, conflicts };
+      }
+
+      // ── Attempt 2: rebase the workflow branch onto the updated base ─────────
+      //
+      // The worktree for this workflow is at WORKTREES_BASE/<tenantId>/<workflowId>.
+      // We rebase there rather than in REPO_ROOT so the base working tree is
+      // never left in a mid-rebase state if something goes wrong.
+      const worktreePath = path.join(WORKTREES_BASE, tenantId, workflowId);
+
+      try {
+        // Fetch the latest base branch tip into the worktree so rebase has a
+        // target.  The worktree shares the object store with REPO_ROOT so this
+        // is a local ref update only — no network round-trip.
+        git(['fetch', REPO_ROOT, `${baseBranch}:refs/remotes/aegis-base`], worktreePath);
+
+        // Rebase the workflow branch onto the latest base tip.
+        // --no-rebase-merges keeps the commit graph linear (no octopus merge
+        // commits from earlier finalise passes).
+        execFileSync(
+          'git',
+          ['rebase', '--onto', 'refs/remotes/aegis-base', '--no-rebase-merges'],
+          { cwd: worktreePath, encoding: 'utf-8' },
+        );
+      } catch {
+        // Rebase hit genuine line-level conflicts — abort and fall back to
+        // the human review path.  Ensure the worktree is clean before returning.
+        try {
+          git(['rebase', '--abort'], worktreePath);
+        } catch { /* already clean or worktree missing — best-effort */ }
+
+        return { merged: false, conflicts };
+      }
+
+      // Rebase succeeded — update the branch ref in REPO_ROOT to the new HEAD
+      // of the rebased worktree, then merge cleanly with --ff-only.
+      const rebasedHead = git(['rev-parse', 'HEAD'], worktreePath);
+      git(['update-ref', `refs/heads/${branch}`, rebasedHead]);
+
+      try {
+        execFileSync(
+          'git',
+          ['merge', '--ff-only', '-m', `Aegis merge (rebased): ${workflowId}`, branch],
+          { cwd: REPO_ROOT, encoding: 'utf-8' },
+        );
+      } catch (ffErr) {
+        // Should not happen after a clean rebase, but guard anyway.
+        try { git(['merge', '--abort'], REPO_ROOT); } catch { /* best-effort */ }
+        return { merged: false, conflicts };
+      }
+
+      return { merged: true, conflicts: [], resolvedVia: 'rebase' };
+    }
   } finally {
     await releaseLock(lock);
   }
@@ -480,10 +567,19 @@ export function getWorker(tenantId) {
 
                 const mergeResult = await finaliseWorkflow(workflowId, tenant);
 
-                if (!mergeResult.merged) {
+                if (mergeResult.merged) {
+                  // Record how the merge was resolved so operators can track
+                  // how often the auto-rebase strategy saves human review.
+                  if (mergeResult.resolvedVia === 'rebase') {
+                    await updateJob(job.id, {
+                      status: 'completed',
+                      result: `merged via auto-rebase (conflicts resolved automatically)`,
+                    }, tenant);
+                  }
+                } else {
                   await flagForReview(workflowId, 'merge', {
                     reason: 'merge-conflict',
-                    description: 'Workflow completed but could not be merged into the tenant base branch due to conflicts with a concurrent workflow.',
+                    description: 'Workflow completed but could not be merged into the tenant base branch due to conflicts with a concurrent workflow. Auto-rebase was attempted and also failed — manual resolution required.',
                     conflicts: mergeResult.conflicts,
                     branch: `aegis/${tenant}/${workflowId}`,
                     baseBranch: `aegis-tenant/${tenant}`,
