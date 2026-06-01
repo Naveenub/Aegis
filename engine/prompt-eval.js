@@ -74,10 +74,11 @@
  * An agent passes its eval suite if ≥ AGENT_PASS_RATE (0.8) of cases pass.
  */
 
-import fs from 'fs';
-import path from 'path';
+import IORedis from 'ioredis';
 import { runAgent } from './agent-runner.js';
 import { logger } from './logger.js';
+
+const redis = new IORedis();
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -85,7 +86,8 @@ export const PASS_THRESHOLD  = 6;   // minimum score out of 8 per case
 export const MAX_SCORE       = 8;
 export const AGENT_PASS_RATE = 0.8; // fraction of cases an agent must pass
 
-const EVAL_HISTORY_PATH = '.claude/context/eval-history.jsonl';
+// Redis key for the eval history list (one JSON entry per element, newest last)
+const EVAL_HISTORY_KEY = 'aegis:eval-history';
 
 const VALID_AGENTS = new Set([
   'feature-builder',
@@ -702,20 +704,20 @@ export async function evalAll(opts = {}) {
 // ─── History writer ───────────────────────────────────────────────────────────
 
 /**
- * Append a scored eval result to the eval history log.
- * Creates the file and parent directory if they don't exist.
+ * Append a scored eval result to the Redis eval history list.
  *
- * The meta-reviewer reads this file to detect trends (e.g. an agent that
+ * Replaces the old fs.appendFileSync approach (which was unsafe under
+ * multi-process execution) with a Redis RPUSH, consistent with the fixes
+ * already applied to tracer.js and job-store.js.
+ *
+ * The meta-reviewer reads this list to detect trends (e.g. an agent that
  * keeps failing `score < PASS_THRESHOLD` after prompt changes).
  *
  * @param {object} result - output of evalAgent() for one agent
  */
-export function recordEvalResult(result) {
+export async function recordEvalResult(result) {
   try {
-    const dir = path.dirname(EVAL_HISTORY_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    const line = JSON.stringify({
+    const entry = JSON.stringify({
       ts:        new Date().toISOString(),
       agent:     result.agent,
       passed:    result.passed,
@@ -729,7 +731,7 @@ export function recordEvalResult(result) {
       })),
     });
 
-    fs.appendFileSync(EVAL_HISTORY_PATH, line + '\n', 'utf-8');
+    await redis.rpush(EVAL_HISTORY_KEY, entry);
   } catch (err) {
     // Non-fatal: eval history is advisory, never abort real work
     logger.warn({ err: err.message }, '[prompt-eval] could not write eval history');
@@ -737,18 +739,16 @@ export function recordEvalResult(result) {
 }
 
 /**
- * Read the last N eval runs from history.
+ * Read the last N eval runs from Redis history.
  *
  * @param {number} [n=20] - number of most recent records to return
- * @returns {object[]}
+ * @returns {Promise<object[]>}
  */
-export function readEvalHistory(n = 20) {
+export async function readEvalHistory(n = 20) {
   try {
-    if (!fs.existsSync(EVAL_HISTORY_PATH)) return [];
-    const lines = fs.readFileSync(EVAL_HISTORY_PATH, 'utf-8')
-      .split('\n')
-      .filter(Boolean);
-    return lines.slice(-n).map(l => JSON.parse(l));
+    // LRANGE with negative indices reads from the tail (most recent entries)
+    const entries = await redis.lrange(EVAL_HISTORY_KEY, -n, -1);
+    return entries.map(e => JSON.parse(e));
   } catch {
     return [];
   }
