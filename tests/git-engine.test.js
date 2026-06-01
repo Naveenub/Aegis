@@ -57,19 +57,25 @@ vi.mock('child_process', () => ({
 }));
 
 // ─── Mock fs ──────────────────────────────────────────────────────────────────
+// existsSyncMock and mkdirSyncMock must be created via vi.hoisted() so they are
+// available when the vi.mock('fs', ...) factory is evaluated at hoist time.
+// An async factory also risks not being ready before git.js first imports 'fs',
+// so the factory is kept synchronous — importOriginal is not needed because we
+// provide every method the SUT uses explicitly.
 
-const existsSyncMock = vi.fn();
-const mkdirSyncMock  = vi.fn();
+const { existsSyncMock, mkdirSyncMock } = vi.hoisted(() => ({
+  existsSyncMock: vi.fn(),
+  mkdirSyncMock:  vi.fn(),
+}));
 
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
-    existsSync:   (...args) => existsSyncMock(...args),
-    mkdirSync:    (...args) => mkdirSyncMock(...args),
+vi.mock('fs', () => {
+  const mod = {
+    existsSync:    (...args) => existsSyncMock(...args),
+    mkdirSync:     (...args) => mkdirSyncMock(...args),
     writeFileSync: vi.fn(),
     readFileSync:  vi.fn(() => '# persona'),
   };
+  return { ...mod, default: mod };
 });
 
 // ─── Mock engine dependencies ─────────────────────────────────────────────────
@@ -432,18 +438,28 @@ describe('finaliseWorkflow()', () => {
   });
 
   it('returns { merged: false, conflicts } when merge fails', async () => {
-    spawnSyncMock.mockReturnValue(gitOk()); // rev-parse ok
-    execFileSyncMock.mockImplementationOnce(() => {
-      throw new Error('CONFLICT');
-    });
-    // git diff --name-only → conflicting files
-    spawnSyncMock.mockReturnValue(gitOk('engine/foo.js\nengine/bar.js'));
-    // git merge --abort
-    spawnSyncMock.mockReturnValue(gitOk());
+    // Use the 'flag' strategy so the function returns {merged:false} immediately
+    // after the first merge fails, without entering the rebase path.  Without
+    // this the default 'rebase' strategy triggers additional spawnSync /
+    // execFileSync calls whose mock return values interact with this test's setup
+    // and can cause the rebase to appear successful, flipping merged to true.
+    process.env.AEGIS_MERGE_STRATEGY = 'flag';
+    try {
+      spawnSyncMock.mockReturnValue(gitOk()); // rev-parse ok
+      execFileSyncMock.mockImplementationOnce(() => {
+        throw new Error('CONFLICT');
+      });
+      // git diff --name-only → conflicting files
+      spawnSyncMock.mockReturnValue(gitOk('engine/foo.js\nengine/bar.js'));
+      // git merge --abort
+      spawnSyncMock.mockReturnValue(gitOk());
 
-    const result = await finaliseWorkflow('wf-conflict', 'tenant-c');
-    expect(result.merged).toBe(false);
-    expect(Array.isArray(result.conflicts)).toBe(true);
+      const result = await finaliseWorkflow('wf-conflict', 'tenant-c');
+      expect(result.merged).toBe(false);
+      expect(Array.isArray(result.conflicts)).toBe(true);
+    } finally {
+      delete process.env.AEGIS_MERGE_STRATEGY;
+    }
   });
 
   it('acquires and releases the tenant-level merge lock', async () => {
