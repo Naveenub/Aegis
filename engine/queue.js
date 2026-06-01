@@ -2,7 +2,7 @@ import { Queue, QueueEvents } from 'bullmq';
 import IORedis from 'ioredis';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
-const connection = new IORedis();
+const connection = new IORedis(process.env.REDIS_URL || undefined);
 
 // ─── Priority tiers (lower number = higher priority in BullMQ) ────────────────
 export const Priority = {
