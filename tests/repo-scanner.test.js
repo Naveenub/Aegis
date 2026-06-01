@@ -279,6 +279,16 @@ describe('scanRepoSync', () => {
 // ─── Contract parity between async and sync ───────────────────────────────────
 
 describe('scanRepo vs scanRepoSync — output parity', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Restore the default implementations that vi.clearAllMocks() wipes.
+    // clearAllMocks() resets call history AND the mock implementation set
+    // inside the vi.mock() factory, so without this both fns return undefined
+    // and scanRepo collects an empty array instead of the expected 4 files.
+    fsPromises.readdir.mockImplementation(async (dirPath) => readDirEntries(dirPath));
+    fs.readdirSync.mockImplementation((dirPath) => readDirEntries(dirPath));
+  });
+
   it('both return the same file set for the same root', async () => {
     const asyncFiles = await scanRepo('/repo');
     const syncFiles  = scanRepoSync('/repo');
