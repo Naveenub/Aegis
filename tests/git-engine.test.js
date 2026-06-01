@@ -10,8 +10,9 @@
  *                                releases lock and re-throws on git failure
  *   commitChanges()            — calls git add -A then git commit
  *   rollbackLastCommit()       — calls git reset --hard HEAD~1
- *   finaliseWorkflow()         — creates base branch when absent, merges, returns { merged, conflicts }
+ *   finaliseWorkflow()         — creates base branch when absent, merges, returns { merged, conflicts, resolvedVia? }
  *                                returns { merged: false, conflicts } on merge failure
+ *                                returns resolvedVia="direct"|"rebase" on success
  *   removeWorkflowWorktree()   — calls worktree remove + branch -D (best-effort, no throw)
  *   getWorker()                — rejects invalid tenantId, caches workers per tenant
  *
@@ -410,7 +411,9 @@ describe('finaliseWorkflow()', () => {
     execFileSyncMock.mockReturnValue('');
 
     const result = await finaliseWorkflow('wf-ok', 'tenant-ok');
-    expect(result).toEqual({ merged: true, conflicts: [] });
+    expect(result.merged).toBe(true);
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.resolvedVia).toBe('direct');
   });
 
   it('creates the base branch when it does not exist yet', async () => {
