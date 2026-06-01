@@ -85,7 +85,7 @@ import IORedis from 'ioredis';
 import { runAgent } from './agent-runner.js';
 import { logger } from './logger.js';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
