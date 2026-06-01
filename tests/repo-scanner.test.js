@@ -279,8 +279,6 @@ describe('scanRepoSync', () => {
 // ─── Contract parity between async and sync ───────────────────────────────────
 
 describe('scanRepo vs scanRepoSync — output parity', () => {
-  beforeEach(() => vi.clearAllMocks());
-
   it('both return the same file set for the same root', async () => {
     const asyncFiles = await scanRepo('/repo');
     const syncFiles  = scanRepoSync('/repo');
