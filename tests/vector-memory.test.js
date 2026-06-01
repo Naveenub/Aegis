@@ -17,8 +17,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Redis mock ────────────────────────────────────────────────────────────────
+// redisMock must be declared via vi.hoisted() so it exists at the time
+// vi.mock('ioredis', ...) factory is hoisted to the top of the file.
+// Using a plain const here causes a TDZ ReferenceError because vi.mock
+// factories are moved before all imports/declarations by vitest's transformer.
 
-const redisMock = {
+const redisMock = vi.hoisted(() => ({
   call: vi.fn(),
   pipeline: vi.fn(),
   hset: vi.fn(),
@@ -34,7 +38,7 @@ const redisMock = {
     }
     this.zrangebyscore.mockResolvedValue([]);
   },
-};
+}));
 
 // pipeline returns a mini-pipeline that collects calls
 function makePipeline() {
