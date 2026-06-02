@@ -52,7 +52,8 @@ import { runSystem }                          from './engine/orchestrator.js';
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
-import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, rewindStep, getRewindHistory } from './engine/workflow-store.js';
+import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
+import { addStep, Priority } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
 import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
@@ -449,12 +450,21 @@ app.get('/review-queue', requireApiKey, async (req, res) => {
 
 /**
  * POST /review-queue/resolve
- * Approve or reject a queued review item.
+ * Resolve a queued human-review item.
  *
- * Body: { workflowId, stepId, resolution: 'approved'|'rejected', note?: string }
+ * Body: { workflowId, stepId, resolution: 'retrying'|'skip'|'escalate', note?: string, tenantId?: string }
+ *
+ *   retrying  — reset the step and re-queue it at CRITICAL priority so the
+ *               agent-worker picks it up immediately for a fresh attempt.
+ *
+ *   skip      — mark the step as skipped and remove it from the review queue;
+ *               the workflow continues with any remaining steps.
+ *
+ *   escalate  — cancel the workflow entirely and persist the human note so
+ *               operators have a permanent record of why it was escalated.
  */
 app.post('/review-queue/resolve', requireApiKey, async (req, res) => {
-  const { workflowId, stepId, resolution, note } = req.body ?? {};
+  const { workflowId, stepId, resolution, note, tenantId } = req.body ?? {};
 
   if (!workflowId || !stepId || !resolution) {
     return res.status(400).json({
@@ -462,14 +472,35 @@ app.post('/review-queue/resolve', requireApiKey, async (req, res) => {
     });
   }
 
-  if (!['approved', 'rejected'].includes(resolution)) {
+  if (!['retrying', 'skip', 'escalate'].includes(resolution)) {
     return res.status(400).json({
-      error: '`resolution` must be "approved" or "rejected".',
+      error: '`resolution` must be "retrying", "skip", or "escalate".',
     });
   }
 
   try {
+    // 1. Persist the resolution in the review record regardless of action taken.
     await resolveReview(workflowId, stepId, resolution, note ?? '');
+
+    const effectiveTenant = tenantId ?? req.resolvedTenantId ?? 'default';
+
+    if (resolution === 'retrying') {
+      // Reset attempt counter and re-queue into the CRITICAL lane.
+      const resetStep = await resetStepForRetry(workflowId, stepId);
+      if (!resetStep) {
+        return res.status(404).json({ error: `Step "${stepId}" not found in workflow "${workflowId}".` });
+      }
+      await addStep(workflowId, resetStep, Priority.CRITICAL, effectiveTenant);
+
+    } else if (resolution === 'skip') {
+      // Mark the step skipped so dependency-aware scheduling can proceed.
+      await updateStep(workflowId, stepId, 'skipped');
+
+    } else if (resolution === 'escalate') {
+      // Cancel the workflow; the review record already carries the human note.
+      await cancelWorkflow(workflowId, `escalated by operator: ${note ?? '(no note)'}`);
+    }
+
     res.json({ ok: true, workflowId, stepId, resolution });
   } catch (err) {
     console.error('[POST /review-queue/resolve]', err);
