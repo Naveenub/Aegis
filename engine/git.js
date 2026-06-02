@@ -34,18 +34,12 @@ import { runReviewPipeline } from './review-system.js';
 import { runTests } from './test-runner.js';
 import { storeMemory } from './vector-memory.js';
 import { createJob, updateJob, incrementRetries } from './job-store.js';
-import {
-  updateStep,
-  getRunnableSteps,
-  getWorkflowStatus,
-  isWorkflowTimedOut,
-  cancelWorkflow,
-  flagForReview,
-} from './workflow-store.js';
+import { updateStep, getRunnableSteps, getWorkflowStatus, isWorkflowTimedOut, cancelWorkflow, flagForReview, } from './workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
 import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
 import { acquireSlot } from './concurrency.js';
 import { assertTenantId } from './tenant.js';
+import { pushAndOpenPR } from './git-remote.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -569,7 +563,7 @@ export function getWorker(tenantId) {
                 worktreeLock = null;
 
                 const mergeResult = await finaliseWorkflow(workflowId, tenant);
-
+ 
                 if (mergeResult.merged) {
                   // Record how the merge was resolved so operators can track
                   // how often the auto-rebase strategy saves human review.
@@ -577,6 +571,27 @@ export function getWorker(tenantId) {
                     await updateJob(job.id, {
                       status: 'completed',
                       result: `merged via auto-rebase (conflicts resolved automatically)`,
+                    }, tenant);
+                  }
+ 
+                  // ── Push branch to remote and open PR/MR (if configured) ──
+                  try {
+                    const remote = await pushAndOpenPR(workflowId, tenant, mergeResult);
+                    if (remote.pushed) {
+                      const prNote = remote.pr?.url ? ` | PR: ${remote.pr.url}` : '';
+                      await updateJob(job.id, {
+                        status: 'completed',
+                        result: `merged${mergeResult.resolvedVia === 'rebase' ? ' via auto-rebase' : ''}; pushed to remote${prNote}`,
+                      }, tenant);
+                    }
+                  } catch (pushErr) {
+                    // Push / PR failure must not roll back an already-successful
+                    // local merge.  Log it and surface it as a warning on the job
+                    // record rather than throwing.
+                    console.warn(`[git] pushAndOpenPR failed for workflow ${workflowId}:`, pushErr.message);
+                    await updateJob(job.id, {
+                      status: 'completed',
+                      result: `merged locally; remote push failed: ${pushErr.message}`,
                     }, tenant);
                   }
                 } else {
