@@ -77,7 +77,14 @@ function fakeResponse(text) {
   };
 }
 
+// ─── Reset between tests ──────────────────────────────────────────────────────
+
 beforeEach(() => {
+  // Provide a dummy key so getClient() in agent-runner constructs the (mocked)
+  // Anthropic client without throwing.  The SDK constructor itself is mocked, so
+  // this value is never sent to the network.
+  process.env.ANTHROPIC_API_KEY = 'sk-test-dummy';
+
   vi.clearAllMocks();
   // Default: API returns a generic text response
   mockCreate.mockResolvedValue(fakeResponse('Some response text'));
