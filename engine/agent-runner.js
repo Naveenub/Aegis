@@ -172,7 +172,20 @@ export async function runAgent(
   ].join('\n');
 
   // ── 4. Build user message ────────────────────────────────────────────────
-  const memory = await searchMemory(task, 3, tenantId);
+  // searchMemory returns [] when embeddings are unavailable (OPENAI_API_KEY
+  // absent). We catch any unexpected error here too so a transient Redis or
+  // network failure never blocks the agent from running — past-fix context
+  // is useful but not required for correctness.
+  let memory = [];
+  try {
+    memory = await searchMemory(task, 3, tenantId);
+  } catch (err) {
+    // EMBEDDINGS_UNAVAILABLE is expected in environments without OPENAI_API_KEY
+    // (e.g. CI prompt-eval). Any other error is surfaced as a warning.
+    if (err.code !== 'EMBEDDINGS_UNAVAILABLE') {
+      console.warn('[agent-runner] searchMemory failed — running without past-fix context:', err.message);
+    }
+  }
   const memorySection =
     memory.length > 0
       ? [
