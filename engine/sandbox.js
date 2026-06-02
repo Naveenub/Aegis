@@ -9,26 +9,36 @@ import fs from 'fs';
  * a malicious or buggy agent patch cannot escape the worktree, make network
  * calls, read host secrets, or consume unbounded CPU/memory.
  *
- * Security model — two allowed states, one hard-blocked state:
+ * Security model — three allowed states, one hard-blocked state:
  *
- *   ALLOWED:   Docker is available → runDocker() (fully sandboxed)
+ *   ALLOWED:   Docker is available
+ *              → runDocker()  ✅ fully sandboxed (always preferred)
+ *
+ *   ALLOWED:   Docker is unavailable AND AEGIS_SANDBOX_MODE=local
+ *              → runDirect()  ⚠️  explicit local-dev/CI opt-in, loud warning
+ *
  *   ALLOWED:   Docker is unavailable AND AEGIS_SANDBOX_DISABLE=true
- *              → runDirect() with a loud warning (explicit operator opt-in)
- *   HARD FAIL: Docker is unavailable AND AEGIS_SANDBOX_DISABLE is not 'true'
- *              → throw at call-time; the step fails safely rather than
+ *              → runDirect()  ⚠️  legacy opt-in, loud warning (still supported)
+ *
+ *   ALLOWED:   Docker is unavailable AND CI=true env var is set
+ *              → runDirect()  ⚠️  auto-detected CI environment, loud warning
+ *              (Standard CI platforms — GitHub Actions, GitLab CI, CircleCI,
+ *               Jenkins, Travis, Buildkite, etc. — all export CI=true. Docker-
+ *               in-Docker is possible in CI but often unavailable or slow.)
+ *
+ *   HARD FAIL: Docker is unavailable AND none of the above opt-ins are active
+ *              → throw at call-time so the step fails safely rather than
  *                running unsandboxed code on the host silently.
  *
- * The previous behaviour — silently falling back to execSync when Docker was
- * absent — meant any environment without Docker (a dev laptop, a CI runner,
- * a misconfigured prod host) would execute agent-generated code directly on
- * the host. A boot warning is not an enforcement mechanism.
- *
- * Migration: if you run without Docker intentionally (local dev, CI),
- * set AEGIS_SANDBOX_DISABLE=true in your .env. The hard-fail message tells
- * you exactly this, so the fix path is unambiguous.
+ * Migration: set AEGIS_SANDBOX_MODE=local in your .env (preferred) or
+ * AEGIS_SANDBOX_DISABLE=true (legacy) for local dev without Docker.
+ * CI pipelines are detected automatically via the CI environment variable.
  *
  * Environment variables:
- *   AEGIS_SANDBOX_DISABLE     'true' to allow unsandboxed execution (dev/CI only)
+ *   AEGIS_SANDBOX_MODE        'local' to allow unsandboxed execution (dev only)
+ *   AEGIS_SANDBOX_DISABLE     'true' legacy alias for AEGIS_SANDBOX_MODE=local
+ *   CI                        'true' auto-set by most CI platforms — enables
+ *                             unsandboxed fallback automatically in pipelines
  *   AEGIS_SANDBOX_IMAGE       Docker image to use (default: node:22-alpine)
  *   AEGIS_SANDBOX_MEMORY      Memory limit (default: 512m)
  *   AEGIS_SANDBOX_CPUS        CPU limit (default: 1)
@@ -47,11 +57,19 @@ import fs from 'fs';
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 const DISABLE_EXPLICITLY = process.env.AEGIS_SANDBOX_DISABLE === 'true';
-const IMAGE              = process.env.AEGIS_SANDBOX_IMAGE        ?? 'node:22-alpine';
-const MEMORY             = process.env.AEGIS_SANDBOX_MEMORY       ?? '512m';
-const CPUS               = process.env.AEGIS_SANDBOX_CPUS         ?? '1';
-const TIMEOUT_MS         = parseInt(process.env.AEGIS_SANDBOX_TIMEOUT_MS ?? '60000');
-const TMPFS_SIZE         = '67108864'; // 64 MB
+const LOCAL_MODE         = process.env.AEGIS_SANDBOX_MODE === 'local';
+const IN_CI              = process.env.CI === 'true';
+
+// Any of these signals that the operator has consciously accepted unsandboxed
+// execution — or that we are in a standard CI environment where Docker is
+// unavailable and unsandboxed execution is an acceptable trade-off.
+const UNSANDBOXED_OK = DISABLE_EXPLICITLY || LOCAL_MODE || IN_CI;
+
+const IMAGE      = process.env.AEGIS_SANDBOX_IMAGE        ?? 'node:22-alpine';
+const MEMORY     = process.env.AEGIS_SANDBOX_MEMORY       ?? '512m';
+const CPUS       = process.env.AEGIS_SANDBOX_CPUS         ?? '1';
+const TIMEOUT_MS = parseInt(process.env.AEGIS_SANDBOX_TIMEOUT_MS ?? '60000');
+const TMPFS_SIZE = '67108864'; // 64 MB
 
 // ─── Docker availability probe ────────────────────────────────────────────────
 
@@ -75,14 +93,29 @@ function isDockerAvailable() {
 
 if (DISABLE_EXPLICITLY) {
   console.warn(
-    '[sandbox] ⚠️  AEGIS_SANDBOX_DISABLE=true — unsandboxed execution ENABLED. ' +
+    '[sandbox] ⚠️  AEGIS_SANDBOX_DISABLE=true — unsandboxed execution ENABLED (legacy flag). ' +
+    'Prefer AEGIS_SANDBOX_MODE=local for new configurations. ' +
     'Patches run directly on the host. NEVER use this setting in production.'
+  );
+} else if (LOCAL_MODE) {
+  console.warn(
+    '[sandbox] ⚠️  AEGIS_SANDBOX_MODE=local — unsandboxed execution ENABLED. ' +
+    'Patches run directly on the host. For local dev only; NEVER use in production.'
+  );
+} else if (IN_CI && !isDockerAvailable()) {
+  console.warn(
+    '[sandbox] ⚠️  CI=true detected and Docker is unavailable — falling back to ' +
+    'unsandboxed execution. Patches run directly on the CI host. ' +
+    'For full isolation in CI, configure Docker-in-Docker (dind).'
   );
 } else if (!isDockerAvailable()) {
   console.error(
-    '[sandbox] ✖  Docker is not available and AEGIS_SANDBOX_DISABLE is not set. ' +
+    '[sandbox] ✖  Docker is not available and no unsandboxed fallback is configured. ' +
     'Any call to runInSandbox() will FAIL rather than run unsandboxed. ' +
-    'Fix: start Docker, or set AEGIS_SANDBOX_DISABLE=true for local dev only.'
+    'Fix options:\n' +
+    '  • Start Docker (recommended for production)\n' +
+    '  • Set AEGIS_SANDBOX_MODE=local in .env (local dev without Docker)\n' +
+    '  • CI environments are detected automatically via CI=true'
   );
 }
 
@@ -92,13 +125,9 @@ if (DISABLE_EXPLICITLY) {
  * runInSandbox(cmd, cwd, projectRoot)
  *
  * Enforcement rules (evaluated in order):
- *   1. Docker available                         → runDocker()   ✅ sandboxed
- *   2. Docker unavailable + DISABLE_EXPLICITLY  → runDirect()   ⚠️  warned
- *   3. Docker unavailable + no explicit opt-in  → hard fail     ✖  blocked
- *
- * Rule 3 is the fix: previously this case silently fell through to runDirect().
- * Now it returns a failure result so the worker rolls back the step cleanly
- * rather than executing untrusted code on the host.
+ *   1. Docker available                  → runDocker()   ✅ sandboxed
+ *   2. Docker unavailable + UNSANDBOXED_OK → runDirect() ⚠️  warned
+ *   3. Docker unavailable + no opt-in    → hard fail     ✖  blocked
  *
  * @param {string} cmd         - Shell command to run
  * @param {string} cwd         - Absolute path to the tenant worktree on the host
@@ -113,22 +142,25 @@ export function runInSandbox(cmd, cwd, projectRoot) {
     return runDocker(cmd, cwd, projectRoot);
   }
 
-  // ── Rule 2: No Docker, but operator explicitly opted out of sandboxing ───
-  if (DISABLE_EXPLICITLY) {
+  // ── Rule 2: No Docker, but a recognised fallback is active ───────────────
+  if (UNSANDBOXED_OK) {
     return runDirect(cmd, cwd);
   }
 
   // ── Rule 3: No Docker, no explicit opt-in — hard fail ───────────────────
-  // This is the enforcement fix. Returning { success: false } causes the
-  // worker's review pipeline to reject the patch and trigger a retry or DLQ
-  // routing — the same path as a lint failure. No host code execution occurs.
+  // Returning { success: false } causes the worker's review pipeline to reject
+  // the patch and trigger a retry or DLQ routing — no host code execution occurs.
   return {
     success: false,
     output:
-      '[sandbox] Execution blocked: Docker is not available and ' +
-      'AEGIS_SANDBOX_DISABLE=true has not been set.\n' +
-      'To fix: start Docker (recommended), or set AEGIS_SANDBOX_DISABLE=true ' +
-      'in .env for local dev only. Never set AEGIS_SANDBOX_DISABLE=true in production.',
+      '[sandbox] Execution blocked: Docker is not available and no unsandboxed ' +
+      'fallback is configured.\n\n' +
+      'Fix options:\n' +
+      '  • Start Docker (recommended for production)\n' +
+      '  • Set AEGIS_SANDBOX_MODE=local in .env  (local dev without Docker)\n' +
+      '  • CI pipelines are detected automatically via the CI=true env var\n' +
+      '    (GitHub Actions, GitLab CI, CircleCI, Travis CI, Buildkite, etc.)\n\n' +
+      'Never set AEGIS_SANDBOX_MODE=local or AEGIS_SANDBOX_DISABLE=true in production.',
   };
 }
 
@@ -191,7 +223,7 @@ function runDocker(cmd, cwd, projectRoot) {
 }
 
 // ─── Direct (unsandboxed) fallback ────────────────────────────────────────────
-// Only reachable when AEGIS_SANDBOX_DISABLE=true is explicitly set (Rule 2).
+// Only reachable when UNSANDBOXED_OK is true (Rules 2).
 
 function runDirect(cmd, cwd) {
   try {
@@ -219,30 +251,53 @@ function runDirect(cmd, cwd) {
  * getSandboxCapabilities()
  *
  * Returns a structured object for the /health endpoint.
- * The new `enforced` field tells operators whether the hard-fail rule is active:
- *   enforced: true  → Docker absent without opt-in will block execution (safe)
- *   enforced: false → either Docker is up (safe) or DISABLE_EXPLICITLY (warned)
  *
- * @returns {{ enabled: boolean, enforced: boolean, docker: boolean, image: string, warnings: string[] }}
+ * Fields:
+ *   enabled   — will execution proceed at all (Docker up, or unsandboxed fallback active)?
+ *   enforced  — is the hard-fail rule active? true = Docker absent with no opt-in
+ *   docker    — is Docker currently reachable?
+ *   mode      — 'docker' | 'local' | 'ci' | 'disabled' | 'blocked'
+ *   image     — configured Docker image (when mode === 'docker')
+ *   warnings  — human-readable strings for ops dashboards
+ *
+ * @returns {{ enabled: boolean, enforced: boolean, docker: boolean, mode: string, image: string, warnings: string[] }}
  */
 export function getSandboxCapabilities() {
   const docker   = isDockerAvailable();
-  const enabled  = docker || DISABLE_EXPLICITLY;  // will execution proceed at all?
-  const enforced = !docker && !DISABLE_EXPLICITLY; // is the hard-fail rule active?
+  const enabled  = docker || UNSANDBOXED_OK;
+  const enforced = !docker && !UNSANDBOXED_OK;
   const warnings = [];
 
-  if (DISABLE_EXPLICITLY) {
+  let mode;
+  if (docker) {
+    mode = 'docker';
+  } else if (LOCAL_MODE) {
+    mode = 'local';
     warnings.push(
-      'AEGIS_SANDBOX_DISABLE=true — all patch execution runs unsandboxed on the host. ' +
+      'AEGIS_SANDBOX_MODE=local — all patch execution runs unsandboxed on the host. ' +
       'A malicious patch can read host files and environment variables.'
     );
-  } else if (!docker) {
+  } else if (DISABLE_EXPLICITLY) {
+    mode = 'disabled';
+    warnings.push(
+      'AEGIS_SANDBOX_DISABLE=true — all patch execution runs unsandboxed on the host (legacy flag). ' +
+      'A malicious patch can read host files and environment variables. ' +
+      'Prefer AEGIS_SANDBOX_MODE=local for new configurations.'
+    );
+  } else if (IN_CI) {
+    mode = 'ci';
+    warnings.push(
+      'CI=true detected without Docker — patch execution runs unsandboxed on the CI host. ' +
+      'For full isolation, configure Docker-in-Docker (dind) in your pipeline.'
+    );
+  } else {
+    mode = 'blocked';
     warnings.push(
       'Docker is not available — runInSandbox() will BLOCK execution rather than ' +
       'run unsandboxed. Start Docker to restore normal operation, or set ' +
-      'AEGIS_SANDBOX_DISABLE=true for local dev only.'
+      'AEGIS_SANDBOX_MODE=local for local dev only.'
     );
   }
 
-  return { enabled, enforced, docker, image: IMAGE, memory: MEMORY, cpus: CPUS, warnings };
+  return { enabled, enforced, docker, mode, image: IMAGE, memory: MEMORY, cpus: CPUS, warnings };
 }
