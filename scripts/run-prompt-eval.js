@@ -18,6 +18,23 @@
  *   REDIS_URL          (optional) — defaults to redis://localhost:6379
  */
 
+// ── Pre-flight: check required env vars before importing anything ─────────────
+// Catching this here (rather than deep inside the SDK on the first API call)
+// gives operators an immediately actionable error message.
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error(
+    '[prompt-eval] ✖  ANTHROPIC_API_KEY is not set — cannot call the Claude API.\n\n' +
+    '  Local dev:\n' +
+    '    Add ANTHROPIC_API_KEY=sk-ant-... to your .env file\n\n' +
+    '  GitHub Actions (CI):\n' +
+    '    1. Go to your repo → Settings → Secrets and variables → Actions\n' +
+    '    2. Click "New repository secret"\n' +
+    '    3. Name: ANTHROPIC_API_KEY   Value: sk-ant-<your-key>\n' +
+    '    4. The ci.yml workflow already reads it via ${{ secrets.ANTHROPIC_API_KEY }}\n'
+  );
+  process.exit(2);
+}
+
 import { evalAll } from '../engine/prompt-eval.js';
 
 async function main() {
