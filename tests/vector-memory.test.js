@@ -95,7 +95,7 @@ beforeEach(() => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('storeMemory() — when embeddings are unavailable', () => {
-  it('returns null without calling redis pipeline when OPENAI_API_KEY is absent', async () => {
+  it('throws with code EMBEDDINGS_UNAVAILABLE (not a silent null) when OPENAI_API_KEY is absent', async () => {
     const saved = process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_API_KEY;
 
@@ -103,26 +103,31 @@ describe('storeMemory() — when embeddings are unavailable', () => {
     vi.resetModules();
     const { storeMemory: store } = await import('../engine/vector-memory.js');
 
-    const result = await store('some task', '{}');
-    expect(result).toBeNull();
+    await expect(store('some task', '{}')).rejects.toMatchObject({
+      code: 'EMBEDDINGS_UNAVAILABLE',
+      message: expect.stringContaining('OPENAI_API_KEY'),
+    });
 
     if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 2. searchMemory() — returns empty when no embedding available
+// 2. searchMemory() — throws when no embedding available
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('searchMemory() — no-op when embeddings unavailable', () => {
-  it('returns an empty array when OPENAI_API_KEY is absent', async () => {
+describe('searchMemory() — throws when embeddings unavailable', () => {
+  it('throws with code EMBEDDINGS_UNAVAILABLE (not a silent []) when OPENAI_API_KEY is absent', async () => {
     const saved = process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_API_KEY;
 
     vi.resetModules();
     const { searchMemory: search } = await import('../engine/vector-memory.js');
-    const results = await search('fix the bug', 3);
-    expect(results).toEqual([]);
+
+    await expect(search('fix the bug', 3)).rejects.toMatchObject({
+      code: 'EMBEDDINGS_UNAVAILABLE',
+      message: expect.stringContaining('OPENAI_API_KEY'),
+    });
 
     if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
   });
@@ -235,20 +240,67 @@ describe('getVectorCapabilities()', () => {
     expect(caps.warnings.some(w => /OPENAI_API_KEY/i.test(w))).toBe(true);
   });
 
-  it('embeddings=false when either openai or redisSearch is false', async () => {
+  it('embeddings=true even when redisSearch=false (HSCAN path still uses embeddings)', async () => {
     vi.resetModules();
-    delete process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-test';
 
     vi.doMock('ioredis', () => ({
       default: vi.fn(() => ({
         ...redisMock,
-        call: vi.fn(async () => []),
+        call: vi.fn(async (cmd) => {
+          if (cmd === 'FT._LIST') throw new Error('ERR unknown command `FT._LIST`');
+          return [];
+        }),
       })),
     }));
 
     const { getVectorCapabilities: getCaps } = await import('../engine/vector-memory.js');
     const caps = await getCaps();
-    expect(caps.embeddings).toBe(false);
+    // embeddings depends only on the OpenAI client, not on Redis Stack
+    expect(caps.embeddings).toBe(true);
+    expect(caps.redisSearch).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. EMBEDDINGS_UNAVAILABLE error is distinguishable at the call-site
+// ═══════════════════════════════════════════════════════════════════════════════
+// Callers (e.g. agent-runner) should be able to catch this specific code and
+// choose to degrade gracefully (skip memory context) rather than crash the job.
+
+describe('EMBEDDINGS_UNAVAILABLE error code', () => {
+  it('storeMemory error has err.code === "EMBEDDINGS_UNAVAILABLE"', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    vi.resetModules();
+    const { storeMemory: store } = await import('../engine/vector-memory.js');
+
+    let caught;
+    try {
+      await store('task', '{}');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught.code).toBe('EMBEDDINGS_UNAVAILABLE');
+    if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
+  });
+
+  it('searchMemory error has err.code === "EMBEDDINGS_UNAVAILABLE"', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    vi.resetModules();
+    const { searchMemory: search } = await import('../engine/vector-memory.js');
+
+    let caught;
+    try {
+      await search('query', 3);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect(caught.code).toBe('EMBEDDINGS_UNAVAILABLE');
+    if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
   });
 });
 
@@ -257,11 +309,15 @@ describe('getVectorCapabilities()', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('tenant validation', () => {
-  it('storeMemory throws for an invalid tenantId', async () => {
+  it('storeMemory throws for an invalid tenantId (assertTenantId fires before embed)', async () => {
+    // With OPENAI_API_KEY present, the assertTenantId guard fires synchronously
+    // before we ever reach embed(); the error is NOT EMBEDDINGS_UNAVAILABLE.
+    process.env.OPENAI_API_KEY = 'sk-test';
     await expect(storeMemory('task', '{}', '')).rejects.toThrow();
   });
 
   it('searchMemory throws for an invalid tenantId', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
     await expect(searchMemory('query', 3, '')).rejects.toThrow();
   });
 
