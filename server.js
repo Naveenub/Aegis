@@ -52,34 +52,16 @@ import { runSystem }                          from './engine/orchestrator.js';
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
-import {
-
-  getWorkflowStatus,
-  listWorkflows,
-  resumeWorkflow,
-  cancelWorkflow,
-  getReviewQueue,
-  resolveReview,
-  rewindStep,
-  getRewindHistory,
-} from './engine/workflow-store.js';
+import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, rewindStep, getRewindHistory } from './engine/workflow-store.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import {
-  listTenants,
-  getTenant,
-  registerTenant,
-  seedTenantsFromEnv,
-} from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
+import { webhookRouter }                     from './engine/webhook-receiver.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
-import {
-  requireApiKey,
-  optionalApiKey,
-  assertTenantAccess,
-} from './middleware/auth.js';
+import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
 import { taskRateLimiter } from './middleware/rate-limit.js';
 
 // ─── Dashboard HTML (read once at startup) ────────────────────────────────────
@@ -735,6 +717,15 @@ app.get('/events', optionalApiKey, (req, res) => {
     clearInterval(pingInterval);
   });
 });
+
+// ─── Inbound webhooks (GitHub / GitLab → trigger workflows) ──────────────────
+    //
+    // POST /webhooks/github  — receives GitHub push + pull_request events
+    // POST /webhooks/gitlab  — receives GitLab Push Hook + Merge Request Hook events
+    //
+    // No API-key auth: webhook requests are authenticated via HMAC signature
+    // (GitHub) or a shared secret token (GitLab) inside webhookRouter itself.
+    app.use('/webhooks', webhookRouter);
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 
