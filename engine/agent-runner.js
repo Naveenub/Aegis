@@ -8,20 +8,28 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Fail fast with a clear message rather than letting the Anthropic SDK emit a
-// cryptic "Could not resolve authentication method" error on the first API call.
-// In CI this key must be added as a repository secret (Settings → Secrets →
-// Actions → New repository secret, name: ANTHROPIC_API_KEY).
-if (!process.env.ANTHROPIC_API_KEY) {
-  throw new Error(
-    '[agent-runner] ANTHROPIC_API_KEY is not set.\n' +
-    '  • Local:  add ANTHROPIC_API_KEY=sk-ant-... to your .env file\n' +
-    '  • CI/CD:  add ANTHROPIC_API_KEY as a GitHub Actions repository secret\n' +
-    '            (Settings → Secrets and variables → Actions → New repository secret)'
-  );
-}
+// ── Lazy Anthropic client ─────────────────────────────────────────────────────
+// The client is constructed on first use rather than at module load time so
+// that:
+//   • Unit tests can import agent-runner without ANTHROPIC_API_KEY being set
+//     (they mock the @anthropic-ai/sdk constructor, not the env var).
+//   • The missing-key error fires once, at the call site, with a clear message
+//     instead of a cryptic SDK auth error buried in a stack trace.
+let _client = null;
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+function getClient() {
+  if (_client) return _client;
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      '[agent-runner] ANTHROPIC_API_KEY is not set.\n' +
+      '  Local:  add ANTHROPIC_API_KEY=sk-ant-... to your .env file\n' +
+      '  CI/CD:  add ANTHROPIC_API_KEY as a GitHub Actions repository secret\n' +
+      '          (Settings -> Secrets and variables -> Actions -> New repository secret)'
+    );
+  }
+  _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return _client;
+}
 
 // Agents that must emit a PATCH block — enforce JSON output format in system prompt
 const PATCH_AGENTS = new Set([
@@ -221,7 +229,7 @@ export async function runAgent(
     .join('\n\n');
 
   // ── 5. Call the API ──────────────────────────────────────────────────────
-  const response = await client.messages.create({
+  const response = await getClient().messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8192,
     system: systemPrompt,
