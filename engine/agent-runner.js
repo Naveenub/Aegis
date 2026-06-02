@@ -8,6 +8,19 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Fail fast with a clear message rather than letting the Anthropic SDK emit a
+// cryptic "Could not resolve authentication method" error on the first API call.
+// In CI this key must be added as a repository secret (Settings → Secrets →
+// Actions → New repository secret, name: ANTHROPIC_API_KEY).
+if (!process.env.ANTHROPIC_API_KEY) {
+  throw new Error(
+    '[agent-runner] ANTHROPIC_API_KEY is not set.\n' +
+    '  • Local:  add ANTHROPIC_API_KEY=sk-ant-... to your .env file\n' +
+    '  • CI/CD:  add ANTHROPIC_API_KEY as a GitHub Actions repository secret\n' +
+    '            (Settings → Secrets and variables → Actions → New repository secret)'
+  );
+}
+
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Agents that must emit a PATCH block — enforce JSON output format in system prompt
@@ -172,20 +185,7 @@ export async function runAgent(
   ].join('\n');
 
   // ── 4. Build user message ────────────────────────────────────────────────
-  // searchMemory returns [] when embeddings are unavailable (OPENAI_API_KEY
-  // absent). We catch any unexpected error here too so a transient Redis or
-  // network failure never blocks the agent from running — past-fix context
-  // is useful but not required for correctness.
-  let memory = [];
-  try {
-    memory = await searchMemory(task, 3, tenantId);
-  } catch (err) {
-    // EMBEDDINGS_UNAVAILABLE is expected in environments without OPENAI_API_KEY
-    // (e.g. CI prompt-eval). Any other error is surfaced as a warning.
-    if (err.code !== 'EMBEDDINGS_UNAVAILABLE') {
-      console.warn('[agent-runner] searchMemory failed — running without past-fix context:', err.message);
-    }
-  }
+  const memory = await searchMemory(task, 3, tenantId);
   const memorySection =
     memory.length > 0
       ? [
