@@ -35,6 +35,11 @@ jobs:
         run: npm run lint
 
       - name: Unit tests
+        # GitHub Actions exports CI=true automatically. sandbox.js detects this
+        # and falls back to unsandboxed direct execution when Docker is unavailable,
+        # so no AEGIS_SANDBOX_MODE=local or AEGIS_SANDBOX_DISABLE=true is needed.
+        # To enable full Docker-in-Docker sandboxing, add a `docker` service above
+        # and remove this comment — sandbox.js will use Docker automatically.
         run: npm test
 
   # ── Agent persona eval gate ──────────────────────────────────────────────────
