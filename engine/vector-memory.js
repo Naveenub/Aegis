@@ -440,19 +440,18 @@ export async function logVectorCapabilityWarnings() {
   }
   if (!caps.embeddings) {
     console.error(
-      '[vector-memory] ✖  CRITICAL: Vector memory is DISABLED (no embeddings). ' +
-      'storeMemory() and searchMemory() will THROW (code: EMBEDDINGS_UNAVAILABLE). ' +
-      'Agents run without past-fix context until OPENAI_API_KEY is set. ' +
+      '[vector-memory] ✖  CRITICAL: Vector memory embeddings are DISABLED — OPENAI_API_KEY is not set. ' +
+      'storeMemory() will THROW (code: EMBEDDINGS_UNAVAILABLE); searchMemory() returns []. ' +
+      'Agents run without past-fix context until OPENAI_API_KEY is configured. ' +
       'See README § "Vector Memory (Redis Stack + OpenAI)" for setup instructions.'
     );
   } else if (!caps.redisSearch) {
     console.warn(
       '[vector-memory] ⚠  PERFORMANCE WARNING: Redis Stack (RediSearch) is NOT available. ' +
       'Semantic search is running in HSCAN brute-force mode (O(n) full-scan cosine). ' +
-      'This is acceptable up to ~10 k entries per tenant; beyond that it will become ' +
-      'a bottleneck under concurrent load.\n' +
-      '  ➜  Upgrade now:  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
-      '  ➜  Current entry count can be checked with:  redis-cli ZCARD aegis:memory:age:<tenantId>'
+      'Acceptable up to ~10 k entries per tenant; beyond that it will bottleneck under load.\n' +
+      '  ➜  Upgrade:  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
+      '  ➜  Check size:  redis-cli ZCARD aegis:memory:age:<tenantId>'
     );
   }
   return caps;
@@ -465,13 +464,11 @@ export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
 
   const vector = await embed(text);
   if (!vector) {
-    // embed() returns null only when OPENAI_API_KEY is absent or the openai
-    // package failed to load.  Silently dropping the write would mean the
-    // memory system accepts calls but stores nothing, making RAG permanently
-    // return empty results with no operator-visible signal.  Surface the
-    // degraded state as a typed error so callers (and operators) can see it.
+    // Silently dropping a write means the memory system accepts calls but stores
+    // nothing — RAG permanently returns empty results with no operator signal.
+    // Surface the misconfiguration as a typed error so it cannot go unnoticed.
     const err = new Error(
-      '[vector-memory] storeMemory: embeddings are unavailable ' +
+      '[vector-memory] storeMemory: embeddings unavailable ' +
       '(OPENAI_API_KEY not set or openai package missing). ' +
       'Memory was NOT stored. Set OPENAI_API_KEY to enable semantic memory.'
     );
@@ -608,18 +605,7 @@ export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
   const queryVec = await embed(query);
-  if (!queryVec) {
-    // Same reasoning as storeMemory: returning [] silently makes RAG look
-    // "working but empty" to every upstream caller.  A typed error lets
-    // callers decide whether to degrade gracefully or surface the problem.
-    const err = new Error(
-      '[vector-memory] searchMemory: embeddings are unavailable ' +
-      '(OPENAI_API_KEY not set or openai package missing). ' +
-      'Set OPENAI_API_KEY to enable semantic memory search.'
-    );
-    err.code = 'EMBEDDINGS_UNAVAILABLE';
-    throw err;
-  }
+  if (!queryVec) return [];
 
   const queryTerms = tokenise(query);
   const hasSearch  = await _probeRedisSearch();
