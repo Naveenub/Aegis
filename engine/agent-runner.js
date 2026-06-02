@@ -9,25 +9,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // ── Lazy Anthropic client ─────────────────────────────────────────────────────
-// The client is constructed on first use rather than at module load time so
-// that:
-//   • Unit tests can import agent-runner without ANTHROPIC_API_KEY being set
-//     (they mock the @anthropic-ai/sdk constructor, not the env var).
-//   • The missing-key error fires once, at the call site, with a clear message
-//     instead of a cryptic SDK auth error buried in a stack trace.
+// Constructed on first runAgent() call, not at module load time, so test files
+// can import this module without ANTHROPIC_API_KEY being set in the environment.
+// The operator-facing missing-key check lives in scripts/run-prompt-eval.js,
+// which exits with a clear message before this module is ever imported in CI.
 let _client = null;
-
 function getClient() {
-  if (_client) return _client;
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error(
-      '[agent-runner] ANTHROPIC_API_KEY is not set.\n' +
-      '  Local:  add ANTHROPIC_API_KEY=sk-ant-... to your .env file\n' +
-      '  CI/CD:  add ANTHROPIC_API_KEY as a GitHub Actions repository secret\n' +
-      '          (Settings -> Secrets and variables -> Actions -> New repository secret)'
-    );
-  }
-  _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (!_client) _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   return _client;
 }
 
