@@ -20,8 +20,12 @@
  * tests) that outlasted the agent-worker's own retry policy.
  *
  * Human triage happens via:
- *   GET  /review-queue                          → list all pending review items
- *   POST /review/:workflowId/:stepId/resolve    → mark resolved (retry | skip | escalate)
+ *   GET  /review-queue          → list all pending review items
+ *   POST /review-queue/resolve  → body: { workflowId, stepId, resolution, note?, tenantId? }
+ *                                  resolution values:
+ *                                    retrying  — reset step + re-queue at CRITICAL priority
+ *                                    skip      — mark step skipped; workflow continues
+ *                                    escalate  — cancel workflow; note is persisted
  */
 
 import { Worker } from 'bullmq';
