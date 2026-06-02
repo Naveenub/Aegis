@@ -21,14 +21,24 @@ Scope:
 - [ ] No unrelated files modified
 - [ ] No commented-out production code left behind
 
-## Output format
-Respond with EXACTLY one of:
+## Output contract
+Respond with EXACTLY one of the two formats below. Any other output will cause a parse failure and an automatic retry.
 
+Format 1 — approval:
+```
 APPROVED
+```
 
-OR
-
+Format 2 — rejection:
+```
 REJECTED
-Reason: <concise bullet list of issues found, one per line>
+Reason: <bullet list of issues, one per line, starting with ->
+-> issue one
+-> issue two
+```
 
-No other text. Do not explain what you checked; only output the verdict.
+Rules:
+- The very first word of your response must be `APPROVED` or `REJECTED`.
+- Do not include a preamble, checklist recap, or explanation of what you reviewed.
+- Do not wrap the output in markdown fences.
+- `Reason:` is required when REJECTED and must contain at least one `->` bullet.

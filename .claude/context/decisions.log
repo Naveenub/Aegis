@@ -1,6 +1,4 @@
-[2026-05-05T10:00:00Z] AGENT: debugger
-TASK: Fix login bug
-RESULT:
-Root cause: missing validation
-
-----------------------------------------
+# This file is no longer written by Aegis at runtime.
+# Agent memory is stored in Redis by engine/vector-memory.js (storeMemory).
+# Decisions are tracked per-workflow in Redis via engine/workflow-store.js.
+# This file is kept for backward compatibility with tools that check its existence.

@@ -40,7 +40,8 @@ When you identify a prompt quality issue, always include a concrete recommendati
 Do not recommend vague improvements like "improve the prompt". Every recommendation must be
 actionable by a developer in under 10 minutes.
 
-## Output format
+## Output contract
+Your response MUST follow this exact markdown structure. Do not add extra top-level sections.
 
 ## Summary
 <2–3 sentence executive summary>
@@ -56,4 +57,10 @@ actionable by a developer in under 10 minutes.
 3. ...
 
 ## Prompt change proposals
-<For each agent with eval failures, one block in the format above>
+<For each agent with eval failures, one block in the format above.>
+<If no prompt changes are needed, write: "No prompt changes required.">
+
+Rules:
+- The `## Summary` header must be the first line of your response.
+- Every section header must be present even if the content is "none".
+- Do not wrap the output in markdown fences.

@@ -25,3 +25,18 @@ Before the PATCH block, write a `Changes:` section listing each improvement as a
 - Simplified nested try/catch with `await Promise.allSettled`
 
 If no improvements are warranted, write `Changes: none` and emit `PATCH: null`.
+
+## Output contract
+You MUST end your response with a PATCH block in exactly this format:
+
+PATCH:
+{
+  "file": "relative/path/to/file.js",
+  "content": "FULL refactored file content — complete file, never a diff"
+}
+
+Rules:
+- `content` must be the complete, valid file ready to write to disk.
+- Do not truncate. Do not use "..." placeholders.
+- If no improvements are warranted, emit exactly: `PATCH: null`
+- The PATCH line must be the last thing in your response.

@@ -15,11 +15,16 @@ For each exported function or class:
 - Do NOT make real network calls or touch the real filesystem
 - Prefer `jest.spyOn` over full module mocks when only one method needs isolation
 
-## Output format
-Output the complete test file only. Start with imports. Use `describe` / `it` blocks.
-File should be saved alongside the source, e.g. for `engine/agent-runner.js` → `engine/agent-runner.test.js`.
-
 ## Style
 - Use `expect(...).toEqual(...)` for deep equality, `.toBe(...)` for primitives
 - Name each `it(...)` as a sentence: `it('throws when file path is outside cwd', ...)`
 - Keep each test focused on one behaviour — no multi-assertion mega tests
+
+## Output contract
+Output ONLY the complete test file content. No preamble, no commentary, no markdown fences.
+
+- Start with import statements.
+- Use `describe` / `it` blocks throughout.
+- File must be runnable as-is with `jest`.
+- Save location: for `engine/agent-runner.js` → output to `engine/agent-runner.test.js` (same directory, `.test.js` suffix).
+- The very first line of your response must be an `import` statement.
