@@ -63,8 +63,22 @@ jobs:
 
       - run: npm install
 
+      - name: Check required secrets
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set."
+            echo ""
+            echo "Add it at: Settings → Secrets and variables → Actions → New repository secret"
+            echo "  Name:  ANTHROPIC_API_KEY"
+            echo "  Value: sk-ant-<your-key>"
+            exit 1
+          fi
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
       - name: Run agent prompt eval
         run: npm run eval
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           REDIS_URL: redis://localhost:6379
