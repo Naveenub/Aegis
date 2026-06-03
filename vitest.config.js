@@ -1,20 +1,14 @@
 /**
  * vitest.config.js
  *
- * Two projects:
+ * Shared Vitest configuration.  Project definitions (unit / system) live in
+ * vitest.workspace.js, which Vitest 1.x picks up automatically when running
+ * `vitest run --project <name>`.
  *
- *   unit        — fast mocked tests (existing suite), runs on every `npm test`
- *                 excludes tests/integration/** entirely
- *
- *   system      — real-infrastructure tests (Redis + git + filesystem)
- *                 lives in tests/integration/system/**
- *                 run via:  npm run test:system
- *                 or:       vitest run --project system
- *
- * Coverage is collected only over the unit project so mocked tests continue
- * to drive the thresholds.  System tests exercise the full stack and are
- * intentionally excluded from coverage (they can't meaningfully report on
- * mocked paths).
+ * This file is kept for any global overrides (e.g. global setup files) that
+ * apply across all projects.  Currently there are none, so it simply re-exports
+ * the defaults so that tools that look for vitest.config.js still find a valid
+ * configuration file.
  */
 
 import { defineConfig } from 'vitest/config';
@@ -22,53 +16,5 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-
-    projects: [
-      // ── Unit / mocked tests ────────────────────────────────────────────────
-      {
-        name: 'unit',
-        test: {
-          include: ['tests/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts}'],
-          exclude: [
-            'node_modules',
-            'dist',
-            '.git',
-            'tests/integration/system/**',
-          ],
-          coverage: {
-            provider: 'v8',
-            include: ['engine/**/*.js', 'middleware/**/*.js'],
-            exclude: [
-              'engine/dashboard.html',
-              'engine/sandbox.js',
-              'engine/git-remote.js',
-              'engine/logger.js',
-            ],
-            reporter: ['text', 'lcov', 'html'],
-            reportsDirectory: './coverage',
-            thresholds: {
-              lines:      80,
-              functions:  80,
-              branches:   70,
-              statements: 80,
-            },
-            all: true,
-          },
-        },
-      },
-
-      // ── System / real-infrastructure tests ────────────────────────────────
-      {
-        name: 'system',
-        test: {
-          include: ['tests/integration/system/**/*.system.test.{js,ts}'],
-          // Longer timeout — real Redis + git operations are slower than mocks
-          testTimeout: 30000,
-          // No coverage: system tests hit real I/O and can't meaningfully
-          // measure which mocked paths were exercised.
-          coverage: { enabled: false },
-        },
-      },
-    ],
   },
 });
