@@ -118,8 +118,16 @@ function makeHandler({ repo, wts, tenant, patchContent, shouldTestPass }) {
     }
 
     // ── 6. Finalise (merge) ───────────────────────────────────────────────
+    // Merge must run from a worktree checked out on baseBranch, not from repo
+    // (which is on 'main').  Otherwise the merge advances 'main' and the base
+    // branch log never shows the merge commit.
+    const baseWorktreeDir = path.join(wts, tenant, '_base');
+    if (!fs.existsSync(baseWorktreeDir)) {
+      fs.mkdirSync(path.join(wts, tenant), { recursive: true });
+      git(['worktree', 'add', '--no-guess-remote', baseWorktreeDir, baseBranch], repo);
+    }
     execFileSync('git', ['merge', '--no-ff', '-m', `Aegis merge: ${workflowId}`, branch], {
-      cwd: repo, encoding: 'utf-8', stdio: 'pipe',
+      cwd: baseWorktreeDir, encoding: 'utf-8', stdio: 'pipe',
     });
 
     // ── 7. Remove worktree ────────────────────────────────────────────────
