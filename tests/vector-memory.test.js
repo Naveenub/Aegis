@@ -58,6 +58,37 @@ vi.mock('ioredis', () => ({
   default: vi.fn(() => redisMock),
 }));
 
+// ─── hnswlib-node mock ───────────────────────────────────────────────────────
+// Provide a lightweight in-memory HierarchicalNSW stub so tests run without
+// the native C++ addon.  The stub tracks addPoint calls and returns them on
+// searchKnn so _hnswSearch/storeMemory can be exercised without I/O.
+
+const _hnswPoints = new Map(); // label -> Float32Array
+let _hnswCounter = 0;
+
+const hnswMockIndex = {
+  getCurrentCount: vi.fn(() => _hnswCounter),
+  getMaxElements:  vi.fn(() => 100000),
+  initIndex:       vi.fn(),
+  readIndex:       vi.fn(async () => {}),
+  writeIndex:      vi.fn(async () => {}),
+  setEf:           vi.fn(),
+  resizeIndex:     vi.fn(),
+  addPoint: vi.fn((vec, label) => {
+    _hnswPoints.set(label, vec);
+    _hnswCounter++;
+  }),
+  searchKnn: vi.fn((vec, k) => {
+    // Return the k most-recently added labels with distance 0
+    const labels = [..._hnswPoints.keys()].slice(-k);
+    return { neighbors: labels, distances: labels.map(() => 0) };
+  }),
+};
+
+vi.mock('hnswlib-node', () => ({
+  HierarchicalNSW: vi.fn(() => hnswMockIndex),
+}));
+
 // ─── OpenAI mock ──────────────────────────────────────────────────────────────
 // Controlled via process.env.OPENAI_API_KEY + the dynamic import inside embed().
 
@@ -314,5 +345,37 @@ describe('tenant validation', () => {
 
   it('evictExpiredMemory throws for an invalid tenantId', async () => {
     await expect(evictExpiredMemory('')).rejects.toThrow();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. getVectorCapabilities() — hnswFallback field
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('getVectorCapabilities() — hnswFallback field', () => {
+  it('returns hnswFallback=true when hnswlib-node is available', async () => {
+    vi.resetModules();
+    process.env.OPENAI_API_KEY = 'sk-test';
+
+    vi.doMock('ioredis', () => ({ default: vi.fn(() => ({ ...redisMock, call: vi.fn(async () => []) })) }));
+    vi.doMock('hnswlib-node', () => ({ HierarchicalNSW: vi.fn(() => hnswMockIndex) }));
+
+    const { getVectorCapabilities: getCaps } = await import('../engine/vector-memory.js');
+    const caps = await getCaps();
+    expect(caps).toHaveProperty('hnswFallback');
+    expect(caps.hnswFallback).toBe(true);
+  });
+
+  it('returns hnswFallback=false when hnswlib-node is not installed', async () => {
+    vi.resetModules();
+    process.env.OPENAI_API_KEY = 'sk-test';
+
+    vi.doMock('ioredis', () => ({ default: vi.fn(() => ({ ...redisMock, call: vi.fn(async () => []) })) }));
+    // Simulate missing native addon
+    vi.doMock('hnswlib-node', () => { throw new Error('Cannot find module'); });
+
+    const { getVectorCapabilities: getCaps } = await import('../engine/vector-memory.js');
+    const caps = await getCaps();
+    expect(caps.hnswFallback).toBe(false);
   });
 });
