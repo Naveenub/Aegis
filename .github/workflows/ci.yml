@@ -110,21 +110,15 @@ jobs:
 
       - run: npm install
 
-      - name: Check required secrets
+      - name: Run agent prompt eval
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::error::ANTHROPIC_API_KEY secret is not set."
-            echo ""
-            echo "Add it at: Settings → Secrets and variables → Actions → New repository secret"
-            echo "  Name:  ANTHROPIC_API_KEY"
-            echo "  Value: sk-ant-<your-key>"
-            exit 1
+            echo "::warning::ANTHROPIC_API_KEY is not set — skipping prompt eval."
+            echo "To enable: Settings → Secrets and variables → Actions → New repository secret"
+            echo "  Name:  ANTHROPIC_API_KEY  |  Value: sk-ant-<your-key>"
+            exit 0
           fi
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-      - name: Run agent prompt eval
-        run: npm run eval
+          npm run eval
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
