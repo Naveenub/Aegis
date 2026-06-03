@@ -34,13 +34,25 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit tests
+      - name: Unit tests + coverage
         # GitHub Actions exports CI=true automatically. sandbox.js detects this
         # and falls back to unsandboxed direct execution when Docker is unavailable,
         # so no AEGIS_SANDBOX_MODE=local or AEGIS_SANDBOX_DISABLE=true is needed.
         # To enable full Docker-in-Docker sandboxing, add a `docker` service above
         # and remove this comment — sandbox.js will use Docker automatically.
-        run: npm test
+        #
+        # --coverage triggers vitest.config.js thresholds (lines/functions/branches/
+        # statements). The step exits non-zero — failing CI — if any threshold is
+        # breached, so 0 % coverage can never silently pass.
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
 
   # ── Agent persona eval gate ──────────────────────────────────────────────────
   prompt-eval:
