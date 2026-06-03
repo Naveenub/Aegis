@@ -27,6 +27,7 @@
 
 import IORedis from 'ioredis';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
+import { assertJobQuota, trackJobQueued, trackJobDone } from './tenant-quota.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined);
 
@@ -52,6 +53,9 @@ function indexKey(tenantId) {
 export async function createJob(jobId, step, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
+  // Enforce per-tenant job quota before writing anything
+  await assertJobQuota(tenantId);
+
   const createdAt = Date.now();
   const record = {
     jobId,
@@ -71,6 +75,9 @@ export async function createJob(jobId, step, tenantId = DEFAULT_TENANT) {
   // Track in a sorted set ordered by creation time for listJobs()
   pipeline.zadd(indexKey(tenantId), createdAt, jobId);
   await pipeline.exec();
+
+  // Track usage for quota enforcement and billing
+  await trackJobQueued(tenantId);
 }
 
 /**
@@ -91,6 +98,12 @@ export async function updateJob(jobId, updates, tenantId = DEFAULT_TENANT) {
   fields.updatedAt = Date.now().toString();
 
   await redis.hset(jobKey(tenantId, jobId), fields);
+
+  // Decrement queued-jobs counter when the job reaches a terminal state
+  const terminalStatuses = new Set(['completed', 'failed', 'skipped']);
+  if (updates.status && terminalStatuses.has(updates.status)) {
+    await trackJobDone(tenantId);
+  }
 }
 
 /**
