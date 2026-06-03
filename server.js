@@ -60,8 +60,7 @@ import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './en
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
-import { QuotaExceededError, usageSummary, setQuota } from './engine/tenant-quota.js';
-import { TenantMismatchError }               from './engine/workflow-store.js';
+import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
@@ -130,9 +129,6 @@ app.post(
       });
       res.status(202).json({ workflowId, status: 'submitted' });
     } catch (err) {
-      if (err instanceof QuotaExceededError) {
-        return res.status(429).json({ error: err.message, code: err.code, meta: err.meta });
-      }
       console.error('[POST /task]', err);
       res.status(500).json({ error: err.message });
     }
@@ -162,9 +158,6 @@ app.post(
       await resumeWorkflow(workflowId, tenantId ?? req.resolvedTenantId);
       res.json({ ok: true, workflowId });
     } catch (err) {
-      if (err instanceof TenantMismatchError) {
-        return res.status(403).json({ error: err.message });
-      }
       console.error('[POST /resume]', err);
       res.status(500).json({ error: err.message });
     }
@@ -188,12 +181,9 @@ app.post(
     }
 
     try {
-      await cancelWorkflow(workflowId, reason ?? 'user request', req.resolvedTenantId);
+      await cancelWorkflow(workflowId, reason ?? 'user request');
       res.json({ ok: true, workflowId });
     } catch (err) {
-      if (err instanceof TenantMismatchError) {
-        return res.status(403).json({ error: err.message });
-      }
       console.error('[POST /cancel]', err);
       res.status(500).json({ error: err.message });
     }
@@ -236,15 +226,12 @@ app.get(
  */
 app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
   try {
-    const workflow = await getWorkflowStatus(req.params.workflowId, req.resolvedTenantId);
+    const workflow = await getWorkflowStatus(req.params.workflowId);
     if (!workflow) {
       return res.status(404).json({ error: `Workflow ${req.params.workflowId} not found.` });
     }
     res.json(workflow);
   } catch (err) {
-    if (err instanceof TenantMismatchError) {
-      return res.status(403).json({ error: err.message });
-    }
     console.error('[GET /workflows/:workflowId]', err);
     res.status(500).json({ error: err.message });
   }
@@ -302,7 +289,7 @@ app.post(
         }
       }
 
-      const result = await rewindStep(workflowId, stepId, { commitHash, reason, tenantId: tenant });
+      const result = await rewindStep(workflowId, stepId, { commitHash, reason });
 
       if (!result.ok) {
         const statusCode = result.reason?.includes('not found') ? 404 : 400;
@@ -324,12 +311,9 @@ app.post(
  */
 app.get('/workflows/:workflowId/rewind-history', requireApiKey, async (req, res) => {
   try {
-    const history = await getRewindHistory(req.params.workflowId, req.resolvedTenantId);
+    const history = await getRewindHistory(req.params.workflowId);
     res.json({ history });
   } catch (err) {
-    if (err instanceof TenantMismatchError) {
-      return res.status(403).json({ error: err.message });
-    }
     console.error('[GET /workflows/:workflowId/rewind-history]', err);
     res.status(500).json({ error: err.message });
   }
@@ -586,8 +570,16 @@ app.get('/dashboard', requireApiKey, (_req, res) => {
   res.send(dashboardHtml);
 });
 
-// ─── Tenant management ────────────────────────────────────────────────────────
+// ─── Anomaly detection ────────────────────────────────────────────────────────
 
+/**
+ * GET /anomalies
+ * Return the most recent anomaly alerts detected by the in-process detector.
+ * Newest first. Optional query param: ?limit=<n> (default 50, max 200).
+ *
+ * Response: { anomalies: [...], count: number }
+ */
+// ─── Tenant management ────────────────────────────────────────────────────────
 /**
  * GET /tenants
  * List all registered tenants.
@@ -698,57 +690,6 @@ app.delete('/tenants/:id/keys/:keyId', requireApiKey, async (req, res) => {
   }
 });
 
-// ─── Tenant quota management ──────────────────────────────────────────────────
-
-/**
- * GET /tenants/:id/quota
- * Return current quota limits and live usage counters for a tenant.
- *
- * Returns: { tenantId, snapshot, daily, quota, recordedAt }
- */
-app.get('/tenants/:id/quota', requireApiKey, async (req, res) => {
-  if (!assertTenantAccess(req, req.params.id, res)) return;
-
-  try {
-    const summary = await usageSummary(req.params.id);
-    res.json(summary);
-  } catch (err) {
-    console.error('[GET /tenants/:id/quota]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * PUT /tenants/:id/quota
- * Update quota limits for a tenant.  Partial updates — only supplied fields change.
- *
- * Body: { maxActiveWorkflows?: number, maxDailyWorkflows?: number, maxQueuedJobs?: number }
- */
-app.put('/tenants/:id/quota', requireApiKey, async (req, res) => {
-  if (!assertTenantAccess(req, req.params.id, res)) return;
-
-  const { maxActiveWorkflows, maxDailyWorkflows, maxQueuedJobs } = req.body ?? {};
-  const limits = {};
-  if (maxActiveWorkflows != null) limits.maxActiveWorkflows = maxActiveWorkflows;
-  if (maxDailyWorkflows  != null) limits.maxDailyWorkflows  = maxDailyWorkflows;
-  if (maxQueuedJobs      != null) limits.maxQueuedJobs      = maxQueuedJobs;
-
-  if (Object.keys(limits).length === 0) {
-    return res.status(400).json({
-      error: 'Provide at least one of: maxActiveWorkflows, maxDailyWorkflows, maxQueuedJobs.',
-    });
-  }
-
-  try {
-    await setQuota(req.params.id, limits);
-    const summary = await usageSummary(req.params.id);
-    res.json(summary);
-  } catch (err) {
-    console.error('[PUT /tenants/:id/quota]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 
 // ─── SSE live-push stream ─────────────────────────────────────────────────────
 
@@ -849,6 +790,11 @@ async function start() {
   // Probe and log vector memory capability warnings at startup so operators
   // know immediately if OPENAI_API_KEY or Redis Stack is missing.
   await logVectorCapabilityWarnings();
+
+  // Start in-process anomaly detection loop.
+  // Evaluates metric rules every ANOMALY_INTERVAL_MS (default 60 s) and fires
+  // alerts to stderr + AEGIS_ALERT_WEBHOOK when thresholds are sustained.
+  startAnomalyDetector();
 
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);
