@@ -1,4 +1,17 @@
-import IORedis from 'ioredis';
+import IORedis    from 'ioredis';
+import path       from 'path';
+import { createRequire } from 'module';
+
+const _require = createRequire(import.meta.url);
+
+// Lazy-load hnswlib-node so the module still imports cleanly in environments
+// where the native addon has not been compiled (tests mock it out).
+let _hnswlib = null;
+async function getHnswlib() {
+  if (_hnswlib) return _hnswlib;
+  try { _hnswlib = _require('hnswlib-node'); } catch { _hnswlib = null; }
+  return _hnswlib;
+}
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
 // ─── OpenAI client — optional ─────────────────────────────────────────────────
@@ -21,6 +34,9 @@ async function getOpenAIClient() {
 const redis = new IORedis();
 
 const VECTOR_DIM = 1536;
+
+/** Directory where per-tenant HNSW index files are persisted. */
+const HNSW_INDEX_DIR = process.env.AEGIS_HNSW_DIR ?? '.aegis-hnsw';
 
 const MEMORY_TTL_MS = parseInt(process.env.AEGIS_MEMORY_TTL_DAYS ?? '30') * 24 * 60 * 60 * 1000;
 const REDIS_EXPIRE_S = Math.ceil(MEMORY_TTL_MS / 1000 * 1.1);
@@ -82,10 +98,10 @@ async function _probeRedisSearch() {
     _redisSearchAvailable = !isUnknown;
     if (!_redisSearchAvailable) {
       console.warn(
-        '[vector-memory] ⚠️  Redis Stack (RediSearch) is not available — ' +
-        'falling back to HSCAN-based brute-force cosine search.\n' +
-        '  Semantic search will work but is O(n) and does not scale beyond ~10 k entries.\n' +
-        '  Upgrade to Redis Stack for production:\n' +
+        '[vector-memory] ℹ️  Redis Stack (RediSearch) is not available — ' +
+        'using local HNSW index (hnswlib-node) as the ANN fallback.\n' +
+        '  Search is O(log n) and suitable for production. HNSW index is persisted to ' + HNSW_INDEX_DIR + '.\n' +
+        '  Upgrade to Redis Stack for faster multi-tenant queries at very large scale:\n' +
         '    docker run -p 6379:6379 redis/redis-stack-server:latest'
       );
     }
@@ -338,10 +354,179 @@ function cosineSimilarity(a, b) {
   return denom === 0 ? 0 : dot / denom;
 }
 
-// ─── HSCAN fallback search ────────────────────────────────────────────────────
-// When Redis Stack is absent, scan all hash keys for this tenant and rank them
-// in-process using cosine similarity + BM25 + recency.  This is O(n) and not
-// suitable for large corpora, but it keeps the system functional with plain Redis.
+// ─── HNSW fallback (hnswlib-node) ─────────────────────────────────────────────
+// When Redis Stack is absent we use a local HNSW index via hnswlib-node — an
+// O(log n) ANN structure that is production-suitable, unlike the old O(n) HSCAN
+// brute-force scan.
+//
+// Architecture
+// ────────────
+//   • One HierarchicalNSW index per tenant, keyed by tenantId.
+//   • The index stores *internal integer labels* (0-based counters) only — no
+//     text/patch/storedAt.  Those fields live in Redis hashes as before.
+//   • A companion Redis hash  aegis:memory:hnsw:labelmap:<tenantId>  maps each
+//     internal label → Redis hash key so we can fetch metadata after ANN search.
+//   • The index is persisted to HNSW_INDEX_DIR/<tenantId>.hnsw on every write
+//     and reloaded on first use, so it survives process restarts.
+//
+// Capacity
+// ────────
+//   Default max elements: 100 000 per tenant, configurable via
+//   AEGIS_HNSW_MAX_ELEMENTS.  Exceeding this triggers a resize (double capacity)
+//   with a single index.resizeIndex() call — no data loss.
+
+import { mkdirSync, existsSync } from 'fs';
+
+const HNSW_MAX_ELEMENTS = parseInt(process.env.AEGIS_HNSW_MAX_ELEMENTS ?? '100000');
+const HNSW_EF_CONSTRUCTION = parseInt(process.env.AEGIS_HNSW_EF_CONSTRUCTION ?? '200');
+const HNSW_M = parseInt(process.env.AEGIS_HNSW_M ?? '16');
+const HNSW_EF_SEARCH = parseInt(process.env.AEGIS_HNSW_EF_SEARCH ?? '50');
+
+/** In-memory HNSW index instances, keyed by tenantId. */
+const _hnswIndexes = new Map();
+/** Next label counter per tenant. */
+const _hnswLabelCounters = new Map();
+
+function hnswIndexPath(tenantId) {
+  return path.join(HNSW_INDEX_DIR, `${tenantId}.hnsw`);
+}
+
+function hnswLabelMapKey(tenantId) {
+  return `aegis:memory:hnsw:labelmap:${tenantId}`;
+}
+
+/**
+ * Get (or create + restore) the HNSW index for a tenant.
+ * Returns null if hnswlib-node is not installed.
+ */
+async function _getHnswIndex(tenantId) {
+  if (_hnswIndexes.has(tenantId)) return _hnswIndexes.get(tenantId);
+
+  const lib = await getHnswlib();
+  if (!lib) return null;
+
+  try { mkdirSync(HNSW_INDEX_DIR, { recursive: true }); } catch { /* ignore */ }
+
+  const index = new lib.HierarchicalNSW('cosine', VECTOR_DIM);
+  const savedPath = hnswIndexPath(tenantId);
+
+  if (existsSync(savedPath)) {
+    try {
+      await index.readIndex(savedPath, HNSW_MAX_ELEMENTS);
+    } catch (err) {
+      console.warn(`[vector-memory] HNSW index load failed for tenant "${tenantId}" — rebuilding:`, err.message);
+      index.initIndex(HNSW_MAX_ELEMENTS, HNSW_M, HNSW_EF_CONSTRUCTION);
+    }
+  } else {
+    index.initIndex(HNSW_MAX_ELEMENTS, HNSW_M, HNSW_EF_CONSTRUCTION);
+  }
+
+  index.setEf(HNSW_EF_SEARCH);
+
+  // Restore label counter from the size of the label map in Redis
+  try {
+    const count = await redis.hlen(hnswLabelMapKey(tenantId));
+    _hnswLabelCounters.set(tenantId, count);
+  } catch {
+    _hnswLabelCounters.set(tenantId, index.getCurrentCount());
+  }
+
+  _hnswIndexes.set(tenantId, index);
+  return index;
+}
+
+/**
+ * Add a vector to the HNSW index and persist.
+ * Returns the assigned label, or null if hnswlib-node is not available.
+ */
+async function _hnswAdd(tenantId, vector, redisKey) {
+  const index = await _getHnswIndex(tenantId);
+  if (!index) return null;
+
+  // Resize if at capacity
+  if (index.getCurrentCount() >= index.getMaxElements()) {
+    const newMax = index.getMaxElements() * 2;
+    index.resizeIndex(newMax);
+    console.log(`[vector-memory] HNSW index for tenant "${tenantId}" resized to ${newMax} elements`);
+  }
+
+  const label = _hnswLabelCounters.get(tenantId) ?? 0;
+  _hnswLabelCounters.set(tenantId, label + 1);
+
+  index.addPoint(vector, label);
+
+  // Persist label → redisKey mapping and index snapshot (non-blocking on error)
+  try {
+    await redis.hset(hnswLabelMapKey(tenantId), String(label), redisKey);
+    await index.writeIndex(hnswIndexPath(tenantId));
+  } catch (err) {
+    console.warn('[vector-memory] HNSW persist error:', err.message);
+  }
+
+  return label;
+}
+
+/**
+ * Search the HNSW index and return candidates with pre-computed cosine scores.
+ * Falls back to the old HSCAN brute-force if hnswlib-node is not installed
+ * (development/test environments without the native addon).
+ */
+async function _hnswSearch(tenantId, queryVec, topK) {
+  const index = await _getHnswIndex(tenantId);
+  if (!index) {
+    // hnswlib-node not installed — last-resort O(n) HSCAN (dev/test only)
+    console.warn('[vector-memory] hnswlib-node not available — using O(n) HSCAN fallback (install hnswlib-node for production)');
+    return _hscanSearch(tenantId, queryVec, topK);
+  }
+
+  const count = index.getCurrentCount();
+  if (count === 0) return [];
+
+  const k = Math.min(topK, count);
+  const { neighbors, distances } = index.searchKnn(queryVec, k);
+
+  if (!neighbors?.length) return [];
+
+  // Resolve labels → Redis keys
+  const labelMapKey = hnswLabelMapKey(tenantId);
+  const labelStrs = neighbors.map(String);
+  const redisKeys = await redis.hmget(labelMapKey, ...labelStrs);
+
+  const validPairs = neighbors
+    .map((label, i) => ({ label, distance: distances[i], redisKey: redisKeys[i] }))
+    .filter(p => p.redisKey);
+
+  if (!validPairs.length) return [];
+
+  // Batch-fetch metadata from Redis hashes
+  const pipe = redis.pipeline();
+  for (const { redisKey } of validPairs) pipe.hgetall(redisKey);
+  const results = await pipe.exec();
+
+  const candidates = [];
+  for (let i = 0; i < validPairs.length; i++) {
+    const fields = results[i]?.[1];
+    if (!fields?.storedAt) continue;
+
+    // hnswlib cosine space stores 1 - cosine_similarity as distance
+    const cosine = Math.max(0, 1 - (validPairs[i].distance ?? 1));
+
+    candidates.push({
+      text:     fields.text     ?? '',
+      patch:    fields.patch    ?? '',
+      storedAt: fields.storedAt ?? '0',
+      termFreq: fields.termFreq ?? '',
+      docLen:   fields.docLen   ?? '0',
+      cosine,
+    });
+  }
+
+  return candidates;
+}
+
+// ─── HSCAN brute-force (last-resort fallback, O(n)) ──────────────────────────
+// Only used when hnswlib-node is not installed (e.g. bare dev environment or
+// test runner without the native addon).  Not suitable for production.
 
 async function _hscanSearch(tenantId, queryVec, _topK) {
   const prefix = memoryPrefix(tenantId);
@@ -354,21 +539,15 @@ async function _hscanSearch(tenantId, queryVec, _topK) {
 
     if (!keys.length) continue;
 
-    // Fetch all fields for each matching key in parallel
     const fetched = await Promise.all(
       keys.map(async (key) => {
-        try {
-          return { key, fields: await redis.hgetall(key) };
-        } catch {
-          return null;
-        }
+        try { return { key, fields: await redis.hgetall(key) }; } catch { return null; }
       })
     );
 
     for (const hit of fetched) {
       if (!hit?.fields?.vector || !hit.fields.storedAt) continue;
 
-      // Deserialise the stored Float32 vector buffer back to a number array
       let storedVec;
       try {
         const buf = Buffer.isBuffer(hit.fields.vector)
@@ -376,9 +555,7 @@ async function _hscanSearch(tenantId, queryVec, _topK) {
           : Buffer.from(hit.fields.vector, 'binary');
         const fa = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
         storedVec = Array.from(fa);
-      } catch {
-        continue; // corrupt entry — skip
-      }
+      } catch { continue; }
 
       if (storedVec.length !== VECTOR_DIM) continue;
 
@@ -420,17 +597,24 @@ export async function getVectorCapabilities() {
 
   const redisSearch = await _probeRedisSearch();
   if (!redisSearch) {
+    const hnswAvail = !!(await getHnswlib());
     warnings.push(
-      'Redis Stack (RediSearch module) is not available — using HSCAN brute-force fallback. ' +
-      'Search is functional but O(n); upgrade to Redis Stack for production:\n' +
-      '  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
-      'Without Redis Stack, past-fix context is surfaced via full-scan cosine search.'
+      hnswAvail
+        ? 'Redis Stack (RediSearch module) is not available — using local HNSW index (hnswlib-node) as ANN fallback. ' +
+          'Search is O(log n) and production-suitable. HNSW index persisted to ' + HNSW_INDEX_DIR + '. ' +
+          'Upgrade to Redis Stack for multi-tenant queries at very large scale.'
+        : 'Redis Stack is not available AND hnswlib-node is not installed — falling back to O(n) HSCAN. ' +
+          'Install hnswlib-node for scalable vector search:\n' +
+          '  npm install hnswlib-node\n' +
+          'Or upgrade to Redis Stack:\n' +
+          '  docker run -p 6379:6379 redis/redis-stack-server:latest'
     );
   }
 
   const embeddings = openai; // embeddings depend only on the OpenAI client,
-                             // not on Redis Stack — HSCAN fallback still embeds
-  return { openai, redisSearch, embeddings, warnings };
+                             // not on Redis Stack — HNSW/HSCAN fallback still embeds
+  const hnswFallback = !!(await getHnswlib()); // true = HNSW available as fallback
+  return { openai, redisSearch, embeddings, hnswFallback, warnings };
 }
 
 export async function logVectorCapabilityWarnings() {
@@ -446,13 +630,21 @@ export async function logVectorCapabilityWarnings() {
       'See README § "Vector Memory (Redis Stack + OpenAI)" for setup instructions.'
     );
   } else if (!caps.redisSearch) {
-    console.warn(
-      '[vector-memory] ⚠  PERFORMANCE WARNING: Redis Stack (RediSearch) is NOT available. ' +
-      'Semantic search is running in HSCAN brute-force mode (O(n) full-scan cosine). ' +
-      'Acceptable up to ~10 k entries per tenant; beyond that it will bottleneck under load.\n' +
-      '  ➜  Upgrade:  docker run -p 6379:6379 redis/redis-stack-server:latest\n' +
-      '  ➜  Check size:  redis-cli ZCARD aegis:memory:age:<tenantId>'
-    );
+    const hnswAvail = !!(await getHnswlib());
+    if (hnswAvail) {
+      console.info(
+        '[vector-memory] ℹ  Redis Stack not available — using HNSW index (hnswlib-node) for ANN search. ' +
+        'O(log n), production-suitable. Index dir: ' + HNSW_INDEX_DIR
+      );
+    } else {
+      console.warn(
+        '[vector-memory] ⚠  PERFORMANCE WARNING: Redis Stack is NOT available and hnswlib-node is NOT installed. ' +
+        'Semantic search is running in HSCAN brute-force mode (O(n) full-scan cosine). ' +
+        'Install hnswlib-node for scalable search:\n' +
+        '  npm install hnswlib-node\n' +
+        '  ➜  Or upgrade:  docker run -p 6379:6379 redis/redis-stack-server:latest'
+      );
+    }
   }
   return caps;
 }
@@ -501,6 +693,11 @@ export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
   );
 
   await pipeline.exec();
+
+  // Add vector to the HNSW index (non-blocking — failure doesn't affect Redis storage)
+  _hnswAdd(tenantId, vector, id).catch(err =>
+    console.warn('[vector-memory] HNSW add failed:', err.message)
+  );
 
   // Update IDF corpus stats (non-blocking — failure doesn't affect storage)
   updateBM25Stats(tenantId, tf, docLen).catch(err =>
@@ -661,7 +858,7 @@ export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
     return _rerank(candidates, queryTerms, tenantId, topK);
   }
 
-  // ── HSCAN fallback path: brute-force cosine on plain Redis ─────────────────
-  const candidates = await _hscanSearch(tenantId, queryVec, topK * OVERFETCH_FACTOR);
+  // ── HNSW fallback path: O(log n) ANN via hnswlib-node ─────────────────────
+  const candidates = await _hnswSearch(tenantId, queryVec, topK * OVERFETCH_FACTOR);
   return _rerank(candidates, queryTerms, tenantId, topK);
 }
