@@ -136,6 +136,39 @@ checkpoint → apply → test → rollback (if fail)
 - Per-tenant runtime key management (create, rotate, revoke via API — no restart)
 - Env-var fallback (`AEGIS_API_KEY_{TENANTID}`) for existing deployments
 - All routes except `GET /health` require a valid key
+- `AEGIS_SKIP_AUTH=1` bypasses key checks in dev mode
+
+### 16. Anomaly Detection
+
+- In-process metric evaluation loop (configurable cadence, default 60 s)
+- Five built-in rules: `low_success_rate_5m`, `critical_success_rate`, `high_p95_latency`, `latency_spike`, `high_retry_rate`
+- Hysteresis window (`ANOMALY_SUSTAINED_MS`, default 2 min) prevents alert storms on transient spikes
+- Fires structured JSON alerts to stderr and POSTs to `AEGIS_ALERT_WEBHOOK` when set
+- Stores alerts in Redis with TTL; surfaced via `GET /anomalies`
+- All thresholds configurable via env vars
+
+### 17. SSE Live-Push Stream
+
+- `GET /events` streams live metrics and recent workflows to the dashboard via Server-Sent Events
+- Eliminates polling — replaces the 15 s `setInterval` in the dashboard UI
+- Pushes a full snapshot immediately on connect, then every 4 s
+- Keepalive ping every 25 s prevents nginx / load-balancer timeouts
+- Cleans up automatically on client disconnect
+
+### 18. Webhook Receiver (GitHub / GitLab)
+
+- `POST /webhooks/github` and `POST /webhooks/gitlab` translate SCM events into workflow submissions
+- Supported events: GitHub `push` + `pull_request` (opened / synchronize / reopened); GitLab `Push Hook` + `Merge Request Hook`
+- HMAC-SHA256 signature verification for GitHub; shared-secret token for GitLab
+- Branch filtering via `AEGIS_WEBHOOK_BRANCH_FILTER` glob patterns (default: accept all)
+- No API-key auth — authenticated via HMAC/token inside the handler
+
+### 19. Remote Push & PR / MR Creation
+
+- After `finaliseWorkflow()` succeeds, optionally pushes the merged branch to a configured remote (`AEGIS_GIT_REMOTE`)
+- Opens a Pull Request (GitHub) or Merge Request (GitLab) against a target branch
+- Provider configured via `AEGIS_PR_PROVIDER` (`github` | `gitlab` | `none`)
+- Push is skipped entirely when `AEGIS_GIT_REMOTE` is unset (local-only mode)
 
 ---
 
@@ -418,13 +451,15 @@ GET /review-queue?limit=50&status=pending
 ### Observability
 
 ```bash
-GET /dashboard                    # HTML observability UI
+GET /dashboard                    # HTML observability UI (SSE-driven, no polling)
 GET /metrics                      # Prometheus text export
 GET /metrics/json                 # OTEL JSON export
 GET /api/metrics                  # Structured metrics (dashboard internal)
 GET /traces                       # List all traces
 GET /traces/:traceId              # Single workflow trace
 GET /concurrency/:workflowId      # Live concurrency slot status
+GET /anomalies                    # Recent anomaly alerts (last 50, newest first)
+GET /events                       # SSE live-push stream (metrics + workflow updates)
 ```
 
 ### Tenant management
@@ -483,7 +518,36 @@ node scripts/dlq-inspect.js [tenantId]
 | `RATE_LIMIT_BURST_MAX` | `20` | Max requests per tenant in burst window |
 | `DLQ_MAX_RETRIES` | `2` | DLQ retry budget before human review |
 | `DLQ_BASE_DELAY_MS` | `30000` | Base DLQ retry back-off (doubles each attempt) |
-| `AEGIS_ALERT_WEBHOOK` | unset | URL to POST structured DLQ alerts to |
+| `DLQ_STALE_SWEEP_MS` | `900000` | How often the DLQ stale-item sweep runs (ms) |
+| `DLQ_STALE_THRESHOLD_MS` | `3600000` | Age at which a DLQ item is considered stale |
+| `AEGIS_ALERT_WEBHOOK` | unset | URL to POST structured DLQ / anomaly alerts to |
+| `AEGIS_SKIP_AUTH` | unset | `1` = bypass API key checks (dev only) |
+| `AEGIS_TENANT` | `default` | Tenant ID used by the CLI |
+| `AEGIS_CLI_POLL_INTERVAL_MS` | `3000` | How often the CLI polls for workflow completion (ms) |
+| `AEGIS_MEMORY_OVERFETCH` | `3` | KNN over-fetch multiplier for reranker recall |
+| `AEGIS_MEMORY_MIN_SCORE` | `0.5` | Minimum combined quality score to surface a memory |
+| `AEGIS_MEMORY_HALFLIFE_DAYS` | `7` | Recency decay half-life in days |
+| `AEGIS_MEMORY_FEEDBACK_STEP` | `0.02` | Per-tenant adaptive weight nudge per feedback event |
+| `AEGIS_MERGE_STRATEGY` | unset | `rebase` = rebase instead of merge at `finaliseWorkflow` |
+| `AEGIS_GIT_REMOTE` | unset | Remote name or URL to push to after a successful merge |
+| `AEGIS_GIT_PUSH_BRANCH` | unset | Branch pushed to remote (`__workflow__` = per-workflow branch) |
+| `AEGIS_PR_PROVIDER` | `none` | `github` or `gitlab` — opens a PR/MR after push |
+| `AEGIS_PR_REPO` | — | `owner/repo` (GitHub) or numeric project ID (GitLab) |
+| `AEGIS_PR_TARGET_BRANCH` | `main` | Branch the PR/MR targets |
+| `AEGIS_PR_TOKEN` | — | Personal access token for PR/MR creation |
+| `AEGIS_WEBHOOK_SECRET_GITHUB` | — | HMAC-SHA256 secret for GitHub webhook verification |
+| `AEGIS_WEBHOOK_SECRET_GITLAB` | — | Shared token for GitLab webhook verification |
+| `AEGIS_WEBHOOK_BRANCH_FILTER` | `*` | Comma-separated glob patterns for branch filtering |
+| `AEGIS_WEBHOOK_TENANT` | `default` | Tenant ID attributed to inbound webhook jobs |
+| `ANOMALY_INTERVAL_MS` | `60000` | Anomaly detector evaluation cadence (ms) |
+| `ANOMALY_SUSTAINED_MS` | `120000` | How long a threshold must be breached before an alert fires |
+| `ANOMALY_SUCCESS_RATE_WARN` | `80` | 5m success rate % below which a warning fires |
+| `ANOMALY_SUCCESS_RATE_CRIT` | `50` | 5m success rate % below which a critical alert fires |
+| `ANOMALY_P95_WARN_MS` | `30000` | 5m p95 latency (ms) above which a warning fires |
+| `ANOMALY_SPIKE_RATIO` | `3` | Ratio of 5m p95 to 1h p95 that triggers a spike alert |
+| `ANOMALY_RETRY_RATE` | `0.20` | Retry fraction (retries/total) above which a warning fires |
+| `ANOMALY_ALERT_TTL_S` | `86400` | Redis TTL for stored anomaly alerts (seconds) |
+| `ANOMALY_MAX_STORED` | `200` | Max anomaly alerts kept in the Redis index |
 
 ---
 
@@ -551,6 +615,10 @@ When `vectorMemory.embeddings` is `false`, the `warnings` array explains exactly
 | `GET` | `/tenants/:id/keys` | Required | List API keys |
 | `POST` | `/tenants/:id/keys` | Required | Create an API key |
 | `DELETE` | `/tenants/:id/keys/:kid` | Required | Revoke an API key |
+| `GET` | `/anomalies` | Required | Recent anomaly alerts (last 50, newest first) |
+| `GET` | `/events` | Required | SSE live-push stream (metrics + workflow updates) |
+| `POST` | `/webhooks/github` | HMAC sig | GitHub push / pull_request webhook |
+| `POST` | `/webhooks/gitlab` | Token | GitLab Push Hook / Merge Request Hook |
 
 ---
 
@@ -582,11 +650,16 @@ When `vectorMemory.embeddings` is `false`, the `warnings` array explains exactly
 - Three-way hybrid RAG memory: cosine similarity + BM25 + recency decay, with per-tenant adaptive weight feedback
 
 **Observability & Auth**
-- Bearer token + `x-api-key` auth on all protected routes
+- Bearer token + `x-api-key` auth on all protected routes; `AEGIS_SKIP_AUTH=1` bypasses for local dev
 - Structured metrics and Redis-backed trace store
-- 1 000-line single-page dashboard polling live API endpoints
+- 1 000-line single-page dashboard driven by SSE live-push stream (no polling)
 - Multi-tenant isolation with runtime registration persisted in Redis
 - DLQ webhook alerts and per-tenant stale sweep
+- In-process anomaly detector with hysteresis — five built-in rules, Redis-stored alerts, `GET /anomalies`
+
+**Integration**
+- GitHub / GitLab inbound webhook receiver — push and PR/MR events trigger workflow submissions automatically
+- Remote push + PR/MR creation after successful `finaliseWorkflow` (`AEGIS_PR_PROVIDER=github|gitlab`)
 
 **Test Coverage**
 - 11 test files: workflow-store, approval-gate, concurrency, retry-policy, review-system, repo-scanner, prompt-eval, agent-runner, vector-memory, pipeline, git-engine — all with proper vi mocking, no real network or file I/O
@@ -604,6 +677,17 @@ When `vectorMemory.embeddings` is `false`, the `warnings` array explains exactly
 ---
 
 ## 🗓️ Changelog
+
+### v1.5.2 — 2026-06-03
+
+**New features**
+
+- **In-process anomaly detector** — evaluates live metrics on a configurable cadence (default 60 s) with hysteresis; fires alerts to stderr, `AEGIS_ALERT_WEBHOOK`, and Redis. Five built-in rules: success rate warning/critical, p95 latency warning, latency spike, and high retry rate. Surfaced via `GET /anomalies`.
+- **SSE live-push stream** — `GET /events` pushes metrics and recent workflow snapshots to the dashboard via Server-Sent Events every 4 s, replacing the previous 15 s polling loop. Includes a 25 s keepalive ping.
+- **Inbound webhook receiver** — `POST /webhooks/github` and `POST /webhooks/gitlab` translate push and PR/MR events into workflow submissions. HMAC-SHA256 verification for GitHub; shared-token verification for GitLab. Branch filtering via `AEGIS_WEBHOOK_BRANCH_FILTER`.
+- **Remote push + PR/MR creation** — after `finaliseWorkflow()` succeeds, optionally pushes the merged branch to a remote and opens a Pull Request (GitHub) or Merge Request (GitLab) via `AEGIS_PR_PROVIDER`.
+
+---
 
 ### v1.5.1 — 2026-06-01
 
