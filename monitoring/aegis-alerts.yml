@@ -1,0 +1,231 @@
+## monitoring/aegis-alerts.yml
+##
+## Prometheus alerting rules for Aegis.
+##
+## Deploy:
+##   1. Copy this file to your Prometheus server's rules directory, e.g.:
+##        /etc/prometheus/rules/aegis-alerts.yml
+##   2. Add the directory to prometheus.yml:
+##        rule_files:
+##          - /etc/prometheus/rules/*.yml
+##   3. Reload Prometheus:
+##        curl -X POST http://localhost:9090/-/reload
+##
+## All alerts route to Alertmanager. Wire Alertmanager to Slack, PagerDuty,
+## email, or any receiver — this file is receiver-agnostic.
+##
+## Thresholds are intentionally conservative. Adjust to your baseline after
+## a few days of production data. The ENV approach (recording rule labels)
+## lets you override per-environment without editing alert expressions.
+
+groups:
+
+  # ── Availability ─────────────────────────────────────────────────────────────
+  - name: aegis.availability
+    rules:
+
+      - alert: AegisHighErrorRate5m
+        expr: |
+          aegis_window_success_rate{window="5m"} < 80
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis 5-minute success rate below 80%"
+          description: >
+            Success rate over the last 5 minutes is {{ printf "%.1f" $value }}%.
+            This usually indicates agent failures, LLM API errors, or a broken
+            dependency. Check /review-queue and agent logs.
+          runbook: "https://docs.aegis.internal/runbooks/high-error-rate"
+
+      - alert: AegisHighErrorRateCritical5m
+        expr: |
+          aegis_window_success_rate{window="5m"} < 50
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Aegis 5-minute success rate below 50% — CRITICAL"
+          description: >
+            Success rate over the last 5 minutes is {{ printf "%.1f" $value }}%.
+            More than half of all jobs are failing. Immediate investigation required.
+          runbook: "https://docs.aegis.internal/runbooks/high-error-rate"
+
+      - alert: AegisNoJobsProcessed1h
+        expr: |
+          increase(aegis_jobs_total_total[1h]) == 0
+            and
+          time() - (aegis_jobs_total_total > 0) < 3600
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis has processed no jobs in the last hour"
+          description: >
+            Zero new jobs recorded in the last hour despite prior activity.
+            This may indicate the worker process has stopped, BullMQ is not
+            consuming, or Redis connectivity was lost.
+          runbook: "https://docs.aegis.internal/runbooks/no-jobs-processed"
+
+  # ── Latency ───────────────────────────────────────────────────────────────────
+  - name: aegis.latency
+    rules:
+
+      - alert: AegisHighP95Latency5m
+        expr: |
+          aegis_window_latency_p95_ms{window="5m"} > 30000
+        for: 3m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis p95 latency above 30s over last 5 minutes"
+          description: >
+            p95 job latency is {{ $value | humanizeDuration }} over the last
+            5 minutes. Agents may be waiting on slow LLM responses or hitting
+            concurrency limits.
+          runbook: "https://docs.aegis.internal/runbooks/high-latency"
+
+      - alert: AegisHighP99Latency5m
+        expr: |
+          aegis_window_latency_p99_ms{window="5m"} > 60000
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis p99 latency above 60s over last 5 minutes"
+          description: >
+            p99 job latency is {{ $value | humanizeDuration }} over the last
+            5 minutes. Long-tail jobs are severely delayed.
+          runbook: "https://docs.aegis.internal/runbooks/high-latency"
+
+      - alert: AegisLatencySpikeVsBaseline
+        # Alert when 5m p95 is more than 3× the 1h p95 (spike detection).
+        # Requires both windows to have data (> 0).
+        expr: |
+          (
+            aegis_window_latency_p95_ms{window="5m"} > 0
+              and
+            aegis_window_latency_p95_ms{window="1h"} > 0
+          )
+          and
+          (
+            aegis_window_latency_p95_ms{window="5m"}
+              /
+            aegis_window_latency_p95_ms{window="1h"}
+          ) > 3
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis latency spike: 5m p95 is 3× higher than 1h baseline"
+          description: >
+            The 5-minute p95 latency has spiked to more than 3× the 1-hour
+            baseline. This indicates a sudden degradation rather than a
+            sustained high-latency environment.
+          runbook: "https://docs.aegis.internal/runbooks/high-latency"
+
+  # ── Retry pressure ────────────────────────────────────────────────────────────
+  - name: aegis.retries
+    rules:
+
+      - alert: AegisHighRetryRate
+        # Retries-per-total > 20% is a sign agents are regularly failing
+        # their first attempt and falling back to meta-reviewer.
+        expr: |
+          (
+            rate(aegis_jobs_retries_total_total[5m])
+              /
+            rate(aegis_jobs_total_total[5m])
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis retry rate above 20% over last 5 minutes"
+          description: >
+            More than 20% of job attempts are retries, suggesting systematic
+            first-attempt failures. Check LLM error logs and the DLQ.
+          runbook: "https://docs.aegis.internal/runbooks/retry-pressure"
+
+      - alert: AegisDLQGrowing
+        # If the failed counter grows faster than success+total combined,
+        # the DLQ is accumulating items faster than they are resolved.
+        expr: |
+          rate(aegis_jobs_failed_total_total[10m])
+            >
+          rate(aegis_jobs_success_total_total[10m]) * 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis failure rate is outpacing success rate"
+          description: >
+            Jobs are failing faster than they succeed, which will grow the
+            dead-letter queue. Review /review-queue and inspect DLQ worker logs.
+          runbook: "https://docs.aegis.internal/runbooks/dlq-growing"
+
+  # ── Per-agent health ──────────────────────────────────────────────────────────
+  - name: aegis.agents
+    rules:
+
+      - alert: AegisAgentHighLatency
+        expr: |
+          aegis_agent_avg_latency_ms > 45000
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis agent {{ $labels.agent }} average latency above 45s"
+          description: >
+            Agent {{ $labels.agent }} has an average latency of
+            {{ $value | humanizeDuration }}, which is above the 45-second
+            threshold. Investigate whether it is hitting LLM token limits or
+            performing excessively large diffs.
+          runbook: "https://docs.aegis.internal/runbooks/agent-latency"
+
+  # ── Node.js process health (from collectDefaultMetrics) ───────────────────────
+  - name: aegis.process
+    rules:
+
+      - alert: AegisHighHeapUsage
+        expr: |
+          (
+            nodejs_heap_size_used_bytes
+              /
+            nodejs_heap_size_total_bytes
+          ) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis Node.js heap usage above 85%"
+          description: >
+            The Aegis server process is using {{ printf "%.0f" (mul $value 100) }}%
+            of its V8 heap. A GC pressure spike or memory leak may be developing.
+            Restart the process if heap continues to grow.
+          runbook: "https://docs.aegis.internal/runbooks/memory-pressure"
+
+      - alert: AegisHighEventLoopLag
+        expr: |
+          nodejs_eventloop_lag_seconds > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis event-loop lag above 500ms"
+          description: >
+            The Node.js event loop is lagging {{ $value | humanizeDuration }}.
+            This will delay metric writes, Redis operations, and HTTP responses.
+            The process may be CPU-saturated or performing blocking operations.
+          runbook: "https://docs.aegis.internal/runbooks/event-loop-lag"
