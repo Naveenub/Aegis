@@ -91,7 +91,9 @@ function branchAllowed(branch) {
  * @returns {boolean}
  */
 export function verifyGitHubSignature(rawBody, sigHeader, secret) {
-  if (!secret) return true; // secret not configured → skip verification
+  // Fail closed: no secret means every request is rejected, not accepted.
+  // An unconfigured secret is a deployment error, not a "skip-verify" signal.
+  if (!secret) return false;
   if (!sigHeader?.startsWith('sha256=')) return false;
 
   const expected = 'sha256=' + crypto
@@ -115,7 +117,8 @@ export function verifyGitHubSignature(rawBody, sigHeader, secret) {
  * @returns {boolean}
  */
 export function verifyGitLabToken(tokenHeader, secret) {
-  if (!secret) return true;
+  // Fail closed: no secret configured → reject all requests.
+  if (!secret) return false;
   if (!tokenHeader) return false;
 
   try {
@@ -185,6 +188,25 @@ export function parsePushPayload(provider, eventType, payload) {
   }
 
   return null;
+}
+
+// ─── Startup secret checks ────────────────────────────────────────────────────
+// Warn loudly at import time so operators see the misconfiguration in startup
+// logs rather than discovering it after unsigned webhooks have been accepted.
+
+if (!cfg('AEGIS_WEBHOOK_SECRET_GITHUB')) {
+  console.error(
+    '[webhook] FATAL CONFIG: AEGIS_WEBHOOK_SECRET_GITHUB is not set. ' +
+    'POST /webhooks/github will reject ALL requests until a secret is configured. ' +
+    'Set the env var to the HMAC-SHA256 secret configured in your GitHub webhook settings.'
+  );
+}
+if (!cfg('AEGIS_WEBHOOK_SECRET_GITLAB')) {
+  console.error(
+    '[webhook] FATAL CONFIG: AEGIS_WEBHOOK_SECRET_GITLAB is not set. ' +
+    'POST /webhooks/gitlab will reject ALL requests until a secret is configured. ' +
+    'Set the env var to the token configured in your GitLab webhook settings.'
+  );
 }
 
 // ─── Router ───────────────────────────────────────────────────────────────────
