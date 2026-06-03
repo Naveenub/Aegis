@@ -38,12 +38,6 @@ jobs:
         # GitHub Actions exports CI=true automatically. sandbox.js detects this
         # and falls back to unsandboxed direct execution when Docker is unavailable,
         # so no AEGIS_SANDBOX_MODE=local or AEGIS_SANDBOX_DISABLE=true is needed.
-        # To enable full Docker-in-Docker sandboxing, add a `docker` service above
-        # and remove this comment — sandbox.js will use Docker automatically.
-        #
-        # --coverage triggers vitest.config.js thresholds (lines/functions/branches/
-        # statements). The step exits non-zero — failing CI — if any threshold is
-        # breached, so 0 % coverage can never silently pass.
         run: npm run test:coverage
 
       - name: Upload coverage report
@@ -54,11 +48,47 @@ jobs:
           path: coverage/
           retention-days: 14
 
+  # ── System / real-infrastructure tests ──────────────────────────────────────
+  system-test:
+    name: System tests (real Redis + real git)
+    runs-on: ubuntu-latest
+    needs: test   # only run after unit tests pass
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: npm install
+
+      - name: Configure git identity for system tests
+        run: |
+          git config --global user.email "ci@aegis.test"
+          git config --global user.name  "Aegis CI"
+
+      - name: System tests — BullMQ + real git + real filesystem
+        run: npm run test:system
+        env:
+          REDIS_URL: redis://localhost:6379
+          # CI=true is set automatically by GitHub Actions — sandbox.js
+          # uses unsandboxed fallback when Docker is unavailable in CI.
+
   # ── Agent persona eval gate ──────────────────────────────────────────────────
   prompt-eval:
     name: Agent prompt eval
     runs-on: ubuntu-latest
-    # Run after unit tests pass so we don't burn API quota on broken code
     needs: test
 
     services:
