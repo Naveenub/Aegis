@@ -55,13 +55,21 @@ function tenantEnvSuffix(tenantId) {
   return String(tenantId).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
 }
 
-/** Extract raw key from request headers. */
+/**
+ * Extract raw key from request headers or (as a fallback) the ?apiKey= query
+ * parameter.  The query-param fallback is needed only for EventSource / SSE
+ * connections — browsers cannot set custom headers on EventSource requests.
+ * Header-based auth (Authorization: Bearer or x-api-key) takes priority.
+ */
 function extractKey(req) {
   const authHeader = req.headers['authorization'] ?? '';
   if (authHeader.toLowerCase().startsWith('bearer ')) {
     return authHeader.slice(7).trim();
   }
-  return (req.headers['x-api-key'] ?? '').trim();
+  const headerKey = (req.headers['x-api-key'] ?? '').trim();
+  if (headerKey) return headerKey;
+  // Fallback for SSE: EventSource cannot set headers in browsers
+  return (req.query?.apiKey ?? '').trim();
 }
 
 /**
