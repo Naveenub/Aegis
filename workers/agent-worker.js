@@ -20,11 +20,11 @@ const TENANTS = (process.env.AEGIS_TENANTS ?? DEFAULT_TENANT)
 
 for (const tenant of TENANTS) {
   getWorker(tenant);
-  console.log(`[agent-worker] Listening on aegis-tasks:${tenant}`);
+  console.info(`[agent-worker] Listening on aegis-tasks:${tenant}`);
 }
 
 if (approvalModeActive) {
-  console.log('[agent-worker] Approval gate ACTIVE — patches will be held for human review before apply');
+  console.info('[agent-worker] Approval gate ACTIVE — patches will be held for human review before apply');
 }
 
 export { getWorker };
