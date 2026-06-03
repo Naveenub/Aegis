@@ -1,1 +1,4 @@
-[]
+{
+  "_removed": true,
+  "_note": "This file is no longer part of Aegis. Agent memory is stored in Redis by engine/vector-memory.js (storeMemory). Query live memory with: redis-cli HSCAN memory:<tenantId>: 0 COUNT 100. This file can be safely deleted — it is kept only to avoid errors in tools that check for its existence. No runtime code reads or writes it."
+}
