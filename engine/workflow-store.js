@@ -1,6 +1,6 @@
 import IORedis from 'ioredis';
 import { clearSlots } from './concurrency.js';
-import { assertTenantId } from './tenant.js';
+
 import { trackWorkflowEnd } from './tenant-quota.js';
 
 const redis = new IORedis();
