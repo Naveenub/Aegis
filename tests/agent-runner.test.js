@@ -40,7 +40,15 @@ vi.mock('../engine/vector-memory.js', () => ({
 // ─── Mock repo-scanner ────────────────────────────────────────────────────────
 
 vi.mock('../engine/repo-scanner.js', () => ({
-  scanRepo: vi.fn(() => ['engine/agent-runner.js', 'engine/review-system.js']),
+  scanRepo: vi.fn(async () => ['engine/agent-runner.js', 'engine/review-system.js']),
+  analyzeRepo: vi.fn(async () => ({
+    files: ['engine/agent-runner.js', 'engine/review-system.js'],
+    symbols: {},
+    imports: {},
+    calls: {},
+    dependencies: {},
+  })),
+  formatRepoContext: vi.fn(() => '## Repo Map\n- engine/agent-runner.js\n- engine/review-system.js'),
 }));
 
 // ─── Mock fs ─────────────────────────────────────────────────────────────────
