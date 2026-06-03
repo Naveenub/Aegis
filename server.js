@@ -60,7 +60,7 @@ import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './en
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
-import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
+import { startAnomalyDetector } from './engine/anomaly-detector.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
