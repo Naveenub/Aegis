@@ -1,4 +1,8 @@
-# This file is no longer written by Aegis at runtime.
-# Agent memory is stored in Redis by engine/vector-memory.js (storeMemory).
-# Decisions are tracked per-workflow in Redis via engine/workflow-store.js.
-# This file is kept for backward compatibility with tools that check its existence.
+# REMOVED — this file is no longer part of Aegis.
+#
+# Decision history is tracked per-workflow in Redis via engine/workflow-store.js.
+# Query it with:
+#   redis-cli HGETALL aegis:workflow:<workflowId>
+#
+# This file can be safely deleted. It is kept only to prevent errors in tools
+# that check for its existence. No runtime code reads or writes it.
