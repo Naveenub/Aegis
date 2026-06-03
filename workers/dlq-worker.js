@@ -320,7 +320,7 @@ const TENANTS = (process.env.AEGIS_TENANTS ?? DEFAULT_TENANT)
 
 for (const tenant of TENANTS) {
   getDlqWorker(tenant);
-  console.log(`[dlq-worker] Listening on aegis-dead-letter:${tenant}`);
-  console.log(`[dlq-worker] DLQ retry budget: ${DLQ_MAX_RETRIES} attempt(s) before human review`);
-  console.log(`[dlq-worker] Stale-item sweep every ${STALE_SWEEP_INTERVAL_MS / 1000}s`);
+  console.info(`[dlq-worker] Listening on aegis-dead-letter:${tenant}`);
+  console.info(`[dlq-worker] DLQ retry budget: ${DLQ_MAX_RETRIES} attempt(s) before human review`);
+  console.info(`[dlq-worker] Stale-item sweep every ${STALE_SWEEP_INTERVAL_MS / 1000}s`);
 }
