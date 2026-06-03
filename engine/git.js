@@ -232,29 +232,41 @@ export async function finaliseWorkflow(workflowId, tenantId) {
       git(['branch', baseBranch, 'HEAD']);
     }
 
-    // ── Attempt 1: clean --no-ff merge ───────────────────────────────────────
+    // ── Base-branch worktree ───────────────────────────────────────────────────────────
+    //
+    // REPO_ROOT is checked out on whatever branch it was initialised with
+    // (typically “main”).  Merging there would advance “main”, not baseBranch.
+    // We instead use a dedicated worktree always checked out on baseBranch so
+    // every merge lands on the correct tenant branch.
+    const baseWorktreePath = path.join(WORKTREES_BASE, tenantId, '_base');
+    if (!fs.existsSync(baseWorktreePath)) {
+      fs.mkdirSync(path.join(WORKTREES_BASE, tenantId), { recursive: true });
+      git(['worktree', 'add', '--no-guess-remote', baseWorktreePath, baseBranch]);
+    }
+
+    // ── Attempt 1: clean --no-ff merge ─────────────────────────────────────────
     try {
       execFileSync('git', ['merge', '--no-ff', '-m', `Aegis merge: ${workflowId}`, branch], {
-        cwd: REPO_ROOT, encoding: 'utf-8',
+        cwd: baseWorktreePath, encoding: 'utf-8',
       });
       return { merged: true, conflicts: [], resolvedVia: 'direct' };
     } catch {
-      // Merge failed — collect conflicting files, then abort so the repo is
+      // Merge failed — collect conflicting files, then abort so the worktree is
       // back to a clean state before we attempt the rebase strategy.
-      const conflicts = git(['diff', '--name-only', '--diff-filter=U'], REPO_ROOT)
+      const conflicts = git(['diff', '--name-only', '--diff-filter=U'], baseWorktreePath)
         .split('\n').filter(Boolean);
-      git(['merge', '--abort'], REPO_ROOT);
+      git(['merge', '--abort'], baseWorktreePath);
 
       if (mergeStrategy !== 'rebase') {
-        // "flag" strategy — skip auto-resolution, hand off to human review.
+        // “flag” strategy — skip auto-resolution, hand off to human review.
         return { merged: false, conflicts };
       }
 
-      // ── Attempt 2: rebase the workflow branch onto the updated base ─────────
+      // ── Attempt 2: rebase the workflow branch onto the updated base ───────────────
       //
       // The worktree for this workflow is at WORKTREES_BASE/<tenantId>/<workflowId>.
-      // We rebase there rather than in REPO_ROOT so the base working tree is
-      // never left in a mid-rebase state if something goes wrong.
+      // We rebase there rather than in baseWorktreePath so the base working tree
+      // is never left in a mid-rebase state if something goes wrong.
       const worktreePath = path.join(WORKTREES_BASE, tenantId, workflowId);
 
       try {
@@ -281,8 +293,8 @@ export async function finaliseWorkflow(workflowId, tenantId) {
         return { merged: false, conflicts };
       }
 
-      // Rebase succeeded — update the branch ref in REPO_ROOT to the new HEAD
-      // of the rebased worktree, then merge cleanly with --ff-only.
+      // Rebase succeeded — update the branch ref so baseWorktreePath can
+      // fast-forward to the rebased tip.
       const rebasedHead = git(['rev-parse', 'HEAD'], worktreePath);
       git(['update-ref', `refs/heads/${branch}`, rebasedHead]);
 
@@ -290,11 +302,11 @@ export async function finaliseWorkflow(workflowId, tenantId) {
         execFileSync(
           'git',
           ['merge', '--ff-only', '-m', `Aegis merge (rebased): ${workflowId}`, branch],
-          { cwd: REPO_ROOT, encoding: 'utf-8' },
+          { cwd: baseWorktreePath, encoding: 'utf-8' },
         );
       } catch (ffErr) {
         // Should not happen after a clean rebase, but guard anyway.
-        try { git(['merge', '--abort'], REPO_ROOT); } catch { /* best-effort */ }
+        try { git(['merge', '--abort'], baseWorktreePath); } catch { /* best-effort */ }
         return { merged: false, conflicts };
       }
 
