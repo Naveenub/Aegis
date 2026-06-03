@@ -4,6 +4,7 @@ import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
 import { initVectorIndex } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
+import { assertWorkflowQuota, trackWorkflowStart } from './tenant-quota.js';
 import { scanRepo } from './repo-scanner.js';
 import { worktreeDir } from './git.js';
 // crypto.randomUUID() is built into Node 14.17+ — no external package needed.
@@ -303,6 +304,9 @@ export async function runSystem(task, opts = {}) {
 
   logger.info({ tenantId, workflowId, task, priority }, 'Start');
 
+  // 0️⃣ Quota check — reject before any work is done if tenant is over limit
+  await assertWorkflowQuota(tenantId);
+
   // Ensure this tenant's vector index exists before first use
   await initVectorIndex(tenantId);
 
@@ -345,6 +349,9 @@ export async function runSystem(task, opts = {}) {
     priority,
     timeoutMs: opts.timeoutMs ?? null,
   });
+
+  // Record usage for quota tracking and billing
+  await trackWorkflowStart(tenantId);
 
   // 4️⃣ Get initial runnable steps
   const steps = await getRunnableSteps(workflowId, tenantId);
