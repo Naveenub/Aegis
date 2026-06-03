@@ -179,10 +179,17 @@ describe('System: git worktree — real filesystem operations', () => {
     git(['add', '-A'], worktreeDir);
     git(['commit', '-m', `Aegis: ${workflowId}`], worktreeDir);
 
-    // Merge workflow branch → base branch (simulating finaliseWorkflow)
+    // Merge workflow branch → base branch (simulating finaliseWorkflow).
+    // We must merge from a worktree that is checked out on baseBranch, not from
+    // repoRoot (which is on 'main').  Otherwise the merge advances 'main' and
+    // rev-parse baseBranch stays unchanged, causing the assertion below to fail.
+    const baseCheckoutDir = path.join(worktreesBase, tenantId, '_base_merge');
+    fs.mkdirSync(baseCheckoutDir, { recursive: true });
+    git(['worktree', 'add', '--no-guess-remote', baseCheckoutDir, baseBranch], repoRoot);
+
     const prevHead = git(['rev-parse', baseBranch], repoRoot);
     execFileSync('git', ['merge', '--no-ff', '-m', `Aegis merge: ${workflowId}`, branch], {
-      cwd: repoRoot, encoding: 'utf-8', stdio: 'pipe',
+      cwd: baseCheckoutDir, encoding: 'utf-8', stdio: 'pipe',
     });
     const newHead = git(['rev-parse', baseBranch], repoRoot);
 
@@ -196,6 +203,7 @@ describe('System: git worktree — real filesystem operations', () => {
 
     // Cleanup
     git(['worktree', 'remove', '--force', baseWorktree], repoRoot);
+    git(['worktree', 'remove', '--force', baseCheckoutDir], repoRoot);
     git(['worktree', 'remove', '--force', worktreeDir], repoRoot);
     git(['branch', '-D', branch], repoRoot);
   });
