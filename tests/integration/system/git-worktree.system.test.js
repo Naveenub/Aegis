@@ -120,7 +120,7 @@ describe('System: git worktree — real filesystem operations', () => {
     const filePath = path.join(worktreeDir, 'hello.js');
     fs.writeFileSync(filePath, 'export const greet = () => `hello`;');
     git(['add', '-A'], worktreeDir);
-    git(['commit', '-m', `Aegis: step-1`], worktreeDir);
+    git(['commit', '-m', 'Aegis: step-1'], worktreeDir);
 
     // Verify commit exists in log
     const log = git(['log', '--oneline', '-1'], worktreeDir);
