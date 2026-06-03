@@ -1,15 +1,15 @@
 import IORedis    from 'ioredis';
 import path       from 'path';
-import { createRequire } from 'module';
 
-const _require = createRequire(import.meta.url);
 
 // Lazy-load hnswlib-node so the module still imports cleanly in environments
 // where the native addon has not been compiled (tests mock it out).
+// Uses dynamic import() instead of createRequire so that vitest's vi.doMock()
+// can intercept the load in unit tests.
 let _hnswlib = null;
 async function getHnswlib() {
   if (_hnswlib) return _hnswlib;
-  try { _hnswlib = _require('hnswlib-node'); } catch { _hnswlib = null; }
+  try { _hnswlib = await import('hnswlib-node'); } catch { _hnswlib = null; }
   return _hnswlib;
 }
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
