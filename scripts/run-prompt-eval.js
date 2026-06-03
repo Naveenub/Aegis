@@ -38,7 +38,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 import { evalAll } from '../engine/prompt-eval.js';
 
 async function main() {
-  console.log('[prompt-eval] Starting agent persona evaluation…\n');
+  console.info('[prompt-eval] Starting agent persona evaluation…\n');
 
   let report;
   try {
@@ -51,31 +51,31 @@ async function main() {
   // ── Print full per-case detail ──────────────────────────────────────────────
   for (const agentResult of report.agents) {
     const icon = agentResult.passed ? '✓' : '✗';
-    console.log(`${icon} ${agentResult.agent} — ${agentResult.passCount}/${agentResult.totalCases} cases passed`);
+    console.info(`${icon} ${agentResult.agent} — ${agentResult.passCount}/${agentResult.totalCases} cases passed`);
     for (const c of agentResult.cases) {
       const cIcon = c.passed ? '  ✓' : '  ✗';
-      console.log(`${cIcon} [${c.score}/${c.maxScore}] ${c.caseId}`);
+      console.info(`${cIcon} [${c.score}/${c.maxScore}] ${c.caseId}`);
       for (const note of c.notes) {
-        console.log(`       ${note}`);
+        console.info(`       ${note}`);
       }
       if (c.apiError) {
-        console.log(`       API ERROR: ${c.apiError}`);
+        console.info(`       API ERROR: ${c.apiError}`);
       }
     }
-    console.log('');
+    console.info('');
   }
 
   // ── Summary ─────────────────────────────────────────────────────────────────
-  console.log('─'.repeat(60));
-  console.log(report.summary);
-  console.log('─'.repeat(60));
+  console.info('─'.repeat(60));
+  console.info(report.summary);
+  console.info('─'.repeat(60));
 
   if (!report.passed) {
     console.error('\n[prompt-eval] FAIL — one or more agents did not meet the pass threshold.');
     process.exit(1);
   }
 
-  console.log('\n[prompt-eval] PASS — all agents meet quality thresholds.');
+  console.info('\n[prompt-eval] PASS — all agents meet quality thresholds.');
   process.exit(0);
 }
 
