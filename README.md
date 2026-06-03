@@ -235,9 +235,10 @@ aegis/
 │   │   ├── feature-builder.md
 │   │   └── meta-reviewer.md
 │   ├── context/                      # Persistent context
-│   │   ├── jobs.json                 # Recent job snapshot (written by CLI on run)
-│   │   ├── memory.json               # Legacy key/learning store
-│   │   └── decisions.log             # Decision history
+│   │   └── jobs.json                 # Recent job snapshot (written by CLI on run)
+│   │       # memory.json / decisions.log removed — superseded by Redis
+│   │       # Agent memory: engine/vector-memory.js (storeMemory → Redis hashes + HNSW)
+│   │       # Decision history: engine/workflow-store.js (workflow state → Redis)
 │   └── settings.json                 # Agent/system settings
 ├── cli/                              # CLI interface
 │   └── claude.js                     # Submits task, polls to completion, writes jobs.json
