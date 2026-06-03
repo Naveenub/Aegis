@@ -711,7 +711,7 @@ app.delete('/tenants/:id/keys/:keyId', requireApiKey, async (req, res) => {
  *
  * The connection is cleaned up automatically on client disconnect.
  */
-app.get('/events', optionalApiKey, (req, res) => {
+app.get('/events', requireApiKey, (req, res) => {
   // SSE headers — disable all buffering so events reach the browser immediately
   res.setHeader('Content-Type',  'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
