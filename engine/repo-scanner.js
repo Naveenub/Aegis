@@ -398,7 +398,7 @@ function analyzeFile(filePath) {
         fnRanges.push({ name: node.id.name, start: node.start, end: node.end });
       }
     },
-    ArrowFunctionExpression(node) {
+    ArrowFunctionExpression(_node) {
       // Arrow functions rarely have a name in the AST; skip for now.
     },
     MethodDefinition(node) {
