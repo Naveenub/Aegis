@@ -155,24 +155,30 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
       console.warn('[e2e] Redis not reachable — skipping E2E system tests.');
       return;
     }
-    connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
+    // BullMQ requires a dedicated IORedis connection per entity (Queue,
+    // Worker, QueueEvents) because QueueEvents uses blocking SUBSCRIBE
+    // commands that monopolise the connection.  Store a factory so each
+    // entity gets its own connection that it can lifecycle-manage.
+    connection = () => new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
     gitEnv = makeGitRepo();
   });
 
   afterAll(async () => {
     gitEnv?.cleanup();
     if (connection) {
-      // Wipe any leftover test queues
+      // Wipe any leftover test queues (connection is a factory — create a
+      // dedicated connection just for cleanup)
+      const cleanupConn = connection();
       const qNames = [
         'aegis-tasks:e2e-tenant',
         'aegis-dead-letter:e2e-tenant',
       ];
       for (const name of qNames) {
-        const q = new Queue(name, { connection });
+        const q = new Queue(name, { connection: cleanupConn });
         await q.obliterate({ force: true }).catch(() => {});
         await q.close();
       }
-      connection.disconnect();
+      cleanupConn.disconnect();
     }
   });
 
@@ -185,8 +191,13 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
     const file       = 'src/greeting.js';
     const queueName  = `aegis-tasks:${tenant}`;
 
-    const queue  = new Queue(queueName,  { connection });
-    const events = new QueueEvents(queueName, { connection });
+    // Each BullMQ entity needs its own IORedis connection.
+    const qConn = connection();
+    const wConn = connection();
+    const eConn = connection();
+
+    const queue  = new Queue(queueName,  { connection: qConn });
+    const events = new QueueEvents(queueName, { connection: eConn });
 
     let jobResult;
 
@@ -197,7 +208,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
         patchContent: 'export const greet = () => "hello";',
         shouldTestPass: true,
       }),
-      { connection }
+      { connection: wConn }
     );
 
     events.on('completed', ({ returnvalue }) => { jobResult = returnvalue; });
@@ -225,6 +236,9 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
     await worker.close();
     await events.close();
     await queue.close();
+    qConn.disconnect();
+    wConn.disconnect();
+    eConn.disconnect();
   });
 
   it('test-failure path: commit rolled back, HEAD unchanged after rollback', async () => {
@@ -236,8 +250,13 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
     const file       = 'src/bad.js';
     const queueName  = `aegis-tasks:${tenant}`;
 
-    const queue  = new Queue(queueName,  { connection });
-    const events = new QueueEvents(queueName, { connection });
+    // Each BullMQ entity needs its own IORedis connection.
+    const qConn = connection();
+    const wConn = connection();
+    const eConn = connection();
+
+    const queue  = new Queue(queueName,  { connection: qConn });
+    const events = new QueueEvents(queueName, { connection: eConn });
 
     let completedResult;
 
@@ -248,7 +267,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
         patchContent:   '// broken code',
         shouldTestPass: false,
       }),
-      { connection }
+      { connection: wConn }
     );
 
     await queue.add('step', { workflowId, stepId, file });
@@ -279,6 +298,9 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
     await worker.close();
     await events.close();
     await queue.close();
+    qConn.disconnect();
+    wConn.disconnect();
+    eConn.disconnect();
   });
 
   it('sequential workflows: second workflow merges after first without conflict', async () => {
@@ -286,8 +308,13 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
 
     const tenant    = 'e2e-tenant-seq';
     const queueName = `aegis-tasks:${tenant}`;
-    const queue     = new Queue(queueName,  { connection });
-    const events    = new QueueEvents(queueName, { connection });
+    // Each BullMQ entity needs its own IORedis connection.
+    const qConn = connection();
+    const wConn = connection();
+    const eConn = connection();
+
+    const queue     = new Queue(queueName,  { connection: qConn });
+    const events    = new QueueEvents(queueName, { connection: eConn });
 
     // Ensure the base branch exists for this tenant
     try { git(['branch', `aegis-tenant/${tenant}`, 'HEAD'], gitEnv.repo); } catch { /* already exists */ }
@@ -306,7 +333,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
         completedJobs.push(workflowId);
         return result;
       },
-      { connection, concurrency: 1 } // sequential
+      { connection: wConn, concurrency: 1 } // sequential
     );
 
     await queue.add('wf-A', { workflowId: `seq-A-${Date.now()}`, file: 'src/a.js', content: '// file A' });
@@ -329,8 +356,13 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
     await worker.close();
     await events.close();
     await queue.close();
-    const q = new Queue(queueName, { connection });
+    qConn.disconnect();
+    wConn.disconnect();
+    eConn.disconnect();
+    const cleanConn = connection();
+    const q = new Queue(queueName, { connection: cleanConn });
     await q.obliterate({ force: true }).catch(() => {});
     await q.close();
+    cleanConn.disconnect();
   });
 });
