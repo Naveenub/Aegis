@@ -3,7 +3,7 @@ import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import { searchMemory } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
-import { scanRepo } from './repo-scanner.js';
+import { analyzeRepo, formatRepoContext } from './repo-scanner.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -53,14 +53,10 @@ function readFileSafe(filePath) {
 /**
  * buildRepoContext(relevantFiles, cwd)
  *
- * Build a compact repo map and inline relevant file content for prompt injection.
- *
- * FIX (async): `scanRepo` is now async (uses fs.promises.readdir with
- * withFileTypes), so this function is async too. The single awaited scan
- * result is used for both the repo map and the inlined file sections —
- * eliminating the previous double-scan bug where `buildRepoContext` was
- * called twice in `runAgent`, causing two full synchronous directory walks
- * per agent invocation.
+ * Build a structured repo context and inline relevant file content for prompt
+ * injection. Uses `analyzeRepo` (AST-level analysis) rather than the old
+ * `scanRepo` (flat filename list), so agents receive the full symbol table,
+ * import graph, call graph, and dependency map via `formatRepoContext`.
  *
  * @param {string[]} relevantFiles - Paths to inline in full (relative or absolute).
  * @param {string}   [cwd]         - Root to scan and resolve relative paths against.
@@ -68,17 +64,12 @@ function readFileSafe(filePath) {
  * @returns {Promise<{ repoMap: string, inlined: string }>}
  */
 async function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
-  const allFiles = (await scanRepo(cwd)).filter(
-    (f) =>
-      !f.includes('node_modules') &&
-      !f.includes('.git') &&
-      !f.endsWith('.lock') &&
-      !f.endsWith('.log')
-  );
+  // Use analyzeRepo (AST-level) instead of the old scanRepo (filename-only).
+  // This gives agents the symbol table, import graph, call graph, and
+  // dependency map — not just a flat list of filenames.
+  const analysis = await analyzeRepo(cwd);
 
-  const repoMap = allFiles
-    .map((f) => path.relative(cwd, f))
-    .join('\n');
+  const repoMap = formatRepoContext(analysis, { root: cwd });
 
   const inlined = relevantFiles
     .map((f) => {
