@@ -18,7 +18,7 @@
  *   • Concurrent calls to ensureWorkflowBranch() for different workflows are safe
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync, spawnSync } from 'child_process';
 import fs   from 'fs';
 import os   from 'os';
@@ -75,26 +75,6 @@ describe('System: git worktree — real filesystem operations', () => {
     cleanup?.();
   });
 
-  // We drive git.js by calling its exported functions directly with env vars
-  // pointing at our temp repo. We set AEGIS_REPO_ROOT and AEGIS_WORKTREES so
-  // git.js uses our sandbox rather than process.cwd().
-  function withTestEnv(fn) {
-    const orig = {
-      AEGIS_REPO_ROOT: process.env.AEGIS_REPO_ROOT,
-      AEGIS_WORKTREES: process.env.AEGIS_WORKTREES,
-    };
-    process.env.AEGIS_REPO_ROOT = repoRoot;
-    process.env.AEGIS_WORKTREES = worktreesBase;
-    try {
-      return fn();
-    } finally {
-      for (const [k, v] of Object.entries(orig)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
-  }
-
   it('creates a real worktree on disk (ensureWorkflowBranch)', async () => {
     const workflowId = `wf-${Date.now()}`;
     const tenantId   = 'sys-tenant';
@@ -138,7 +118,7 @@ describe('System: git worktree — real filesystem operations', () => {
 
     // Write a real file then commit (simulating applyPatch + commitChanges)
     const filePath = path.join(worktreeDir, 'hello.js');
-    fs.writeFileSync(filePath, 'export const greet = () => "hello";');
+    fs.writeFileSync(filePath, 'export const greet = () => `hello`;');
     git(['add', '-A'], worktreeDir);
     git(['commit', '-m', `Aegis: step-1`], worktreeDir);
 
