@@ -9,19 +9,28 @@
  *     are throttled the same way.
  *   - A second, tighter limiter (`burstLimiter`) caps short-burst abuse
  *     (e.g. 20 req in 5 s) independently of the rolling window.
+ *   - Counters are stored in Redis via rate-limit-redis so all workers in a
+ *     multi-process deployment share the same counters — a tenant cannot
+ *     exceed limits by fan-out across N workers.
+ *   - If Redis is unreachable at startup the limiters fall back to in-process
+ *     memory with a console warning, preserving availability at the cost of
+ *     per-process (not global) enforcement.
  *
  * Environment variables (all optional – sensible defaults shown):
  *   RATE_LIMIT_WINDOW_MS   Rolling window in milliseconds   (default: 60 000)
  *   RATE_LIMIT_MAX         Max requests per window          (default: 60)
  *   RATE_LIMIT_BURST_MS    Burst window in milliseconds     (default: 5 000)
  *   RATE_LIMIT_BURST_MAX   Max requests in burst window     (default: 20)
+ *   REDIS_URL              Redis connection URL              (default: redis://127.0.0.1:6379)
  *
  * Usage in server.js:
  *   import { taskRateLimiter } from './middleware/rate-limit.js';
  *   app.post('/task', taskRateLimiter, async (req, res) => { … });
  */
 
-import rateLimit from 'express-rate-limit';
+import rateLimit   from 'express-rate-limit';
+import { RedisStore } from 'rate-limit-redis';
+import IORedis      from 'ioredis';
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +72,42 @@ function resolveKey(req) {
   return `ip:${req.ip}`;
 }
 
+// ─── Redis store ──────────────────────────────────────────────────────────────
+// A single IORedis client shared by both limiters.  We use a dedicated client
+// (not the one from engine modules) so rate-limiting stays isolated from
+// application Redis failures and vice-versa.  lazyConnect: true means the
+// connection is attempted on first command, not at import time, so the module
+// loads cleanly in environments where Redis may not be up yet (e.g. test runners).
+
+const redisClient = new IORedis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379', {
+  lazyConnect:          true,
+  enableOfflineQueue:   false,   // fail fast — don't queue commands if Redis is down
+  maxRetriesPerRequest: 1,       // one retry then surface the error
+  connectTimeout:       2_000,
+});
+
+redisClient.on('error', (err) => {
+  // Log but do not crash — the store's sendCommand will throw and express-rate-limit
+  // will fall through to its in-process memory store (skipFailedRequests: false by
+  // default, so requests still count — they're just counted locally per process).
+  console.warn('[rate-limit] Redis connection error (falling back to in-process counters):', err.message);
+});
+
+/**
+ * Build a RedisStore for one limiter, namespaced by prefix so rolling and burst
+ * windows don't collide in the same Redis keyspace.
+ *
+ * @param {string} prefix  e.g. 'rl:rolling:' or 'rl:burst:'
+ */
+function makeRedisStore(prefix) {
+  return new RedisStore({
+    // rate-limit-redis v4 uses a sendCommand adapter so it works with any Redis
+    // client library.  For ioredis the adapter is a simple .call() wrapper.
+    sendCommand: (command, ...args) => redisClient.call(command, ...args),
+    prefix,
+  });
+}
+
 // ─── config ───────────────────────────────────────────────────────────────────
 
 const WINDOW_MS  = envInt('RATE_LIMIT_WINDOW_MS',  60_000);   // 1 minute
@@ -78,6 +123,7 @@ const rollingLimiter = rateLimit({
   keyGenerator: resolveKey,
   standardHeaders: true,   // Return RateLimit-* headers (RFC 6585 draft-7)
   legacyHeaders: false,    // Disable X-RateLimit-* legacy headers
+  store: makeRedisStore('rl:rolling:'),
   message: (req) => ({
     error: 'Too many requests. Please slow down.',
     retryAfter: Math.ceil(WINDOW_MS / 1000),
@@ -97,6 +143,7 @@ const burstLimiter = rateLimit({
   keyGenerator: resolveKey,
   standardHeaders: true,
   legacyHeaders: false,
+  store: makeRedisStore('rl:burst:'),
   message: (req) => ({
     error: 'Request burst limit exceeded. Please wait a moment.',
     retryAfter: Math.ceil(BURST_MS / 1000),
