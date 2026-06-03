@@ -110,12 +110,9 @@ describe('System: BullMQ + Redis — live queue round-trip', () => {
     const queue  = new Queue(QUEUE_NAME, { connection });
     const events = new QueueEvents(QUEUE_NAME, { connection });
 
-    let attempts = 0;
-
     const worker = new Worker(
       QUEUE_NAME,
       async () => {
-        attempts++;
         throw new Error('intentional failure for DLQ test');
       },
       {
