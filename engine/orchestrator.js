@@ -111,11 +111,11 @@ function assertNoCycles(tasks) {
  * @param {string}   repoRoot   - absolute path to scan for real files
  * @param {object}   [log]      - logger instance (optional, falls back to console)
  */
-function stripHallucinatedFiles(tasks, repoRoot, log = logger) {
+async function stripHallucinatedFiles(tasks, repoRoot, log = logger) {
   // Build a Set of repo-relative paths for O(1) lookup.
   // scanRepo returns absolute paths; convert to repo-relative for matching.
   const repoFiles = new Set(
-    scanRepo(repoRoot).map(abs => abs.slice(repoRoot.length).replace(/^[\\/]/, ''))
+    (await scanRepo(repoRoot)).map(abs => abs.slice(repoRoot.length).replace(/^[\\/]/, ''))
   );
 
   for (const task of tasks) {
@@ -341,7 +341,7 @@ export async function runSystem(task, opts = {}) {
   //    per-workflow in git.js); fall back to process.cwd() so this pass always
   //    runs rather than being skipped when there's nothing to scan.
   const repoRoot = worktreeDir(tenantId) ?? process.cwd();
-  stripHallucinatedFiles(plan.tasks, repoRoot);
+  await stripHallucinatedFiles(plan.tasks, repoRoot);
 
   // 3️⃣ Persist workflow
   await createWorkflow(workflowId, plan.tasks, {
