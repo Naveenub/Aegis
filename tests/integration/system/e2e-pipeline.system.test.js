@@ -270,9 +270,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
       { connection: wConn }
     );
 
-    await queue.add('step', { workflowId, stepId, file });
-
-    await new Promise((resolve, reject) => {
+    const resultPromise = new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('E2E failure path timed out')), 12000);
       events.on('completed', ({ returnvalue }) => {
         completedResult = returnvalue;
@@ -280,6 +278,9 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
       });
       events.on('failed', (_, err) => { clearTimeout(t); reject(new Error(err)); });
     });
+
+    await queue.add('step', { workflowId, stepId, file });
+    await resultPromise;
 
     expect(completedResult?.success).toBe(false);
     expect(completedResult?.rolled_back).toBe(true);
