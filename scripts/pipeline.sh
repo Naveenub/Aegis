@@ -278,7 +278,8 @@ while [[ $ELAPSED -lt $TIMEOUT ]]; do
         warn "$REVIEW_COUNT step(s) are awaiting human review:"
         echo "$REVIEW" | jq -r \
           '.[] | "  step=\(.stepId) agent=\(.agent // "?") error=\(.error // "-")"' >&2
-        warn "Resolve via: POST $BASE_URL/review/<workflowId>/<stepId>/resolve"
+        warn "Resolve via: POST $BASE_URL/review-queue/resolve"
+        warn '  Body: { "workflowId": "$WORKFLOW_ID", "stepId": "<stepId>", "resolution": "retrying|skip|escalate" }'
       fi
       EXIT_CODE=2
       break
