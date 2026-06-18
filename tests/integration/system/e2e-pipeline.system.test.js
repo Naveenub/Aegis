@@ -213,6 +213,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
 
     events.on('completed', ({ returnvalue }) => { jobResult = returnvalue; });
 
+    await events.waitUntilReady();
     await queue.add('step', { workflowId, stepId, file });
 
     await new Promise((resolve, reject) => {
@@ -279,6 +280,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
       events.on('failed', (_, err) => { clearTimeout(t); reject(new Error(err)); });
     });
 
+    await events.waitUntilReady();
     await queue.add('step', { workflowId, stepId, file });
     await resultPromise;
 
@@ -337,6 +339,7 @@ describe('System: E2E pipeline — BullMQ + real git + real filesystem', () => {
       { connection: wConn, concurrency: 1 } // sequential
     );
 
+    await events.waitUntilReady();
     await queue.add('wf-A', { workflowId: `seq-A-${Date.now()}`, file: 'src/a.js', content: '// file A' });
     await queue.add('wf-B', { workflowId: `seq-B-${Date.now()}`, file: 'src/b.js', content: '// file B' });
 
