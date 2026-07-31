@@ -41,7 +41,7 @@ A **distributed orchestration engine** for autonomous task completion:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       TASK COMES IN                          │
+│                       TASK COMES IN                         │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                     ▼──────────────▼
@@ -82,7 +82,7 @@ A **distributed orchestration engine** for autonomous task completion:
             │  Cost: $0.03                  │
             └───────────────────────────────┘
                            │
-        ┌──────────────────┴──────────────────┐
+        ┌──────────────────┴───────────────────┐
         │ TOTAL COST TRACKED & LOGGED          │
         │ Result: Success or Escalate to Human │
         └──────────────────────────────────────┘
@@ -642,7 +642,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Related Projects
 
-- **zkproof-api**: ZK proof generation SaaS with agent optimization
+- **zephyrhash**: ZK proof generation SaaS with agent optimization
 - **ZKSN**: Privacy protocol for L2 blockchains
 - **QUANTUM-PULSE**: Cryptographic data vault for LLMs (PyPI)
 
