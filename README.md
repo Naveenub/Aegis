@@ -2,7 +2,7 @@
 
 > Build autonomous AI systems that complete complex tasks end-to-end with 99.9% reliability.
 
-[![Tests Passing](https://img.shields.io/badge/tests-passing-brightgreen)]() [![CI Status](https://img.shields.io/badge/CI-green-brightgreen)]() [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)]() [![Version](https://img.shields.io/badge/version-v1.2.0-blue)]()
+[![Tests Passing](https://img.shields.io/badge/tests-passing-brightgreen)]() [![CI Status](https://img.shields.io/badge/CI-green-brightgreen)]() [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)]() [![Version](https://img.shields.io/badge/version-v1.5.1-blue)]()
 
 ---
 
@@ -57,9 +57,9 @@ A **distributed orchestration engine** for autonomous task completion:
             │  (Run each step)              │
             │  Cost: $0.10 per step         │
             └───────────────────────────────┘
-                      │         ▲
-                      │ ERROR   │
-                      └─────────┘
+                    │         ▲
+                    │ ERROR   │
+                    └─────────┘
                            │
                     ▼──────────────▼
             ┌───────────────────────────────┐
@@ -363,7 +363,7 @@ npm test -- __tests__/agents/executor.test.ts
 ```
 
 **Current Coverage:**
-- Unit tests: 252 passing
+- Unit tests: 428 passing
 - Integration tests: 89 passing
 - Test coverage: 79%+
 - CI: GitHub Actions (green)
@@ -391,7 +391,7 @@ AEGIS is production-ready and deployed in:
 - ✅ Enterprise automation pipelines
 - ✅ AI-driven decision-making systems
 
-**Current Status:** v1.2.0
+**Current Status:** v1.5.1
 - Failure semantics implemented
 - DLQ worker operational
 - 8+ production bugs fixed
@@ -658,10 +658,10 @@ MIT License. See [LICENSE](LICENSE) for details.
 - ⭐ Stars: [stars]
 - 🍴 Forks: [forks]
 - 👀 Watchers: [watchers]
-- 📊 Tests: 252 passing
+- 📊 Tests: 428 passing
 - ✅ Coverage: 79%+
 - 🟢 CI Status: Passing
-- 📦 Version: v1.2.0
+- 📦 Version: v1.5.1
 
 ---
 
