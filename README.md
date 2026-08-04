@@ -57,9 +57,9 @@ A **distributed orchestration engine** for autonomous task completion:
             │  (Run each step)              │
             │  Cost: $0.10 per step         │
             └───────────────────────────────┘
-                    │         ▲
-                    │ ERROR   │
-                    └─────────┘
+                      │         ▲
+                      │ ERROR   │
+                      └─────────┘
                            │
                     ▼──────────────▼
             ┌───────────────────────────────┐
@@ -143,6 +143,11 @@ npm test
 # Start dev server
 npm run dev
 ```
+
+> **No Docker installed?** `runInSandbox()` hard-fails by default when Docker
+> is unavailable, so agents never run patches unsandboxed on your host by
+> accident. For local dev without Docker, set `AEGIS_SANDBOX_MODE=local` in
+> your `.env` (see `.env.example`). Never set this in production.
 
 ### Quick Example
 
