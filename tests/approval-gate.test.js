@@ -15,6 +15,16 @@
 
 import { describe, it, expect, vi } from 'vitest';
 
+// approval-gate.js imports logger.js, which spins up a pino-pretty worker
+// thread (and a process 'exit' listener) at module scope. This file
+// vi.resetModules() + dynamically imports approval-gate.js ~20 times, so
+// without this mock each re-import leaks a new transport thread/listener,
+// tripping Node's MaxListenersExceededWarning. Mock it here only — the
+// real logger is unaffected everywhere else.
+vi.mock('../engine/logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function step(overrides = {}) {
