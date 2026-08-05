@@ -222,7 +222,7 @@ function startEvictionCron() {
       try {
         const count = await evictExpiredMemory(tid);
         if (count > 0) {
-          console.log(`[vector-memory] eviction cron: removed ${count} stale entries for tenant "${tid}"`);
+          console.info(`[vector-memory] eviction cron: removed ${count} stale entries for tenant "${tid}"`);
         }
       } catch (err) {
         console.error(`[vector-memory] eviction cron error for tenant "${tid}":`, err.message);
@@ -447,7 +447,7 @@ async function _hnswAdd(tenantId, vector, redisKey) {
   if (index.getCurrentCount() >= index.getMaxElements()) {
     const newMax = index.getMaxElements() * 2;
     index.resizeIndex(newMax);
-    console.log(`[vector-memory] HNSW index for tenant "${tenantId}" resized to ${newMax} elements`);
+    console.info(`[vector-memory] HNSW index for tenant "${tenantId}" resized to ${newMax} elements`);
   }
 
   const label = _hnswLabelCounters.get(tenantId) ?? 0;
