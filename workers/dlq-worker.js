@@ -36,7 +36,9 @@ import { addStep, Priority } from '../engine/queue.js';
 import { logger } from '../engine/logger.js';
 import { DEFAULT_TENANT, assertTenantId } from '../engine/tenant.js';
 
-const connection = new IORedis();
+const connection = new IORedis(process.env.REDIS_URL || undefined, {
+  maxRetriesPerRequest: null,
+});
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 

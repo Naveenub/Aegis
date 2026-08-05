@@ -46,8 +46,11 @@ services:
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+    cap_add:
+      - NET_ADMIN
     devices:
       - /dev/fuse
+      - /dev/net/tun
     volumes:
       - dind-data:/home/rootless/.local/share/docker
     healthcheck:
