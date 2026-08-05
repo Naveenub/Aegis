@@ -53,7 +53,7 @@ export function applyPatch(file, content, cwd = PROJECT_ROOT) {
 
     const pathError = validateTargetPath(resolved, root);
     if (pathError) {
-      console.log('Security block —', pathError);
+      console.warn('Security block —', pathError);
       return;
     }
 
@@ -62,9 +62,9 @@ export function applyPatch(file, content, cwd = PROJECT_ROOT) {
     }
 
     fs.writeFileSync(resolved, content);
-    console.log('Updated:', resolved);
+    console.info('Updated:', resolved);
 
   } catch (e) {
-    console.log('Patch error', e);
+    console.error('Patch error', e);
   }
 }
