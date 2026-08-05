@@ -87,6 +87,9 @@ describe('System: BullMQ + Redis — live queue round-trip', () => {
       { connection }
     );
 
+    await events.waitUntilReady();
+    await worker.waitUntilReady();
+    
     await queue.add('test-job', { hello: 'world', tenant: TEST_TENANT });
 
     // Wait for the completed event (max 8 s)
@@ -122,6 +125,9 @@ describe('System: BullMQ + Redis — live queue round-trip', () => {
       }
     );
 
+    await events.waitUntilReady();
+    await worker.waitUntilReady();
+    
     // Add a job with only 2 attempts so failure is fast
     await queue.add('dlq-test', { type: 'dlq-probe' }, { attempts: 2, backoff: { type: 'fixed', delay: 50 } });
 
