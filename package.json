@@ -1,6 +1,6 @@
 {
   "name": "aegis",
-  "version": "1.5.1",
+  "version": "1.7.0",
   "description": "Distributed, self-healing AI workflow engine with multi-agent orchestration, DAG execution, Git-backed rollback, and vector memory.",
   "type": "module",
   "engines": {
