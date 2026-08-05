@@ -2,7 +2,7 @@
 
 > A Git-backed, DAG-driven pipeline that turns a task description into an executed, tested, reviewable patch — with Docker sandboxing, distributed locking, and per-tenant isolation.
 
-[![Version](https://img.shields.io/badge/version-v1.5.1-blue)]()
+[![Version](https://img.shields.io/badge/version-v1.7.0-blue)]()
 
 ---
 
