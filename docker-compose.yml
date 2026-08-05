@@ -32,6 +32,30 @@ services:
       timeout: 3s
       retries: 3
 
+  # Rootless Docker-in-Docker: sandbox.js shells out to `docker run` for every
+  # lint/test execution. Rather than mounting the host's own socket (which is
+  # host-root-equivalent access), the worker talks to this isolated rootless
+  # daemon instead — a compromised sandbox run is capped at this container's
+  # unprivileged UID, not the host.
+  dind:
+    image: docker:27-dind-rootless
+    restart: unless-stopped
+    privileged: false
+    environment:
+      DOCKER_TLS_CERTDIR: ""   # trusted internal compose network; no TLS needed
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    devices:
+      - /dev/fuse
+    volumes:
+      - dind-data:/home/rootless/.local/share/docker
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   worker:
     build: .
     command: node workers/agent-worker.js
@@ -39,16 +63,13 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379
-      # sandbox.js shells out to `docker run` for lint/test isolation. Mounting
-      # the host socket makes those sibling containers (not Docker-in-Docker).
-      # This grants the worker container host-root-equivalent access — only
-      # do this on a host you trust, and prefer a dedicated Docker context /
-      # rootless Docker in shared environments.
+      DOCKER_HOST: tcp://dind:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - repo:/repo
     depends_on:
       redis:
+        condition: service_healthy
+      dind:
         condition: service_healthy
 
   dlq-worker:
@@ -67,3 +88,4 @@ volumes:
   # Shared checkout that AEGIS_REPO_ROOT / AEGIS_WORKTREES point into so the
   # server (finalise/rewind) and worker (apply/commit) see the same git state.
   repo:
+  dind-data:

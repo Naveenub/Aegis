@@ -195,9 +195,9 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY at minimum
 docker compose up -d --build
 ```
 
-This starts `redis`, `server` (port 3000), `worker`, and `dlq-worker` from a single `node:20-alpine` image (`Dockerfile`). Two things worth knowing before you run it anywhere shared:
+This starts `redis`, `server` (port 3000), `worker`, `dlq-worker`, and a rootless `dind` sidecar from a single `node:20-alpine` image (`Dockerfile`). Two things worth knowing:
 
-- **`worker` mounts `/var/run/docker.sock`.** `sandbox.js` shells out to `docker run` for every lint/test execution, so the worker container spawns sibling containers on the host rather than running Docker-in-Docker. That's host-root-equivalent access — fine on a box you control, worth reconsidering (rootless Docker, a dedicated Docker context) before running on shared infra.
+- **`worker` talks to a rootless Docker-in-Docker sidecar (`dind`), not the host socket.** `sandbox.js` shells out to `docker run` for every lint/test execution; pointing `DOCKER_HOST` at the isolated rootless daemon instead of mounting `/var/run/docker.sock` means a sandbox compromise is capped at that sidecar's unprivileged UID rather than the host. For a genuinely multi-tenant/shared deployment, the next step up is a dedicated remote Docker host instead of a same-machine sidecar.
 - **`server` and `worker` share a `repo` volume** so `AEGIS_REPO_ROOT`/`AEGIS_WORKTREES` resolve to the same git checkout across both processes.
 
 No Kubernetes manifests exist yet — that's still open if you need it.
