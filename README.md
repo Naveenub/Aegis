@@ -190,7 +190,17 @@ npm run test:coverage # with coverage
 
 ## Deployment
 
-No Dockerfile, `docker-compose.yml`, or Kubernetes manifests are checked into this repo yet — `npm run server` / `npm run worker` / `npm run dlq-worker` are plain Node processes behind whatever process manager or container setup you bring. Redis is a hard dependency for all three.
+```bash
+cp .env.example .env   # fill in ANTHROPIC_API_KEY at minimum
+docker compose up -d --build
+```
+
+This starts `redis`, `server` (port 3000), `worker`, and `dlq-worker` from a single `node:20-alpine` image (`Dockerfile`). Two things worth knowing before you run it anywhere shared:
+
+- **`worker` mounts `/var/run/docker.sock`.** `sandbox.js` shells out to `docker run` for every lint/test execution, so the worker container spawns sibling containers on the host rather than running Docker-in-Docker. That's host-root-equivalent access — fine on a box you control, worth reconsidering (rootless Docker, a dedicated Docker context) before running on shared infra.
+- **`server` and `worker` share a `repo` volume** so `AEGIS_REPO_ROOT`/`AEGIS_WORKTREES` resolve to the same git checkout across both processes.
+
+No Kubernetes manifests exist yet — that's still open if you need it.
 
 ---
 
