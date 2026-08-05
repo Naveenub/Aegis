@@ -23,14 +23,14 @@ const dlq = getDeadLetterQueue(tenantId);
 const jobs = await dlq.getJobs(['waiting', 'failed']);
 
 if (jobs.length === 0) {
-  console.log(`[dlq-inspect] No jobs in aegis-dead-letter:${tenantId}`);
+  console.info(`[dlq-inspect] No jobs in aegis-dead-letter:${tenantId}`);
   process.exit(0);
 }
 
-console.log(`[dlq-inspect] ${jobs.length} job(s) in aegis-dead-letter:${tenantId}\n`);
+console.info(`[dlq-inspect] ${jobs.length} job(s) in aegis-dead-letter:${tenantId}\n`);
 
 for (const job of jobs) {
-  console.log({
+  console.info({
     id: job.id,
     step: job.data.step?.description,
     error: job.data.error,
