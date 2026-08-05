@@ -108,7 +108,7 @@ async function persistJobsContext(tenantId) {
       'utf-8',
     );
 
-    console.log(`  context: wrote ${jobs.length} job(s) → ${JOBS_CONTEXT_PATH}`);
+    console.info(`  context: wrote ${jobs.length} job(s) → ${JOBS_CONTEXT_PATH}`);
   } catch (err) {
     // Non-fatal: a stale context file is better than crashing the CLI
     console.warn(`  [warn] could not update jobs context: ${err.message}`);
@@ -121,12 +121,12 @@ const task     = process.argv.slice(2).join(' ').trim();
 const tenantId = process.env.AEGIS_TENANT ?? DEFAULT_TENANT;
 
 if (!task) {
-  console.log('Usage: aegis "<task description>"');
+  console.info('Usage: aegis "<task description>"');
   process.exit(1);
 }
 
-console.log(`\nAegis — submitting task (tenant: ${tenantId})`);
-console.log(`  task: ${task}\n`);
+console.info(`\nAegis — submitting task (tenant: ${tenantId})`);
+console.info(`  task: ${task}\n`);
 
 let workflowId;
 try {
@@ -136,8 +136,8 @@ try {
   process.exit(1);
 }
 
-console.log(`  workflow: ${workflowId}`);
-console.log('  polling for completion...');
+console.info(`  workflow: ${workflowId}`);
+console.info('  polling for completion...');
 
 const finalWorkflow = await pollUntilDone(workflowId, tenantId);
 
@@ -148,19 +148,19 @@ if (!finalWorkflow) {
   const statusLine = finalWorkflow.status === 'completed'
     ? `✔  completed`
     : `✘  ${finalWorkflow.status}${finalWorkflow.cancelReason ? ` (${finalWorkflow.cancelReason})` : ''}`;
-  console.log(`\n  ${statusLine}`);
+  console.info(`\n  ${statusLine}`);
 
   if (finalWorkflow.steps?.length) {
-    console.log('\n  Steps:');
+    console.info('\n  Steps:');
     for (const s of finalWorkflow.steps) {
       const icon = s.status === 'completed' ? '✔' : s.status === 'failed' ? '✘' : '·';
-      console.log(`    [${icon}] ${s.id}  ${s.agent}  — ${s.description ?? ''}`);
+      console.info(`    [${icon}] ${s.id}  ${s.agent}  — ${s.description ?? ''}`);
     }
   }
 }
 
 // Always persist context, even on failure — partial results are still useful
-console.log('');
+console.info('');
 await persistJobsContext(tenantId);
 
 process.exit(finalWorkflow?.status === 'completed' ? 0 : 1);
