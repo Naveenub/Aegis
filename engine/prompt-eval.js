@@ -14,7 +14,7 @@
  *      runAgent() and scores the response against structural + quality rubrics.
  *   3. An `evalAll(opts)` function that runs every agent in the roster.
  *   4. A `recordEvalResult(result)` function that writes scored outcomes to
- *      .claude/context/eval-history.jsonl so the meta-reviewer can read trends.
+ *      Redis (aegis:eval-history) so the meta-reviewer can read trends.
  *
  * Usage (one-off, from CLI or CI)
  * ────────────────────────────────
