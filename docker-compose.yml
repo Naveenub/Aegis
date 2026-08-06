@@ -2,7 +2,11 @@ name: aegis
 
 services:
   redis:
-    image: redis:7-alpine
+    # redis-stack-server (not plain redis:7-alpine): server and worker are
+    # separate containers with no shared volume for the HNSW fallback index
+    # (see engine/vector-memory.js), so FT.SEARCH via shared Redis is required
+    # for cross-container vector search to work at all — not just at scale.
+    image: redis/redis-stack-server:latest
     restart: unless-stopped
     volumes:
       - redis-data:/data

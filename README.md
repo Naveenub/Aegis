@@ -59,7 +59,7 @@ Agent inputs include AST-level repo context (symbol tables, import/call graphs) 
 - **Step rewind** (`POST /workflows/:workflowId/steps/:stepId/rewind`) — git-revert a specific step and reset dependent steps, with a full audit trail (`GET /workflows/:workflowId/rewind-history`).
 - **Multi-tenancy** (`tenant.js`, `tenant-registry.js`, `tenant-quota.js`, `key-store.js`) — per-tenant API keys, quotas, and isolated worktrees/queues.
 - **Human-in-the-loop** (`approval-gate.js`) — `CLAUDE_AUTONOMY=false` or `MODE=approval` holds every patch for review; individual steps can also set `requiresApproval`. Reviewed via `GET /review-queue` and `POST /review-queue/resolve`.
-- **Vector memory** (`vector-memory.js`) — HNSW-backed store with a hybrid cosine + BM25 + recency reranker, per-tenant adaptive weight feedback, and a TTL eviction cron. Requires `OPENAI_API_KEY` for embeddings; degrades gracefully to a no-op without it.
+- **Vector memory** (`vector-memory.js`) — Redis Stack (FT.SEARCH) backed store with a hybrid cosine + BM25 + recency reranker, per-tenant adaptive weight feedback, and a TTL eviction cron. Requires `OPENAI_API_KEY` for embeddings; degrades gracefully to a no-op without it. The local-HNSW fallback (plain Redis, no Stack) is single-process only — server and worker run as separate containers, so it silently returns empty results in the default multi-container deployment. Use Redis Stack.
 - **Dead letter queue** (`workers/dlq-worker.js`) — exponential backoff retries (`DLQ_MAX_RETRIES`, `DLQ_BASE_DELAY_MS`), staleness sweeps, and webhook alerts.
 - **Anomaly detection** (`engine/anomaly-detector.js`) — evaluates success rate, p95 latency, latency spikes, and retry rate on a fixed interval; fires sustained-breach alerts to stderr and/or a webhook.
 - **Metrics** (`engine/metrics.js`) — Redis-backed windowed rollups with p50/p95/p99, exported as Prometheus text (`GET /metrics`) and OTEL-compatible JSON (`GET /metrics/json`).
@@ -85,8 +85,10 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY at minimum
 ### Running
 
 ```bash
-# Redis is required
-docker run -d -p 6379:6379 redis:latest
+# Redis Stack is required (not plain Redis) — server and worker are separate
+# processes and only FT.SEARCH gives them a shared vector index; the HNSW
+# fallback is local-disk-per-process and won't see writes from the other side.
+docker run -d -p 6379:6379 redis/redis-stack-server:latest
 
 # API server
 npm run server

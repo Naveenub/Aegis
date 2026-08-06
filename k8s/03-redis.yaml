@@ -28,7 +28,10 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7-alpine
+          # redis-stack-server: server/worker deployments are separate pods with
+          # no shared volume for the HNSW fallback index — FT.SEARCH via shared
+          # Redis is required for cross-pod vector search, same as docker-compose.
+          image: redis/redis-stack-server:latest
           ports:
             - containerPort: 6379
           volumeMounts:
