@@ -10,7 +10,7 @@ module.exports = {
   },
   overrides: [
     {
-      files: ['dashboard/src/**/*.js', 'dashboard/src/**/*.jsx'],
+      files: ['dashboard/src/api/client.js'],
       env: { browser: true },
     },
   ],
