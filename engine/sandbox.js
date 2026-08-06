@@ -166,6 +166,23 @@ export function runInSandbox(cmd, cwd, projectRoot) {
 
 // ─── Docker execution ─────────────────────────────────────────────────────────
 
+function ensureWorktreeWritable(absWorktree) {
+  try {
+    fs.chmodSync(absWorktree, 0o777);
+    for (const entry of fs.readdirSync(absWorktree)) {
+      const entryPath = path.join(absWorktree, entry);
+      const stat = fs.lstatSync(entryPath);
+      if (stat.isSymbolicLink()) continue;
+      fs.chmodSync(entryPath, stat.isDirectory() ? 0o777 : 0o666);
+      if (stat.isDirectory()) ensureWorktreeWritable(entryPath);
+    }
+  } catch (err) {
+    // Non-fatal — worst case the container hits the same EACCES it would
+    // have hit anyway, which runDocker already reports as a normal failure.
+    console.warn(`[sandbox] Could not chmod worktree for container write access: ${err.message}`);
+  }
+}
+
 function runDocker(cmd, cwd, projectRoot) {
   const absWorktree    = path.resolve(cwd);
   const absNodeModules = path.resolve(projectRoot, 'node_modules');
@@ -176,6 +193,18 @@ function runDocker(cmd, cwd, projectRoot) {
   if (!fs.existsSync(absNodeModules)) {
     return { success: false, output: `Sandbox error: node_modules not found: ${absNodeModules}` };
   }
+
+  // The container runs as uid 65534 ("nobody"), but the worktree is created
+  // on the host by whatever user owns the Aegis process (the CI runner user,
+  // a service account, etc). Docker bind mounts preserve host permissions,
+  // so without this the container falls into the "other" permission bucket
+  // and — depending on the host's umask — may only have read/execute, not
+  // write, causing every write inside the worktree to fail with EACCES.
+  // Widening to world-writable is safe here: --network none plus the
+  // dropped capabilities mean nothing outside this container can exploit it,
+  // and the worktree is disposable per-workflow scratch space, not a shared
+  // or long-lived directory.
+  ensureWorktreeWritable(absWorktree);
 
   const dockerArgs = [
     'run',
@@ -214,7 +243,15 @@ function runDocker(cmd, cwd, projectRoot) {
     return { success: true, output: output.toString() || 'OK' };
   } catch (err) {
     const raw = err.stdout?.toString() || err.stderr?.toString() || err.message;
-    const timedOut = err.signal === 'SIGTERM' || raw.includes('timeout');
+    // Node's execFileSync throws `Error: spawnSync docker ETIMEDOUT` (err.code
+    // === 'ETIMEDOUT') when its own `timeout` option fires — err.signal isn't
+    // reliably 'SIGTERM' on that path, and the message contains "ETIMEDOUT",
+    // not the substring "timeout", so both prior checks missed it.
+    const timedOut =
+      err.signal === 'SIGTERM' ||
+      err.code === 'ETIMEDOUT' ||
+      raw.toLowerCase().includes('timeout') ||
+      raw.toLowerCase().includes('timedout');
     const msg = timedOut
       ? `Sandbox timeout after ${TIMEOUT_MS}ms:\n${raw}`
       : raw;
