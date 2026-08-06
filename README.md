@@ -64,7 +64,7 @@ Agent inputs include AST-level repo context (symbol tables, import/call graphs) 
 - **Anomaly detection** (`engine/anomaly-detector.js`) — evaluates success rate, p95 latency, latency spikes, and retry rate on a fixed interval; fires sustained-breach alerts to stderr and/or a webhook.
 - **Metrics** (`engine/metrics.js`) — Redis-backed windowed rollups with p50/p95/p99, exported as Prometheus text (`GET /metrics`) and OTEL-compatible JSON (`GET /metrics/json`).
 - **Inbound webhooks** (`engine/webhook-receiver.js`) — GitHub/GitLab push and PR webhooks (signature-verified) can trigger workflows, filtered by branch pattern.
-- **PR/MR automation** — `AEGIS_PR_PROVIDER` (github/gitlab) opens a pull/merge request after a workflow merges, targeting `AEGIS_PR_TARGET_BRANCH`.
+- **PR/MR automation** — `AEGIS_PR_PROVIDER` (github/gitlab/bitbucket) opens a pull/merge request after a workflow merges, targeting `AEGIS_PR_TARGET_BRANCH`.
 - **SSE dashboard** (`engine/dashboard.html`, served at `GET /dashboard`) and a live event stream (`GET /events`).
 - **AST-based repo intelligence** (`repo-scanner.js`) — built on `acorn`; produces symbol tables and import/call graphs to give agents accurate repo context instead of a flat file list.
 - **CLI** (`cli/claude.js`) — submits a task, polls `GET /workflows/:workflowId` to a terminal state, and writes a context snapshot to `.claude/context/jobs.json` for subsequent Claude Code runs.

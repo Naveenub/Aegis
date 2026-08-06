@@ -20,21 +20,27 @@
  *                              branch instead (useful for review-before-merge
  *                              workflows).
  *
- *   AEGIS_PR_PROVIDER         "github" | "gitlab" | "none" (default: "none")
+ *   AEGIS_PR_PROVIDER         "github" | "gitlab" | "bitbucket" | "none" (default: "none")
  *                              When "none" push happens but no PR is opened.
  *
- *   AEGIS_PR_REPO             owner/repo  (GitHub) or numeric project ID
- *                              (GitLab). Required when provider is not "none".
+ *   AEGIS_PR_REPO             owner/repo (GitHub), numeric project ID (GitLab),
+ *                              or workspace/repo_slug (Bitbucket). Required
+ *                              when provider is not "none".
  *
  *   AEGIS_PR_TARGET_BRANCH    Branch the PR/MR should target (default: "main").
  *
  *   AEGIS_PR_TOKEN            Personal access token with repo + PR write scope.
+ *                              For Bitbucket, a repository/workspace access
+ *                              token or OAuth token (sent as a Bearer token).
  *
  *   AEGIS_GITHUB_API_URL      Override for GitHub Enterprise
  *                              (default: "https://api.github.com")
  *
  *   AEGIS_GITLAB_API_URL      Override for self-hosted GitLab
  *                              (default: "https://gitlab.com/api/v4")
+ *
+ *   AEGIS_BITBUCKET_API_URL   Override for Bitbucket Server/Data Center
+ *                              (default: "https://api.bitbucket.org/2.0")
  *
  * Exports
  * ───────
@@ -60,6 +66,10 @@ function githubApiBase() {
 
 function gitlabApiBase() {
   return cfg('AEGIS_GITLAB_API_URL', 'https://gitlab.com/api/v4');
+}
+
+function bitbucketApiBase() {
+  return cfg('AEGIS_BITBUCKET_API_URL', 'https://api.bitbucket.org/2.0');
 }
 
 // ─── Low-level git push ───────────────────────────────────────────────────────
@@ -123,7 +133,11 @@ export async function openPullRequest({ title, body, head, base }) {
     return _openGitLabMR({ title, body, head, base: targetBranch, repo, token });
   }
 
-  throw new Error(`Unknown AEGIS_PR_PROVIDER "${provider}". Valid values: github, gitlab, none.`);
+  if (provider === 'bitbucket') {
+    return _openBitbucketPR({ title, body, head, base: targetBranch, repo, token });
+  }
+
+  throw new Error(`Unknown AEGIS_PR_PROVIDER "${provider}". Valid values: github, gitlab, bitbucket, none.`);
 }
 
 async function _openGitHubPR({ title, body, head, base, repo, token }) {
@@ -174,6 +188,32 @@ async function _openGitLabMR({ title, body, head, base, repo, token }) {
 
   const data = await res.json();
   return { url: data.web_url, number: data.iid };
+}
+
+async function _openBitbucketPR({ title, body, head, base, repo, token }) {
+  const url = `${bitbucketApiBase()}/repositories/${repo}/pullrequests`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title,
+      description: body,
+      source: { branch: { name: head } },
+      destination: { branch: { name: base } },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`Bitbucket PR creation failed (HTTP ${res.status}): ${detail}`);
+  }
+
+  const data = await res.json();
+  return { url: data.links?.html?.href, number: data.id };
 }
 
 // ─── Composite helper used by the worker ─────────────────────────────────────
