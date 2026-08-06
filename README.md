@@ -200,7 +200,7 @@ This starts `redis`, `server` (port 3000), `worker`, `dlq-worker`, and a rootles
 - **`worker` talks to a rootless Docker-in-Docker sidecar (`dind`), not the host socket.** `sandbox.js` shells out to `docker run` for every lint/test execution; pointing `DOCKER_HOST` at the isolated rootless daemon instead of mounting `/var/run/docker.sock` means a sandbox compromise is capped at that sidecar's unprivileged UID rather than the host. For a genuinely multi-tenant/shared deployment, the next step up is a dedicated remote Docker host instead of a same-machine sidecar.
 - **`server` and `worker` share a `repo` volume** so `AEGIS_REPO_ROOT`/`AEGIS_WORKTREES` resolve to the same git checkout across both processes.
 
-No Kubernetes manifests exist yet — that's still open if you need it.
+Kubernetes manifests are provided under `k8s/` (namespace, configmap, Redis, PVC, server/worker/dlq-worker deployments, HPA, ingress, kustomization) — see `k8s/README.md` for apply instructions.
 
 ---
 
