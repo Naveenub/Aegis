@@ -8,6 +8,12 @@ module.exports = {
     ecmaVersion:  2022,
     sourceType:  'module',
   },
+  overrides: [
+    {
+      files: ['dashboard/src/**/*.js', 'dashboard/src/**/*.jsx'],
+      env: { browser: true },
+    },
+  ],
   rules: {
     // ── Error-class rules ──────────────────────────────────────────────────
     'no-unused-vars': ['error', {
