@@ -53,7 +53,7 @@ import express           from 'express';
 
 // ─── Engine imports ───────────────────────────────────────────────────────────
 import { runSystem, runTemplate, validatePlan } from './engine/orchestrator.js';
-import { saveTemplate, getTemplate }          from './engine/template-store.js';
+import { saveTemplate, getTemplate, getTemplateVersions, diffTemplateTasks } from './engine/template-store.js';
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
@@ -331,6 +331,63 @@ app.post(
         return res.status(403).json({ error: err.message });
       }
       console.error('[POST /templates/:id/run]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+/**
+ * GET /templates/:id/versions
+ * List archived versions of a template, oldest first (excludes current).
+ */
+app.get(
+  '/templates/:id/versions',
+  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
+  async (req, res) => {
+    try {
+      const versions = await getTemplateVersions(req.params.id, req.query.tenantId ?? req.resolvedTenantId ?? null);
+      res.json({ versions });
+    } catch (err) {
+      if (err.code === 'TENANT_MISMATCH') {
+        return res.status(403).json({ error: err.message });
+      }
+      console.error('[GET /templates/:id/versions]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+/**
+ * GET /templates/:id/diff?version=N
+ * Diff an archived version's tasks against the current template's tasks.
+ */
+app.get(
+  '/templates/:id/diff',
+  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
+  async (req, res) => {
+    const tenantId = req.query.tenantId ?? req.resolvedTenantId ?? null;
+    const targetVersion = Number(req.query.version);
+
+    if (!Number.isInteger(targetVersion)) {
+      return res.status(400).json({ error: '`version` (integer) query param is required.' });
+    }
+
+    try {
+      const current = await getTemplate(req.params.id, tenantId);
+      if (!current) {
+        return res.status(404).json({ error: `Template ${req.params.id} not found.` });
+      }
+      const versions = await getTemplateVersions(req.params.id, tenantId);
+      const target = versions.find(v => v.version === targetVersion);
+      if (!target) {
+        return res.status(404).json({ error: `Version ${targetVersion} not found for template ${req.params.id}.` });
+      }
+      res.json(diffTemplateTasks(target.tasks, current.tasks));
+    } catch (err) {
+      if (err.code === 'TENANT_MISMATCH') {
+        return res.status(403).json({ error: err.message });
+      }
+      console.error('[GET /templates/:id/diff]', err);
       res.status(500).json({ error: err.message });
     }
   },
