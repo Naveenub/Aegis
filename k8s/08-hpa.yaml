@@ -1,0 +1,22 @@
+# Requires the metrics-server add-on. CPU is a coarse proxy for queue depth —
+# for real autoscaling on BullMQ backlog, swap this for a KEDA
+# ScaledObject watching the Redis queue length instead.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: aegis-worker
+  namespace: aegis
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: aegis-worker
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

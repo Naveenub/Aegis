@@ -1,0 +1,16 @@
+# server and worker must see the same git checkout (worktrees, branches,
+# commits), so this volume needs ReadWriteMany — a storage class backed by
+# NFS, EFS, Filestore, Longhorn, etc. The default StorageClass on most
+# clusters (e.g. EBS gp2/gp3) is ReadWriteOnce and will NOT satisfy this;
+# set storageClassName below to an RWX-capable class before applying.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aegis-repo
+  namespace: aegis
+spec:
+  accessModes: ["ReadWriteMany"]
+  # storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 20Gi

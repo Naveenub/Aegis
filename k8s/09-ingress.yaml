@@ -1,0 +1,24 @@
+# Replace host and adjust ingressClassName for your ingress controller
+# (nginx assumed). /events and /dashboard are SSE — the annotation below
+# disables the proxy buffering that would otherwise stall the stream.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aegis-server
+  namespace: aegis
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: aegis.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aegis-server
+                port:
+                  number: 3000

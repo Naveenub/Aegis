@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis-dlq-worker
+  namespace: aegis
+spec:
+  replicas: 1 # retry/escalation only — one is enough; scale only if DLQ backs up
+  selector:
+    matchLabels:
+      app: aegis-dlq-worker
+  template:
+    metadata:
+      labels:
+        app: aegis-dlq-worker
+    spec:
+      containers:
+        - name: dlq-worker
+          image: your-registry/aegis:latest
+          command: ["node", "workers/dlq-worker.js"]
+          envFrom:
+            - configMapRef:
+                name: aegis-config
+            - secretRef:
+                name: aegis-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi

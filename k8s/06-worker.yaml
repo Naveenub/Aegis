@@ -1,0 +1,71 @@
+# Each worker pod carries its own dind sidecar (unlike redis, this does NOT
+# need to be a shared Service — every sandbox run only needs a docker daemon
+# local to its own pod, and one dind per pod keeps the "compromised sandbox
+# capped at an unprivileged UID" property from docker-compose intact).
+#
+# Caveat: vanilla Kubernetes has no equivalent of compose's `devices:
+# /dev/fuse, /dev/net/tun` for an unprivileged rootless daemon. Without a
+# runtime like sysbox, the dind container below needs securityContext.privileged
+# to start overlayfs correctly — that's a real security regression vs. the
+# docker-compose setup and worth hardening with sysbox/kata before production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis-worker
+  namespace: aegis
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: aegis-worker
+  template:
+    metadata:
+      labels:
+        app: aegis-worker
+    spec:
+      containers:
+        - name: worker
+          image: your-registry/aegis:latest
+          command: ["node", "workers/agent-worker.js"]
+          envFrom:
+            - configMapRef:
+                name: aegis-config
+            - secretRef:
+                name: aegis-secrets
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+
+        - name: dind
+          image: docker:27-dind-rootless
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: "" # trusted pod-local loopback; no TLS needed
+          securityContext:
+            privileged: true # see caveat above
+          volumeMounts:
+            - name: dind-data
+              mountPath: /home/rootless/.local/share/docker
+          readinessProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: repo
+          persistentVolumeClaim:
+            claimName: aegis-repo
+        - name: dind-data
+          emptyDir: {} # ephemeral — sandbox images re-pull on pod restart, by design

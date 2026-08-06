@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aegis-config
+  namespace: aegis
+data:
+  PORT: "3000"
+  AEGIS_TENANTS: "default"
+  CLAUDE_AUTONOMY: "true"
+  MODE: "autonomous"
+  REDIS_URL: "redis://redis:6379"
+  AEGIS_REPO_ROOT: "/repo"
+  AEGIS_WORKTREES: "/repo/.aegis-worktrees"
+  AEGIS_IDEM_TTL_SECONDS: "604800"
+  AEGIS_CONCURRENCY_CRITICAL: "8"
+  AEGIS_CONCURRENCY_HIGH: "5"
+  AEGIS_CONCURRENCY_NORMAL: "3"
+  AEGIS_CONCURRENCY_LOW: "1"
+  AEGIS_CONCURRENCY_LEASE_MS: "120000"
+  AEGIS_MEMORY_TTL_DAYS: "30"
+  AEGIS_EVICTION_INTERVAL_HOURS: "1"
+  AEGIS_GIT_TENANT_LOCK_TTL_MS: "10000"
+  AEGIS_GIT_LOCK_TTL_MS: "15000"
+  AEGIS_MERGE_STRATEGY: "rebase"
+  DLQ_MAX_RETRIES: "2"
+  DLQ_BASE_DELAY_MS: "30000"
+  DLQ_STALE_SWEEP_MS: "900000"
+  DLQ_STALE_THRESHOLD_MS: "3600000"
+  RATE_LIMIT_WINDOW_MS: "60000"
+  RATE_LIMIT_MAX: "60"
+  RATE_LIMIT_BURST_MS: "5000"
+  RATE_LIMIT_BURST_MAX: "20"
+  # sandbox.js talks to the rootless dind sidecar over the pod's loopback —
+  # see 06-worker.yaml for why this must stay a same-pod sidecar, not a
+  # separate Service, unlike redis.
+  DOCKER_HOST: "tcp://localhost:2375"
+  AEGIS_SANDBOX_IMAGE: "node:22-alpine"
+  AEGIS_SANDBOX_MEMORY: "512m"
+  AEGIS_SANDBOX_CPUS: "1"
+  AEGIS_SANDBOX_TIMEOUT_MS: "60000"
