@@ -462,6 +462,7 @@ export function getWorker(tenantId) {
             files: step.files ?? [],
             error: attempt > 1 ? lastError : undefined,
             patch: attempt > 1 ? lastPatch  : undefined,
+            workflowId,
           };
 
           const taskDescription =
@@ -506,7 +507,7 @@ export function getWorker(tenantId) {
               throw new Error('System review failed');
             }
 
-            const aiReview = await runAgent('review-guard', patch, { patch }, tenant);
+            const aiReview = await runAgent('review-guard', patch, { patch, workflowId }, tenant);
             if (!aiReview.includes('APPROVED')) {
               await recordFailure(job.id);
               await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);

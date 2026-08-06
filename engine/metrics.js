@@ -163,6 +163,33 @@ const windowLatencyP99 = new Gauge({
   registers: [register],
 });
 
+// ─── Cost gauges (LLM token spend) ─────────────────────────────────────────────
+
+const costUsdTotalGauge = new Gauge({
+  name: 'aegis_cost_usd_total',
+  help: 'Total LLM cost in USD (all-time)',
+  registers: [register],
+});
+
+const costTokensInGauge = new Gauge({
+  name: 'aegis_cost_tokens_in_total',
+  help: 'Total input tokens consumed (all-time)',
+  registers: [register],
+});
+
+const costTokensOutGauge = new Gauge({
+  name: 'aegis_cost_tokens_out_total',
+  help: 'Total output tokens generated (all-time)',
+  registers: [register],
+});
+
+const agentCostUsdGauge = new Gauge({
+  name: 'aegis_agent_cost_usd_total',
+  help: 'LLM cost in USD by agent (all-time)',
+  labelNames: ['agent'],
+  registers: [register],
+});
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /** How many 1-minute buckets to retain. 2 h of history = 120 buckets. */
@@ -172,6 +199,21 @@ const BUCKET_RETENTION_S = 2 * 60 * 60; // 2 hours
 const WINDOWS = { '1m': 1, '5m': 5, '1h': 60 };
 
 const START_TTL_S = 3600;
+
+/**
+ * USD price per million tokens, keyed by model. Falls back to
+ * AEGIS_COST_INPUT_PER_MTOK / AEGIS_COST_OUTPUT_PER_MTOK (default: Claude
+ * Sonnet 4 list pricing) for any model not in the table, so pricing updates
+ * don't require a code change.
+ */
+const DEFAULT_PRICING_USD_PER_MTOK = {
+  input:  Number(process.env.AEGIS_COST_INPUT_PER_MTOK  ?? 3),
+  output: Number(process.env.AEGIS_COST_OUTPUT_PER_MTOK ?? 15),
+};
+
+const PRICING_USD_PER_MTOK = {
+  'claude-sonnet-4-20250514': DEFAULT_PRICING_USD_PER_MTOK,
+};
 
 // ─── Key helpers ──────────────────────────────────────────────────────────────
 
@@ -185,6 +227,11 @@ const K = {
   // windowed buckets
   win:  (window, bucketMin) => `aegis:metrics:win:${window}:${bucketMin}`,
   lat:  (window, bucketMin) => `aegis:metrics:lat:${window}:${bucketMin}`,
+  // cost tracking
+  costTotals:            'aegis:metrics:cost:totals',
+  costAgent:   name       => `aegis:metrics:cost:agent:${name}`,
+  costWorkflow: workflowId => `aegis:metrics:cost:workflow:${workflowId}`,
+  costWorkflowsIndex:    'aegis:metrics:cost:workflows',
 };
 
 // ─── Bucket helpers ───────────────────────────────────────────────────────────
@@ -400,6 +447,67 @@ export async function recordStepEnd(stepId, status) {
   await pipeline.exec();
 }
 
+/**
+ * Record token usage + USD cost for a single LLM call, rolled up into
+ * all-time totals, per-agent totals, and (when workflowId is given)
+ * per-workflow totals.
+ *
+ * @param {object} params
+ * @param {string} params.agent         - agent name (e.g. 'debugger')
+ * @param {string} [params.model]       - model id used for the call; falls back to
+ *                                        AEGIS_COST_*_PER_MTOK pricing when unknown
+ * @param {string} [params.tenantId]
+ * @param {string} [params.workflowId]  - omit to skip per-workflow attribution
+ * @param {number} [params.inputTokens=0]
+ * @param {number} [params.outputTokens=0]
+ * @returns {Promise<{ costUsd: number }>}
+ */
+export async function recordAgentCost({
+  agent,
+  model,
+  tenantId,
+  workflowId,
+  inputTokens = 0,
+  outputTokens = 0,
+}) {
+  const pricing = PRICING_USD_PER_MTOK[model] ?? DEFAULT_PRICING_USD_PER_MTOK;
+  const costUsd =
+    (inputTokens  / 1_000_000) * pricing.input +
+    (outputTokens / 1_000_000) * pricing.output;
+
+  const pipeline = redis.pipeline();
+
+  pipeline.hincrby(K.costTotals, 'tokensIn', inputTokens);
+  pipeline.hincrby(K.costTotals, 'tokensOut', outputTokens);
+  pipeline.hincrby(K.costTotals, 'calls', 1);
+  pipeline.hincrbyfloat(K.costTotals, 'costUsd', costUsd);
+
+  pipeline.hincrby(K.costAgent(agent), 'tokensIn', inputTokens);
+  pipeline.hincrby(K.costAgent(agent), 'tokensOut', outputTokens);
+  pipeline.hincrby(K.costAgent(agent), 'calls', 1);
+  pipeline.hincrbyfloat(K.costAgent(agent), 'costUsd', costUsd);
+
+  if (workflowId) {
+    pipeline.hincrby(K.costWorkflow(workflowId), 'tokensIn', inputTokens);
+    pipeline.hincrby(K.costWorkflow(workflowId), 'tokensOut', outputTokens);
+    pipeline.hincrby(K.costWorkflow(workflowId), 'calls', 1);
+    pipeline.hincrbyfloat(K.costWorkflow(workflowId), 'costUsd', costUsd);
+    if (tenantId) pipeline.hset(K.costWorkflow(workflowId), 'tenantId', tenantId);
+    pipeline.hset(K.costWorkflow(workflowId), 'updatedAt', Date.now().toString());
+  }
+
+  await pipeline.exec();
+
+  if (workflowId) {
+    // Re-read the running total so the leaderboard ZSET score reflects the
+    // full workflow cost, not just this call's delta.
+    const total = await redis.hget(K.costWorkflow(workflowId), 'costUsd');
+    await redis.zadd(K.costWorkflowsIndex, Number(total) || 0, workflowId);
+  }
+
+  return { costUsd };
+}
+
 // ─── Public read API ──────────────────────────────────────────────────────────
 
 /**
@@ -469,6 +577,50 @@ export async function getMetrics() {
     };
   }
 
+  // Cost (LLM token spend) — all-time totals, per-agent, top workflows by cost
+  const [costTotalsRaw, topWorkflowIds] = await Promise.all([
+    redis.hgetall(K.costTotals),
+    redis.zrevrange(K.costWorkflowsIndex, 0, 19),
+  ]);
+
+  const costAgentKeys = await redis.keys('aegis:metrics:cost:agent:*');
+  const costAgentRaws = costAgentKeys.length
+    ? await Promise.all(costAgentKeys.map(k => redis.hgetall(k).then(h => ({ k, h }))))
+    : [];
+
+  const costByAgent = {};
+  for (const { k, h } of costAgentRaws) {
+    const name = k.replace('aegis:metrics:cost:agent:', '');
+    costByAgent[name] = {
+      calls:      Number(h?.calls      ?? 0),
+      tokensIn:   Number(h?.tokensIn   ?? 0),
+      tokensOut:  Number(h?.tokensOut  ?? 0),
+      costUsd:    +Number(h?.costUsd   ?? 0).toFixed(6),
+    };
+  }
+
+  const topWorkflowRaws = topWorkflowIds.length
+    ? await Promise.all(topWorkflowIds.map(id => redis.hgetall(K.costWorkflow(id)).then(h => ({ id, h }))))
+    : [];
+
+  const topWorkflowsByCost = topWorkflowRaws.map(({ id, h }) => ({
+    workflowId: id,
+    tenantId:   h?.tenantId ?? null,
+    calls:      Number(h?.calls     ?? 0),
+    tokensIn:   Number(h?.tokensIn  ?? 0),
+    tokensOut:  Number(h?.tokensOut ?? 0),
+    costUsd:    +Number(h?.costUsd  ?? 0).toFixed(6),
+  }));
+
+  const cost = {
+    totalUsd:       +Number(costTotalsRaw?.costUsd  ?? 0).toFixed(6),
+    totalTokensIn:  Number(costTotalsRaw?.tokensIn  ?? 0),
+    totalTokensOut: Number(costTotalsRaw?.tokensOut ?? 0),
+    totalCalls:     Number(costTotalsRaw?.calls     ?? 0),
+    byAgent:        costByAgent,
+    topWorkflows:   topWorkflowsByCost,
+  };
+
   return {
     // All-time (backward compat)
     total,
@@ -481,6 +633,8 @@ export async function getMetrics() {
     recentSteps,
     // Time-series windows (new)
     windows,
+    // LLM cost tracking (new)
+    cost,
   };
 }
 
@@ -517,6 +671,13 @@ export async function renderPrometheus() {
     windowLatencyP50.set({ window: win }, data.latency.p50 ?? 0);
     windowLatencyP95.set({ window: win }, data.latency.p95 ?? 0);
     windowLatencyP99.set({ window: win }, data.latency.p99 ?? 0);
+  }
+
+  costUsdTotalGauge.set(m.cost.totalUsd);
+  costTokensInGauge.set(m.cost.totalTokensIn);
+  costTokensOutGauge.set(m.cost.totalTokensOut);
+  for (const [agent, stats] of Object.entries(m.cost.byAgent)) {
+    agentCostUsdGauge.set({ agent }, stats.costUsd);
   }
 
   // prom-client serialises all registered metrics (including default Node.js
@@ -557,12 +718,23 @@ export async function renderOtel() {
     makeGauge('aegis.jobs.retries',    'Total retry attempts',     m.retries),
     makeGauge('aegis.success_rate',    'All-time success rate %',  m.successRate),
     makeGauge('aegis.avg_latency_ms',  'All-time avg latency ms',  m.avgLatency),
+    makeGauge('aegis.cost.usd_total',       'Total LLM cost in USD (all-time)',   m.cost.totalUsd),
+    makeGauge('aegis.cost.tokens_in_total', 'Total input tokens (all-time)',      m.cost.totalTokensIn),
+    makeGauge('aegis.cost.tokens_out_total','Total output tokens (all-time)',     m.cost.totalTokensOut),
   ];
 
   // Per-agent
   for (const [agent, stats] of Object.entries(m.byAgent)) {
     metrics.push(makeGauge('aegis.agent.jobs',           'Jobs by agent',          stats.count,  { agent }));
     metrics.push(makeGauge('aegis.agent.avg_latency_ms', 'Avg latency by agent',   stats.avgMs,  { agent }));
+  }
+
+  // Cost by agent + top workflows by cost
+  for (const [agent, stats] of Object.entries(m.cost.byAgent)) {
+    metrics.push(makeGauge('aegis.agent.cost_usd', 'LLM cost in USD by agent (all-time)', stats.costUsd, { agent }));
+  }
+  for (const wf of m.cost.topWorkflows) {
+    metrics.push(makeGauge('aegis.workflow.cost_usd', 'LLM cost in USD by workflow', wf.costUsd, { workflow: wf.workflowId }));
   }
 
   // Windowed

@@ -315,7 +315,7 @@ export async function runSystem(task, opts = {}) {
   let lastError;
 
   for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt++) {
-    const planRaw = await runAgent('planner', task, {}, tenantId);
+    const planRaw = await runAgent('planner', task, { workflowId }, tenantId);
 
     try {
       plan = parsePlan(planRaw);

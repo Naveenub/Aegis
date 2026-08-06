@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { searchMemory } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 import { analyzeRepo, formatRepoContext } from './repo-scanner.js';
+import { recordAgentCost } from './metrics.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -90,9 +91,11 @@ async function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
  * @param {string}   agent     - Name matching a .claude/agents/<agent>.md file
  * @param {string}   task      - The concrete task description
  * @param {object}   context   - Optional extra context:
- *                                 context.files    - array of file paths to inline
- *                                 context.error    - previous error output (for debug loop)
- *                                 context.patch    - previous patch attempt (for review loop)
+ *                                 context.files      - array of file paths to inline
+ *                                 context.error      - previous error output (for debug loop)
+ *                                 context.patch      - previous patch attempt (for review loop)
+ *                                 context.workflowId - attributes token cost to this workflow
+ *                                                       (omit to skip per-workflow cost tracking)
  * @param {string}   tenantId  - Tenant identifier
  * @param {string}   [cwd]     - Tenant worktree directory to scope the repo scan and file
  *                               resolution against. Defaults to process.cwd() so callers
@@ -208,12 +211,27 @@ export async function runAgent(
     .join('\n\n');
 
   // ── 5. Call the API ──────────────────────────────────────────────────────
+  const model = 'claude-sonnet-4-20250514';
   const response = await getClient().messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model,
     max_tokens: 8192,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
   });
+
+  // Cost tracking is best-effort — a Redis hiccup must never fail the agent call.
+  try {
+    await recordAgentCost({
+      agent,
+      model: response.model ?? model,
+      tenantId,
+      workflowId: context.workflowId,
+      inputTokens: response.usage?.input_tokens ?? 0,
+      outputTokens: response.usage?.output_tokens ?? 0,
+    });
+  } catch (err) {
+    console.error(`[agent-runner] cost recording failed for agent "${agent}":`, err.message);
+  }
 
   return response.content
     .filter((b) => b.type === 'text')
