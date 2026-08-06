@@ -16,6 +16,7 @@
 import fs   from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import IORedis from 'ioredis';
 
 import { runSystem }     from '../engine/orchestrator.js';
 import { getWorkflow }   from '../engine/workflow-store.js';
@@ -24,8 +25,8 @@ import { DEFAULT_TENANT } from '../engine/tenant.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const POLL_INTERVAL_MS   = 3_000;          // 3 s between status checks
-const POLL_TIMEOUT_MS    = 10 * 60_000;    // give up after 10 min
+const POLL_TIMEOUT_MS    = 10 * 60_000;    // give up after 10 min (safety net)
+const WORKFLOW_EVENTS_PREFIX = 'aegis:workflow:events:';
 const JOBS_CONTEXT_PATH  = path.resolve(
   fileURLToPath(import.meta.url),
   '../../.claude/context/jobs.json',
@@ -36,41 +37,56 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
 /**
- * Poll until the workflow reaches a terminal state or the timeout expires.
+ * Wait for the workflow to reach a terminal state, driven by workflow-store's
+ * pub/sub events instead of fixed-interval polling — status changes are
+ * picked up the moment they're published, with no wasted round-trips while a
+ * long-running workflow is still in progress. Falls back to POLL_TIMEOUT_MS
+ * as a safety net in case an event is missed (e.g. a Redis reconnect).
  * Returns the final workflow object (or null on timeout).
  *
  * @param {string} workflowId
  * @param {string} tenantId
  * @returns {Promise<object|null>}
  */
-async function pollUntilDone(workflowId, _tenantId) {
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-  while (Date.now() < deadline) {
-    const wf = await getWorkflow(workflowId);
-
-    if (!wf) {
-      await sleep(POLL_INTERVAL_MS);
-      continue;
-    }
-
-    process.stdout.write(`\r  status: ${wf.status.padEnd(12)}`);
-
-    if (TERMINAL_STATUSES.has(wf.status)) {
-      process.stdout.write('\n');
-      return wf;
-    }
-
-    await sleep(POLL_INTERVAL_MS);
+async function waitUntilDone(workflowId, _tenantId) {
+  // Race can happen before we subscribe — check current state first.
+  const initial = await getWorkflow(workflowId);
+  if (initial && TERMINAL_STATUSES.has(initial.status)) {
+    process.stdout.write(`  status: ${initial.status}\n`);
+    return initial;
   }
 
-  process.stdout.write('\n');
-  return null; // timed out
+  const subscriber = new IORedis();
+  const channel = WORKFLOW_EVENTS_PREFIX + workflowId;
+
+  try {
+    await subscriber.subscribe(channel);
+
+    const finalStatus = await new Promise(resolve => {
+      const timer = setTimeout(() => resolve(null), POLL_TIMEOUT_MS);
+
+      subscriber.on('message', (_chan, raw) => {
+        let event;
+        try { event = JSON.parse(raw); } catch { return; }
+
+        if (TERMINAL_STATUSES.has(event.status)) {
+          clearTimeout(timer);
+          process.stdout.write(`  status: ${event.status}\n`);
+          resolve(event.status);
+        }
+      });
+    });
+
+    if (!finalStatus) {
+      process.stdout.write('\n');
+      return null; // timed out
+    }
+
+    return await getWorkflow(workflowId);
+  } finally {
+    await subscriber.quit().catch(() => {});
+  }
 }
 
 /**
@@ -137,9 +153,9 @@ try {
 }
 
 console.info(`  workflow: ${workflowId}`);
-console.info('  polling for completion...');
+console.info('  waiting for completion...');
 
-const finalWorkflow = await pollUntilDone(workflowId, tenantId);
+const finalWorkflow = await waitUntilDone(workflowId, tenantId);
 
 if (!finalWorkflow) {
   console.warn(`\n[warn] Workflow did not complete within ${POLL_TIMEOUT_MS / 1000}s.`);

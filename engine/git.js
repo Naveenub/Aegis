@@ -33,7 +33,7 @@ import { runReviewPipeline } from './review-system.js';
 import { runTests } from './test-runner.js';
 import { storeMemory } from './vector-memory.js';
 import { createJob, updateJob, incrementRetries } from './job-store.js';
-import { updateStep, getRunnableSteps, getWorkflowStatus, isWorkflowTimedOut, cancelWorkflow, flagForReview, } from './workflow-store.js';
+import { updateStep, getRunnableSteps, getWorkflowStatus, isWorkflowTimedOut, cancelWorkflow, flagForReview, completeWorkflow, } from './workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
 import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
 import { notifyWorkflowStatus } from './notifier.js';
@@ -609,6 +609,7 @@ export function getWorker(tenantId) {
                     tenantId: tenant,
                     message: `merged${mergeResult.resolvedVia === 'rebase' ? ' via auto-rebase' : ''} into aegis-tenant/${tenant}`,
                   });
+                  await completeWorkflow(workflowId);
                 } else {
                   await flagForReview(workflowId, 'merge', {
                     reason: 'merge-conflict',

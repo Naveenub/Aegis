@@ -7,6 +7,16 @@ const redis = new IORedis();
 
 const WORKFLOW_PREFIX = 'aegis:workflow:';
 const META_PREFIX = 'aegis:workflow:meta:';
+const EVENTS_PREFIX = 'aegis:workflow:events:';
+
+/**
+ * Publish a terminal/control status change so event-driven waiters (e.g. the
+ * CLI) don't have to poll. Best-effort — a missed publish just means the
+ * waiter falls back to its own timeout, so failures here are swallowed.
+ */
+function publishWorkflowEvent(workflowId, status) {
+  redis.publish(EVENTS_PREFIX + workflowId, JSON.stringify({ status, at: Date.now() })).catch(() => {});
+}
 
 // ─── Tenant ownership enforcement ─────────────────────────────────────────────
 
@@ -202,6 +212,36 @@ export async function failWorkflow(workflowId, reason) {
   if (meta.tenantId) {
     await trackWorkflowEnd(meta.tenantId).catch(() => {});
   }
+
+  publishWorkflowEvent(workflowId, 'failed');
+}
+
+/**
+ * ✅ Mark entire workflow completed. Called once all steps have finished and
+ * (where applicable) the workflow branch has been merged.
+ * @param {string} workflowId
+ */
+export async function completeWorkflow(workflowId) {
+  const metaKey = META_PREFIX + workflowId;
+
+  const metaRaw = await redis.get(metaKey);
+  if (!metaRaw) return;
+
+  const meta = JSON.parse(metaRaw);
+  if (meta.status === 'completed' || meta.status === 'failed') return;
+
+  meta.status = 'completed';
+  meta.completedAt = Date.now();
+
+  await redis.set(metaKey, JSON.stringify(meta));
+
+  await clearSlots(workflowId);
+
+  if (meta.tenantId) {
+    await trackWorkflowEnd(meta.tenantId).catch(() => {});
+  }
+
+  publishWorkflowEvent(workflowId, 'completed');
 }
 
 /**
@@ -267,6 +307,8 @@ export async function cancelWorkflow(workflowId, reason = 'user request', tenant
   if (meta.tenantId) {
     await trackWorkflowEnd(meta.tenantId).catch(() => {});
   }
+
+  publishWorkflowEvent(workflowId, 'cancelled');
 
   return true;
 }
