@@ -56,7 +56,40 @@ import {
   Gauge,
 } from 'prom-client';
 
-const redis = new IORedis();
+// ─── Lazy, fail-fast Redis client ─────────────────────────────────────────────
+// Constructed on first command, not at module load — importing this module
+// (e.g. transitively, in tests) no longer opens a socket by itself.
+// enableOfflineQueue: false + maxRetriesPerRequest: 1 + a null retryStrategy
+// mean a command issued while disconnected rejects immediately instead of
+// buffering/retrying indefinitely — the cause of the original test hangs.
+let _client = null;
+function ensureClient() {
+  if (!_client) {
+    _client = new IORedis({
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+      connectTimeout: 3000,
+      retryStrategy: () => null,
+    });
+    // Without a listener, ioredis throws an unhandled 'error' event and can
+    // crash the process. Rejections are already surfaced per-command to the
+    // write/read wrappers below, so this listener only prevents that crash.
+    _client.on('error', () => {});
+  }
+  return _client;
+}
+
+// Proxy so every existing `redis.<method>(...)` call site below keeps working
+// unchanged, while the real client is created lazily on first use. Methods
+// are bound to the real client so ioredis's internal `this` stays correct.
+const redis = new Proxy({}, {
+  get(_target, prop) {
+    const client = ensureClient();
+    const value = client[prop];
+    return typeof value === 'function' ? value.bind(client) : value;
+  },
+});
 
 // ─── prom-client registry ─────────────────────────────────────────────────────
 
@@ -364,87 +397,119 @@ async function windowCounters(window) {
 
 // ─── Public write API (same signatures as before) ────────────────────────────
 
+// Every exported write function below is fire-and-forget: a Redis failure
+// (unreachable, offline-queue rejection, timeout) is logged and swallowed
+// rather than thrown, so metrics collection can never break job orchestration
+// (engine/git.js calls these without its own try/catch) or agent execution.
+function logWriteFailure(fn, err) {
+  console.error(`[metrics] ${fn} failed (Redis unavailable?):`, err.message);
+}
+
 export async function recordStart(jobId) {
-  await Promise.all([
-    redis.hincrby(K.counters, 'total', 1),
-    redis.set(K.start(jobId), Date.now().toString(), 'EX', START_TTL_S),
-    incWindowCounter('total'),
-  ]);
-  jobsTotal.inc();
+  try {
+    await Promise.all([
+      redis.hincrby(K.counters, 'total', 1),
+      redis.set(K.start(jobId), Date.now().toString(), 'EX', START_TTL_S),
+      incWindowCounter('total'),
+    ]);
+    jobsTotal.inc();
+  } catch (err) {
+    logWriteFailure('recordStart', err);
+  }
 }
 
 export async function recordRetry() {
-  await Promise.all([
-    redis.hincrby(K.counters, 'retries', 1),
-    incWindowCounter('retries'),
-  ]);
-  jobsRetries.inc();
+  try {
+    await Promise.all([
+      redis.hincrby(K.counters, 'retries', 1),
+      incWindowCounter('retries'),
+    ]);
+    jobsRetries.inc();
+  } catch (err) {
+    logWriteFailure('recordRetry', err);
+  }
 }
 
 export async function recordSuccess(jobId) {
-  const startRaw = await redis.get(K.start(jobId));
-  const pipeline = redis.pipeline();
+  try {
+    const startRaw = await redis.get(K.start(jobId));
+    const pipeline = redis.pipeline();
 
-  pipeline.hincrby(K.counters, 'success', 1);
+    pipeline.hincrby(K.counters, 'success', 1);
 
-  if (startRaw) {
-    const latency = Date.now() - Number(startRaw);
-    pipeline.del(K.start(jobId));
-    await pipeline.exec();
-    await Promise.all([
-      recordLatencySample(jobId, latency),
-      incWindowCounter('success'),
-    ]);
-  } else {
-    await pipeline.exec();
-    await incWindowCounter('success');
+    if (startRaw) {
+      const latency = Date.now() - Number(startRaw);
+      pipeline.del(K.start(jobId));
+      await pipeline.exec();
+      await Promise.all([
+        recordLatencySample(jobId, latency),
+        incWindowCounter('success'),
+      ]);
+    } else {
+      await pipeline.exec();
+      await incWindowCounter('success');
+    }
+    jobsSuccess.inc();
+  } catch (err) {
+    logWriteFailure('recordSuccess', err);
   }
-  jobsSuccess.inc();
 }
 
 export async function recordFailure(jobId) {
-  const startRaw = await redis.get(K.start(jobId));
-  const pipeline = redis.pipeline();
+  try {
+    const startRaw = await redis.get(K.start(jobId));
+    const pipeline = redis.pipeline();
 
-  pipeline.hincrby(K.counters, 'failed', 1);
+    pipeline.hincrby(K.counters, 'failed', 1);
 
-  if (startRaw) {
-    const latency = Date.now() - Number(startRaw);
-    pipeline.del(K.start(jobId));
-    await pipeline.exec();
-    await Promise.all([
-      recordLatencySample(jobId, latency),
-      incWindowCounter('failed'),
-    ]);
-  } else {
-    await pipeline.exec();
-    await incWindowCounter('failed');
+    if (startRaw) {
+      const latency = Date.now() - Number(startRaw);
+      pipeline.del(K.start(jobId));
+      await pipeline.exec();
+      await Promise.all([
+        recordLatencySample(jobId, latency),
+        incWindowCounter('failed'),
+      ]);
+    } else {
+      await pipeline.exec();
+      await incWindowCounter('failed');
+    }
+    jobsFailed.inc();
+  } catch (err) {
+    logWriteFailure('recordFailure', err);
   }
-  jobsFailed.inc();
 }
 
 export async function recordStepStart(stepId, agentName) {
-  await redis.hset(K.step(stepId), {
-    agentName,
-    startMs: Date.now().toString(),
-    status:  'running',
-  });
+  try {
+    await redis.hset(K.step(stepId), {
+      agentName,
+      startMs: Date.now().toString(),
+      status:  'running',
+    });
+  } catch (err) {
+    logWriteFailure('recordStepStart', err);
+  }
 }
 
 export async function recordStepEnd(stepId, status) {
-  const raw = await redis.hgetall(K.step(stepId));
-  if (!raw?.startMs) return;
+  try {
+    const raw = await redis.hgetall(K.step(stepId));
+    if (!raw?.startMs) return;
 
-  const endMs      = Date.now();
-  const durationMs = endMs - Number(raw.startMs);
-  const agent      = raw.agentName || 'unknown';
+    const endMs      = Date.now();
+    const durationMs = endMs - Number(raw.startMs);
+    const agent      = raw.agentName || 'unknown';
 
-  const pipeline = redis.pipeline();
-  pipeline.hset(K.step(stepId), { endMs: endMs.toString(), durationMs: durationMs.toString(), status });
-  pipeline.zadd(K.steps, endMs, stepId);
-  pipeline.hincrby(K.agent(agent), 'count',   1);
-  pipeline.hincrby(K.agent(agent), 'totalMs', durationMs);
-  await pipeline.exec();
+    const pipeline = redis.pipeline();
+    pipeline.hset(K.step(stepId), { endMs: endMs.toString(), durationMs: durationMs.toString(), status });
+    pipeline.zadd(K.steps, endMs, stepId);
+    pipeline.hincrby(K.agent(agent), 'count',   1);
+    pipeline.hincrby(K.agent(agent), 'totalMs', durationMs);
+    await pipeline.exec();
+  } catch (err) {
+    logWriteFailure('recordStepEnd', err);
+  }
 }
 
 /**
@@ -475,34 +540,38 @@ export async function recordAgentCost({
     (inputTokens  / 1_000_000) * pricing.input +
     (outputTokens / 1_000_000) * pricing.output;
 
-  const pipeline = redis.pipeline();
+  try {
+    const pipeline = redis.pipeline();
 
-  pipeline.hincrby(K.costTotals, 'tokensIn', inputTokens);
-  pipeline.hincrby(K.costTotals, 'tokensOut', outputTokens);
-  pipeline.hincrby(K.costTotals, 'calls', 1);
-  pipeline.hincrbyfloat(K.costTotals, 'costUsd', costUsd);
+    pipeline.hincrby(K.costTotals, 'tokensIn', inputTokens);
+    pipeline.hincrby(K.costTotals, 'tokensOut', outputTokens);
+    pipeline.hincrby(K.costTotals, 'calls', 1);
+    pipeline.hincrbyfloat(K.costTotals, 'costUsd', costUsd);
 
-  pipeline.hincrby(K.costAgent(agent), 'tokensIn', inputTokens);
-  pipeline.hincrby(K.costAgent(agent), 'tokensOut', outputTokens);
-  pipeline.hincrby(K.costAgent(agent), 'calls', 1);
-  pipeline.hincrbyfloat(K.costAgent(agent), 'costUsd', costUsd);
+    pipeline.hincrby(K.costAgent(agent), 'tokensIn', inputTokens);
+    pipeline.hincrby(K.costAgent(agent), 'tokensOut', outputTokens);
+    pipeline.hincrby(K.costAgent(agent), 'calls', 1);
+    pipeline.hincrbyfloat(K.costAgent(agent), 'costUsd', costUsd);
 
-  if (workflowId) {
-    pipeline.hincrby(K.costWorkflow(workflowId), 'tokensIn', inputTokens);
-    pipeline.hincrby(K.costWorkflow(workflowId), 'tokensOut', outputTokens);
-    pipeline.hincrby(K.costWorkflow(workflowId), 'calls', 1);
-    pipeline.hincrbyfloat(K.costWorkflow(workflowId), 'costUsd', costUsd);
-    if (tenantId) pipeline.hset(K.costWorkflow(workflowId), 'tenantId', tenantId);
-    pipeline.hset(K.costWorkflow(workflowId), 'updatedAt', Date.now().toString());
-  }
+    if (workflowId) {
+      pipeline.hincrby(K.costWorkflow(workflowId), 'tokensIn', inputTokens);
+      pipeline.hincrby(K.costWorkflow(workflowId), 'tokensOut', outputTokens);
+      pipeline.hincrby(K.costWorkflow(workflowId), 'calls', 1);
+      pipeline.hincrbyfloat(K.costWorkflow(workflowId), 'costUsd', costUsd);
+      if (tenantId) pipeline.hset(K.costWorkflow(workflowId), 'tenantId', tenantId);
+      pipeline.hset(K.costWorkflow(workflowId), 'updatedAt', Date.now().toString());
+    }
 
-  await pipeline.exec();
+    await pipeline.exec();
 
-  if (workflowId) {
-    // Re-read the running total so the leaderboard ZSET score reflects the
-    // full workflow cost, not just this call's delta.
-    const total = await redis.hget(K.costWorkflow(workflowId), 'costUsd');
-    await redis.zadd(K.costWorkflowsIndex, Number(total) || 0, workflowId);
+    if (workflowId) {
+      // Re-read the running total so the leaderboard ZSET score reflects the
+      // full workflow cost, not just this call's delta.
+      const total = await redis.hget(K.costWorkflow(workflowId), 'costUsd');
+      await redis.zadd(K.costWorkflowsIndex, Number(total) || 0, workflowId);
+    }
+  } catch (err) {
+    logWriteFailure('recordAgentCost', err);
   }
 
   return { costUsd };

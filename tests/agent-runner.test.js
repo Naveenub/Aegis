@@ -37,14 +37,6 @@ vi.mock('../engine/vector-memory.js', () => ({
   searchMemory: vi.fn(async () => []),
 }));
 
-// ─── Mock metrics ─────────────────────────────────────────────────────────────
-// metrics.js opens a real IORedis client at module load time; recordAgentCost()
-// would hang against a real/absent Redis and time out every test below.
-
-vi.mock('../engine/metrics.js', () => ({
-  recordAgentCost: vi.fn(async () => {}),
-}));
-
 // ─── Mock repo-scanner ────────────────────────────────────────────────────────
 
 vi.mock('../engine/repo-scanner.js', () => ({
