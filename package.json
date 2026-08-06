@@ -1,0 +1,48 @@
+{
+  "name": "aegis",
+  "version": "1.8.0",
+  "description": "Distributed, self-healing AI workflow engine with multi-agent orchestration, DAG execution, Git-backed rollback, and vector memory.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node cli/claude.js",
+    "server": "node server.js",
+    "worker": "node workers/agent-worker.js",
+    "dlq-worker": "node workers/dlq-worker.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run --project unit",
+    "test:system": "vitest run --project system",
+    "test:all": "vitest run",
+    "test:watch": "vitest",
+    "eval": "node scripts/run-prompt-eval.js",
+    "check": "npm run lint && npm run test:coverage",
+    "test:coverage": "vitest run --coverage",
+    "test:coverage:watch": "vitest --coverage"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
+    "acorn": "^8.16.0",
+    "bullmq": "^4.0.0",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0",
+    "express-rate-limit": "^7.4.0",
+    "rate-limit-redis": "^4.2.3",
+    "ioredis": "^5.0.0",
+    "openai": "^6.39.0",
+    "pino": "^8.0.0",
+    "pino-pretty": "^10.0.0",
+    "prom-client": "^15.1.3",
+    "redlock": "^5.0.0-beta.2"
+  },
+  "optionalDependencies": {
+    "hnswlib-node": "^3.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "vitest": "^1.6.0",
+    "@vitest/coverage-v8": "1.6.0"
+  }
+}

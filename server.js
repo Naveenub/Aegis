@@ -56,8 +56,8 @@ import { saveTemplate, getTemplate }          from './engine/template-store.js';
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
-import { getWorkflow, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
-import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
+import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
+import { addStep, Priority } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
 import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
@@ -230,7 +230,7 @@ app.get(
  */
 app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
   try {
-    const workflow = await getWorkflow(req.params.workflowId);
+    const workflow = await getWorkflowStatus(req.params.workflowId);
     if (!workflow) {
       return res.status(404).json({ error: `Workflow ${req.params.workflowId} not found.` });
     }
@@ -484,45 +484,6 @@ app.get(
       res.json(job);
     } catch (err) {
       console.error('[GET /jobs/:jobId]', err);
-      res.status(500).json({ error: err.message });
-    }
-  },
-);
-
-/**
- * GET /dlq
- * List dead-letter queue entries for a tenant (raw BullMQ job view —
- * requeued-and-escalated entries stay here until BullMQ evicts them).
- *
- * Query: ?tenantId=<id>&limit=<n>
- */
-app.get(
-  '/dlq',
-  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
-  async (req, res) => {
-    const tenantId = req.query.tenantId ?? req.resolvedTenantId;
-    const limit = parseInt(req.query.limit ?? '50', 10);
-
-    if (!assertTenantAccess(req, tenantId, res)) return;
-
-    try {
-      const dlq = getDeadLetterQueue(tenantId);
-      const jobs = await dlq.getJobs(
-        ['completed', 'failed', 'waiting', 'delayed', 'active'],
-        0, limit - 1, false,
-      );
-      const items = jobs.map((job) => ({
-        id: job.id,
-        data: job.data,
-        state: job.failedReason ? 'failed' : job.finishedOn ? 'completed' : 'pending',
-        addedAt: job.timestamp,
-        finishedAt: job.finishedOn ?? null,
-        returnvalue: job.returnvalue ?? null,
-        failedReason: job.failedReason ?? null,
-      }));
-      res.json({ items });
-    } catch (err) {
-      console.error('[GET /dlq]', err);
       res.status(500).json({ error: err.message });
     }
   },
