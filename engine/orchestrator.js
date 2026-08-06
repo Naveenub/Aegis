@@ -165,26 +165,12 @@ function assertDescriptionsSubstantive(tasks) {
 // ─── Plan parsing (schema + structural) ──────────────────────────────────────
 
 /**
- * Parse and validate the planner's JSON output.
- * Throws a descriptive error rather than letting bad data silently corrupt
- * the workflow or produce an unreadable crash further downstream.
- *
- * Validation layers (in order):
- *   1. JSON parse
- *   2. Top-level shape  { tasks: [...] }
- *   3. Per-task schema  (id, agent, description, depends_on, files)
- *   4. Description substance  (not just "fix it")
- *   5. Cycle detection  (DAG check via topological sort)
- *
- * File-path validation (stripHallucinatedFiles) is a separate pass called
- * from runSystem() once the repoRoot is known, because the planner runs
- * before any worktree exists.
+ * Parse and validate the planner's raw JSON output.
  *
  * @param {string} raw   - Raw text returned by the planner agent
  * @returns {{ tasks: object[] }}
  */
 function parsePlan(raw) {
-  // ── 1. Parse JSON ──────────────────────────────────────────────────────────
   let plan;
   try {
     plan = JSON.parse(stripFences(raw));
@@ -195,7 +181,32 @@ function parsePlan(raw) {
     );
   }
 
-  // ── 2. Top-level shape ─────────────────────────────────────────────────────
+  return validatePlan(plan);
+}
+
+/**
+ * Structural + semantic validation of a plan object — shape, per-task
+ * schema, description substance, and dependency-graph cycle detection.
+ *
+ * Shared by parsePlan() (already-parsed planner JSON) and template
+ * save/run (a plan object built directly from a request body, which never
+ * passes through the planner).
+ *
+ * Validation layers (in order):
+ *   1. Top-level shape  { tasks: [...] }
+ *   2. Per-task schema  (id, agent, description, depends_on, files)
+ *   3. Description substance  (not just "fix it")
+ *   4. Cycle detection  (DAG check via topological sort)
+ *
+ * File-path validation (stripHallucinatedFiles) is a separate pass called
+ * once the repoRoot is known, because neither the planner nor a template
+ * run before any worktree exists.
+ *
+ * @param {object} plan   - { tasks: object[] }
+ * @returns {{ tasks: object[] }}
+ */
+export function validatePlan(plan) {
+  // ── 1. Top-level shape ─────────────────────────────────────────────────────
   if (plan === null || typeof plan !== 'object' || Array.isArray(plan)) {
     throw new Error(
       `Planner JSON must be an object with a "tasks" array, got: ${JSON.stringify(plan).slice(0, 200)}`
@@ -212,7 +223,7 @@ function parsePlan(raw) {
     throw new Error('Planner returned an empty tasks array — nothing to execute.');
   }
 
-  // ── 3. Per-task schema ─────────────────────────────────────────────────────
+  // ── 2. Per-task schema ─────────────────────────────────────────────────────
   const seenIds = new Set();
 
   for (let i = 0; i < plan.tasks.length; i++) {
@@ -276,10 +287,10 @@ function parsePlan(raw) {
     }
   }
 
-  // ── 4. Description substance ───────────────────────────────────────────────
+  // ── 3. Description substance ───────────────────────────────────────────────
   assertDescriptionsSubstantive(plan.tasks);
 
-  // ── 5. Cycle detection ─────────────────────────────────────────────────────
+  // ── 4. Cycle detection ─────────────────────────────────────────────────────
   assertNoCycles(plan.tasks);
 
   return plan;
@@ -288,6 +299,45 @@ function parsePlan(raw) {
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 const MAX_PLAN_ATTEMPTS = 3;
+
+/**
+ * Finish orchestrating an already-validated plan: strip hallucinated file
+ * paths, persist the workflow, and schedule its initial runnable steps.
+ * Shared by runSystem() (planner-produced plan) and runTemplate() (a saved
+ * plan re-run without the planner).
+ *
+ * @param {string}   workflowId
+ * @param {object[]} tasks
+ * @param {string}   tenantId
+ * @param {number}   priority
+ * @param {object}   opts
+ * @param {number}   [opts.timeoutMs]
+ */
+async function scheduleValidatedPlan(workflowId, tasks, tenantId, priority, opts) {
+  // File-path validation — strip hallucinated paths now that we can scan.
+  // The tenant base worktree may not exist yet (workflow worktree is created
+  // per-workflow in git.js); fall back to process.cwd() so this pass always
+  // runs rather than being skipped when there's nothing to scan.
+  const repoRoot = worktreeDir(tenantId) ?? process.cwd();
+  await stripHallucinatedFiles(tasks, repoRoot);
+
+  await createWorkflow(workflowId, tasks, {
+    tenantId,
+    priority,
+    timeoutMs: opts.timeoutMs ?? null,
+  });
+
+  // Record usage for quota tracking and billing
+  await trackWorkflowStart(tenantId);
+
+  const steps = await getRunnableSteps(workflowId, tenantId);
+
+  for (const step of steps) {
+    await addStep(workflowId, step, priority, tenantId);
+  }
+
+  logger.info({ tenantId, workflowId, steps: steps.length, priority }, 'Scheduled');
+}
 
 /**
  * @param {string} task
@@ -336,32 +386,38 @@ export async function runSystem(task, opts = {}) {
     );
   }
 
-  // 2️⃣ File-path validation — strip hallucinated paths now that we can scan.
-  //    The tenant base worktree may not exist yet (workflow worktree is created
-  //    per-workflow in git.js); fall back to process.cwd() so this pass always
-  //    runs rather than being skipped when there's nothing to scan.
-  const repoRoot = worktreeDir(tenantId) ?? process.cwd();
-  await stripHallucinatedFiles(plan.tasks, repoRoot);
+  // 2️⃣–5️⃣ Validate file paths, persist workflow, schedule initial steps
+  await scheduleValidatedPlan(workflowId, plan.tasks, tenantId, priority, opts);
 
-  // 3️⃣ Persist workflow
-  await createWorkflow(workflowId, plan.tasks, {
-    tenantId,
-    priority,
-    timeoutMs: opts.timeoutMs ?? null,
-  });
+  return workflowId;
+}
 
-  // Record usage for quota tracking and billing
-  await trackWorkflowStart(tenantId);
+/**
+ * Run a previously saved template's plan directly, skipping the planner.
+ * The template's tasks are re-validated (validatePlan) since a template is
+ * just persisted JSON that could have been edited or gone stale between
+ * save and run.
+ *
+ * @param {object}   template        - { task, tasks } from template-store.getTemplate()
+ * @param {object}   [opts]
+ * @param {string}   [opts.tenantId]  - tenant identifier (default: 'default')
+ * @param {number}   [opts.priority]  - Priority.* constant (default NORMAL)
+ * @param {number}   [opts.timeoutMs] - wall-clock timeout for the whole workflow
+ * @returns {string} workflowId
+ */
+export async function runTemplate(template, opts = {}) {
+  const tenantId   = assertTenantId(opts.tenantId ?? DEFAULT_TENANT);
+  const workflowId = crypto.randomUUID();
+  const priority   = opts.priority ?? Priority.NORMAL;
 
-  // 4️⃣ Get initial runnable steps
-  const steps = await getRunnableSteps(workflowId, tenantId);
+  logger.info({ tenantId, workflowId, task: template.task, priority }, 'Start (from template)');
 
-  // 5️⃣ Schedule — no execution here
-  for (const step of steps) {
-    await addStep(workflowId, step, priority, tenantId);
-  }
+  await assertWorkflowQuota(tenantId);
+  await initVectorIndex(tenantId);
 
-  logger.info({ tenantId, workflowId, steps: steps.length, priority }, 'Scheduled');
+  const plan = validatePlan({ tasks: template.tasks });
+
+  await scheduleValidatedPlan(workflowId, plan.tasks, tenantId, priority, opts);
 
   return workflowId;
 }

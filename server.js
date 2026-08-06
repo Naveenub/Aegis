@@ -21,6 +21,9 @@
  *   GET    /workflows/:workflowId              Get workflow status + steps
  *   POST   /workflows/:workflowId/steps/:stepId/rewind   Step-level undo
  *   GET    /workflows/:workflowId/rewind-history         Rewind audit trail
+ *   POST   /templates                          Save a task+plan as a reusable template
+ *   GET    /templates/:id                      Fetch a saved template
+ *   POST   /templates/:id/run                  Run a saved template (skips the planner)
  *   GET    /concurrency/:workflowId            Live concurrency slot status
  *   GET    /jobs                               List jobs (tenant-scoped)
  *   GET    /jobs/:jobId                        Get a single job
@@ -48,7 +51,8 @@ import { dirname, join } from 'path';
 import express           from 'express';
 
 // ─── Engine imports ───────────────────────────────────────────────────────────
-import { runSystem }                          from './engine/orchestrator.js';
+import { runSystem, runTemplate, validatePlan } from './engine/orchestrator.js';
+import { saveTemplate, getTemplate }          from './engine/template-store.js';
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
@@ -236,6 +240,100 @@ app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── Workflow templates ────────────────────────────────────────────────────────
+
+/**
+ * POST /templates
+ * Save a task + validated plan as a reusable template.
+ *
+ * Body:    { id?: string, task: string, tasks: object[], tenantId?: string }
+ * Returns: { id: string }
+ */
+app.post(
+  '/templates',
+  (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  async (req, res) => {
+    const { id, task, tasks } = req.body ?? {};
+    const tenantId = req.body?.tenantId ?? req.resolvedTenantId;
+
+    if (!task || typeof task !== 'string' || !task.trim()) {
+      return res.status(400).json({ error: '`task` (string) is required.' });
+    }
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      return res.status(400).json({ error: '`tasks` (non-empty array) is required.' });
+    }
+
+    try {
+      const plan = validatePlan({ tasks });
+      const templateId = await saveTemplate({ id, task: task.trim(), tasks: plan.tasks, tenantId });
+      res.status(201).json({ id: templateId });
+    } catch (err) {
+      console.error('[POST /templates]', err);
+      res.status(400).json({ error: err.message });
+    }
+  },
+);
+
+/**
+ * GET /templates/:id
+ * Fetch a saved template.
+ */
+app.get(
+  '/templates/:id',
+  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
+  async (req, res) => {
+    try {
+      const template = await getTemplate(req.params.id, req.query.tenantId ?? req.resolvedTenantId ?? null);
+      if (!template) {
+        return res.status(404).json({ error: `Template ${req.params.id} not found.` });
+      }
+      res.json(template);
+    } catch (err) {
+      if (err.code === 'TENANT_MISMATCH') {
+        return res.status(403).json({ error: err.message });
+      }
+      console.error('[GET /templates/:id]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+/**
+ * POST /templates/:id/run
+ * Run a saved template directly, skipping the planner.
+ *
+ * Body:    { tenantId?: string, priority?: number, timeoutMs?: number }
+ * Returns: { workflowId: string, status: 'submitted' }
+ */
+app.post(
+  '/templates/:id/run',
+  taskRateLimiter,
+  (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  async (req, res) => {
+    const tenantId = req.body?.tenantId ?? req.resolvedTenantId;
+
+    try {
+      const template = await getTemplate(req.params.id, tenantId ?? null);
+      if (!template) {
+        return res.status(404).json({ error: `Template ${req.params.id} not found.` });
+      }
+
+      const workflowId = await runTemplate(template, {
+        tenantId,
+        priority:  req.body?.priority,
+        timeoutMs: req.body?.timeoutMs,
+      });
+      res.status(202).json({ workflowId, status: 'submitted' });
+    } catch (err) {
+      if (err.code === 'TENANT_MISMATCH') {
+        return res.status(403).json({ error: err.message });
+      }
+      console.error('[POST /templates/:id/run]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 // ─── Step Rewind ──────────────────────────────────────────────────────────────
 
