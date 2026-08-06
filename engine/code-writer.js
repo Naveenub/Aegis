@@ -11,6 +11,23 @@ const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
 // check but "env" alone would not; symlinks could also redirect past a raw check).
 const BLOCKED_NAMES = ['.env', 'secrets'];
 
+// Regex patterns for credential/key file types not caught by exact basenames
+// above (private keys, certs, cloud/tool credential files).
+const BLOCKED_PATTERNS = [
+  /^id_[rd]sa$/,             // id_rsa, id_dsa
+  /^id_ed25519$/,
+  /\.pem$/,
+  /\.key$/,
+  /\.pfx$/,
+  /\.p12$/,
+  /^credentials(\.json)?$/,  // AWS/GCP-style credentials files
+  /^\.npmrc$/,
+  /^\.netrc$/,
+  /^\.pgpass$/,
+  /^\.dockercfg$/,
+  /^config\.json$/,          // docker/kube config
+];
+
 /**
  * Validate that a resolved absolute path is safe to write.
  * @param {string} resolved  - Absolute path that will be written.
@@ -28,6 +45,11 @@ export function validateTargetPath(resolved, root = PROJECT_ROOT) {
   const blocked = BLOCKED_NAMES.find(b => base === b || base.includes(b));
   if (blocked) {
     return `Blocked filename pattern "${blocked}" in: ${base}`;
+  }
+
+  const patternHit = BLOCKED_PATTERNS.find(re => re.test(base));
+  if (patternHit) {
+    return `Blocked filename pattern ${patternHit} in: ${base}`;
   }
 
   return null; // safe
