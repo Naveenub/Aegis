@@ -27,6 +27,7 @@
  *   GET    /concurrency/:workflowId            Live concurrency slot status
  *   GET    /jobs                               List jobs (tenant-scoped)
  *   GET    /jobs/:jobId                        Get a single job
+ *   GET    /dlq                                List dead-letter entries (tenant-scoped)
  *   GET    /traces                             List workflow traces
  *   GET    /traces/:traceId                    Get a single trace
  *   GET    /review-queue                       Pending human-review items
@@ -57,7 +58,7 @@ import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
 import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
-import { addStep, Priority } from './engine/queue.js';
+import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
 import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
@@ -484,6 +485,43 @@ app.get(
       res.json(job);
     } catch (err) {
       console.error('[GET /jobs/:jobId]', err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+// ─── Dead-letter queue ──────────────────────────────────────────────────────
+
+/**
+ * GET /dlq
+ * List raw dead-letter entries for the authenticated tenant.
+ * Audit trail — most entries are drained by the DLQ worker within seconds
+ * (see workers/dlq-worker.js).
+ *
+ * Query: ?tenantId=<id>&limit=<n>
+ */
+app.get(
+  '/dlq',
+  (req, res, next) => requireApiKey(req, res, next, req.query.tenantId),
+  async (req, res) => {
+    const tenantId = req.query.tenantId ?? req.resolvedTenantId;
+    const limit    = parseInt(req.query.limit ?? '100', 10);
+
+    if (!assertTenantAccess(req, tenantId, res)) return;
+
+    try {
+      const dlq  = getDeadLetterQueue(tenantId);
+      const jobs = await dlq.getJobs(['waiting', 'failed'], 0, Math.max(limit - 1, 0));
+      const items = await Promise.all(jobs.map(async (job) => ({
+        id: job.id,
+        state: await job.getState(),
+        data: job.data,
+        failedReason: job.failedReason,
+        addedAt: job.timestamp,
+      })));
+      res.json({ items });
+    } catch (err) {
+      console.error('[GET /dlq]', err);
       res.status(500).json({ error: err.message });
     }
   },
