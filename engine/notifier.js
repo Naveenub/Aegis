@@ -37,28 +37,49 @@ export async function notifyWorkflowStatus(status, { workflowId, tenantId, messa
   await Promise.all([postSlack(text), postDiscord(text)]);
 }
 
+const MAX_ATTEMPTS = 3;
+const BASE_DELAY_MS = 300;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Best-effort POST with retry/backoff on transient failures (network errors,
+// 429, 5xx). Never throws — logs and gives up after MAX_ATTEMPTS.
+async function postWithRetry(label, url, body) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return;
+      if (res.status !== 429 && res.status < 500) {
+        // non-retryable (4xx other than rate limit) — bail immediately
+        process.stderr.write(`[notifier] ${label} delivery failed: HTTP ${res.status}\n`);
+        return;
+      }
+      if (attempt === MAX_ATTEMPTS) {
+        process.stderr.write(`[notifier] ${label} delivery failed after ${MAX_ATTEMPTS} attempts: HTTP ${res.status}\n`);
+        return;
+      }
+    } catch (err) {
+      if (attempt === MAX_ATTEMPTS) {
+        process.stderr.write(`[notifier] ${label} delivery failed after ${MAX_ATTEMPTS} attempts: ${err.message}\n`);
+        return;
+      }
+    }
+    await sleep(BASE_DELAY_MS * 2 ** (attempt - 1));
+  }
+}
+
 async function postSlack(text) {
   if (!SLACK_WEBHOOK) return;
-  try {
-    await fetch(SLACK_WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-  } catch (err) {
-    process.stderr.write(`[notifier] Slack delivery failed: ${err.message}\n`);
-  }
+  await postWithRetry('Slack', SLACK_WEBHOOK, { text });
 }
 
 async function postDiscord(text) {
   if (!DISCORD_WEBHOOK) return;
-  try {
-    await fetch(DISCORD_WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: text }),
-    });
-  } catch (err) {
-    process.stderr.write(`[notifier] Discord delivery failed: ${err.message}\n`);
-  }
+  await postWithRetry('Discord', DISCORD_WEBHOOK, { content: text });
 }
