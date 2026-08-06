@@ -13,7 +13,7 @@
 import IORedis from 'ioredis';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 const TENANTS_SET_KEY  = 'aegis:tenants';
 const TENANT_META_KEY  = (id) => `aegis:tenant:meta:${id}`;

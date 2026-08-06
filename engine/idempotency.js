@@ -2,7 +2,7 @@ import IORedis from 'ioredis';
 import crypto from 'crypto';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 // How long an idempotency key is retained before Redis expires it.
 // Default: 7 days. Override with AEGIS_IDEM_TTL_SECONDS in your environment.

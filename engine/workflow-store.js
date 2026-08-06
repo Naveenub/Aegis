@@ -3,7 +3,7 @@ import { clearSlots } from './concurrency.js';
 
 import { trackWorkflowEnd } from './tenant-quota.js';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 const WORKFLOW_PREFIX = 'aegis:workflow:';
 const META_PREFIX = 'aegis:workflow:meta:';

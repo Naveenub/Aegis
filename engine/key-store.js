@@ -50,7 +50,7 @@ import { createHash, randomBytes } from 'crypto';
 import IORedis from 'ioredis';
 import { assertTenantId } from './tenant.js';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 

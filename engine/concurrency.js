@@ -36,7 +36,7 @@
 
 import IORedis from 'ioredis';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 // ─── Limits per priority tier ─────────────────────────────────────────────────
 // Priority values match BullMQ convention: lower number = higher priority.

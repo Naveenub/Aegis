@@ -2,7 +2,7 @@ import IORedis from 'ioredis';
 import Redlock from 'redlock';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 const redlock = new Redlock(
   [redis],

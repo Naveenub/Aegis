@@ -2,17 +2,27 @@
 
 ## Before you apply
 
-1. **Redis-host bug — fix or this breaks at >1 replica.**
-   `concurrency.js`, `lock.js`, `git.js`, `key-store.js`, `idempotency.js`,
-   `tenant-registry.js`, `workflow-store.js`, `vector-memory.js`, and
-   `template-store.js` construct `new IORedis()` with no arguments, which
-   defaults to `127.0.0.1:6379` and ignores `REDIS_URL`. These manifests
-   point every pod at a `redis` Service — that only works once those 9 files
-   read `process.env.REDIS_URL` like `queue.js`/`job-store.js`/`metrics.js`
-   already do. Distributed locking and per-workflow git locks are silently
-   broken across pods until this is fixed.
+1. **Redis-host bug — fixed.** `concurrency.js`, `lock.js`, `key-store.js`,
+   `idempotency.js`, `tenant-registry.js`, `workflow-store.js`,
+   `template-store.js`, and `vector-memory.js` used to construct
+   `new IORedis()` with no arguments, defaulting to `127.0.0.1:6379` and
+   ignoring `REDIS_URL`. They now read `process.env.REDIS_URL` like
+   `queue.js`/`job-store.js`/`metrics.js` already did. `git.js` does not
+   use Redis and was never affected — it was mislisted here previously.
+   Just make sure `REDIS_URL` is actually set (`01-configmap.yaml` or
+   `02-secret.yaml`) before applying.
 
-2. **Build and push the image.**
+2. **`aegis-server` is pinned to 1 replica.** When Redis Stack isn't
+   present, `vector-memory.js` falls back to a local HNSW index
+   (hnswlib-node) held in-process and persisted to the container's
+   ephemeral disk — not Redis. Fixing item 1 makes the BM25/weights/age
+   metadata shared across pods, but the HNSW ANN index itself is still
+   pod-local, so a second replica would silently miss memories written to
+   the other pod. Scale past 1 only once Redis Stack (`FT.*` commands) is
+   guaranteed available, so `searchMemory` uses the shared `FT.SEARCH`
+   path instead of HNSW.
+
+3. **Build and push the image.**
    ```bash
    docker build -t your-registry/aegis:latest .
    docker push your-registry/aegis:latest
@@ -20,7 +30,7 @@
    Then replace `your-registry/aegis:latest` in `05-server.yaml`,
    `06-worker.yaml`, `07-dlq-worker.yaml`.
 
-3. **RWX storage for `aegis-repo`.** `04-repo-pvc.yaml` requests
+4. **RWX storage for `aegis-repo`.** `04-repo-pvc.yaml` requests
    `ReadWriteMany` — the default StorageClass on most managed clusters
    (EBS, PD, Azure Disk) is `ReadWriteOnce` and will not satisfy this. Set
    `storageClassName` to an RWX-capable class (EFS, Filestore, Longhorn,

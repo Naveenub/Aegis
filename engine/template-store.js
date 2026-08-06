@@ -23,7 +23,7 @@
 import IORedis from 'ioredis';
 import crypto from 'crypto';
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 const TEMPLATE_PREFIX = 'aegis:template:';
 const versionsKey = (id) => `${TEMPLATE_PREFIX}${id}:versions`;

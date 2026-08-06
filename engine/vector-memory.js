@@ -31,7 +31,7 @@ async function getOpenAIClient() {
   return _clientPromise;
 }
 
-const redis = new IORedis();
+const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 const VECTOR_DIM = 1536;
 

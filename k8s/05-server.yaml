@@ -17,7 +17,7 @@ metadata:
   name: aegis-server
   namespace: aegis
 spec:
-  replicas: 2
+  replicas: 1 # HNSW fallback index is per-pod, in-memory — see k8s/README.md before scaling this
   selector:
     matchLabels:
       app: aegis-server
