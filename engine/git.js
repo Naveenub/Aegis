@@ -37,6 +37,7 @@ import { createJob, updateJob, incrementRetries } from './job-store.js';
 import { updateStep, getRunnableSteps, getWorkflowStatus, isWorkflowTimedOut, cancelWorkflow, flagForReview, } from './workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
 import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
+import { notifyWorkflowStatus } from './notifier.js';
 import { acquireSlot } from './concurrency.js';
 import { assertTenantId } from './tenant.js';
 import { pushAndOpenPR } from './git-remote.js';
@@ -606,6 +607,12 @@ export function getWorker(tenantId) {
                       result: `merged locally; remote push failed: ${pushErr.message}`,
                     }, tenant);
                   }
+
+                  await notifyWorkflowStatus('completed', {
+                    workflowId,
+                    tenantId: tenant,
+                    message: `merged${mergeResult.resolvedVia === 'rebase' ? ' via auto-rebase' : ''} into aegis-tenant/${tenant}`,
+                  });
                 } else {
                   await flagForReview(workflowId, 'merge', {
                     reason: 'merge-conflict',

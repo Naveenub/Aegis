@@ -35,6 +35,7 @@ import { resetStepForRetry } from '../engine/workflow-store.js';
 import { addStep, Priority } from '../engine/queue.js';
 import { logger } from '../engine/logger.js';
 import { DEFAULT_TENANT, assertTenantId } from '../engine/tenant.js';
+import { notifyWorkflowStatus } from '../engine/notifier.js';
 
 const connection = new IORedis(process.env.REDIS_URL || undefined, {
   maxRetriesPerRequest: null,
@@ -257,6 +258,12 @@ export function getDlqWorker(tenantId = DEFAULT_TENANT) {
         },
         'CRITICAL'
       );
+
+      await notifyWorkflowStatus('failed', {
+        workflowId: entry.workflowId,
+        tenantId,
+        message: `step "${entry.step?.id}" exhausted ${DLQ_MAX_RETRIES} DLQ retries — routing to human review`,
+      });
 
       await flagForReview(entry.workflowId, entry.step?.id, {
         error:         entry.error,
