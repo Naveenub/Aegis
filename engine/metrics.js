@@ -83,11 +83,59 @@ function ensureClient() {
 // Proxy so every existing `redis.<method>(...)` call site below keeps working
 // unchanged, while the real client is created lazily on first use. Methods
 // are bound to the real client so ioredis's internal `this` stays correct.
+//
+// Each returned method first gives the client a chance to finish connecting
+// before issuing the command. Without this, the very first command(s) after
+// process startup race the lazy connect: enableOfflineQueue:false makes a
+// command issued before status is 'ready' reject immediately with "Stream
+// isn't writeable", even when Redis is perfectly reachable a few ms later.
+// Callers (e.g. anomaly-detector.js's immediate first evaluation on boot,
+// which fires several redis.* calls concurrently via Promise.all) then
+// silently lose that entire first read.
+//
+// A single shared in-flight promise means concurrent callers all await the
+// *same* connection attempt (checking status === 'connecting' alone isn't
+// enough — the socket may still not be open by the time a sibling call in
+// the same Promise.all checks it). If the attempt fails, the promise is
+// cleared so a later call can retry rather than being stuck rejecting
+// forever off one bad attempt. Once status is 'ready', this is a cheap
+// synchronous check and adds no overhead.
+let _connectPromise = null;
+async function ensureReady(client) {
+  if (client.status === 'ready') return;
+  if (!_connectPromise) {
+    _connectPromise = client.connect().catch((err) => {
+      _connectPromise = null; // allow a future call to retry
+      throw err;
+    });
+  }
+  try {
+    await _connectPromise;
+  } catch {
+    // Genuinely unreachable — fall through and let the command itself
+    // reject fast, same failure mode as before this change.
+  }
+}
+
+// pipeline()/multi() are synchronous builders — they return a chainable
+// batch object immediately and don't touch the network until you call
+// .exec() on *that* object, so they must never be wrapped as async (doing
+// so previously broke every call site below with "pipeline.hgetall is not
+// a function", since callers got a Promise back instead of the batch
+// object). They're left as plain bound methods; ensureReady only guards
+// commands that hit the network directly through this proxy.
+const PASSTHROUGH_METHODS = new Set(['pipeline', 'multi']);
+
 const redis = new Proxy({}, {
   get(_target, prop) {
     const client = ensureClient();
     const value = client[prop];
-    return typeof value === 'function' ? value.bind(client) : value;
+    if (typeof value !== 'function') return value;
+    if (PASSTHROUGH_METHODS.has(prop)) return value.bind(client);
+    return async (...args) => {
+      await ensureReady(client);
+      return value.apply(client, args);
+    };
   },
 });
 
