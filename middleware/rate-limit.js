@@ -87,19 +87,44 @@ const redisClient = new IORedis(process.env.REDIS_URL ?? 'redis://127.0.0.1:6379
 });
 
 redisClient.on('error', (err) => {
-  // Log but do not crash — the store's sendCommand will throw and express-rate-limit
-  // will fall through to its in-process memory store (skipFailedRequests: false by
-  // default, so requests still count — they're just counted locally per process).
+  // Log but do not crash — see the startup probe below for how we avoid
+  // ever handing RedisStore a client that isn't actually connected yet.
   console.warn('[rate-limit] Redis connection error (falling back to in-process counters):', err.message);
 });
 
+// ─── startup connectivity probe ────────────────────────────────────────────────
+// rate-limit-redis's RedisStore constructor fires off loadIncrementScript()
+// immediately and does NOT await it — it's a fire-and-forget promise. With
+// lazyConnect + enableOfflineQueue:false, calling redisClient before it has
+// actually connected makes that first command reject synchronously, and
+// since nothing downstream awaits or catches that promise, it surfaces as an
+// unhandled rejection and crashes the whole process (Node >=15 default
+// behaviour) instead of falling back gracefully as intended.
+//
+// To avoid ever letting RedisStore touch an unconnected client, we resolve
+// connectivity up front (bounded by connectTimeout) and only build
+// Redis-backed stores if that succeeds. If it fails, `makeRedisStore`
+// returns undefined and express-rate-limit falls back to its built-in
+// in-process MemoryStore — the graceful degradation the comments describe,
+// now actually implemented.
+let redisAvailable = false;
+try {
+  await redisClient.connect();
+  redisAvailable = true;
+} catch (err) {
+  console.warn('[rate-limit] Redis unavailable at startup — using in-process counters for this process:', err.message);
+}
+
 /**
  * Build a RedisStore for one limiter, namespaced by prefix so rolling and burst
- * windows don't collide in the same Redis keyspace.
+ * windows don't collide in the same Redis keyspace. Returns undefined (which
+ * makes express-rate-limit use its default in-memory store) if Redis wasn't
+ * reachable at startup.
  *
  * @param {string} prefix  e.g. 'rl:rolling:' or 'rl:burst:'
  */
 function makeRedisStore(prefix) {
+  if (!redisAvailable) return undefined;
   return new RedisStore({
     // rate-limit-redis v4 uses a sendCommand adapter so it works with any Redis
     // client library.  For ioredis the adapter is a simple .call() wrapper.
