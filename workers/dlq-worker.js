@@ -28,18 +28,12 @@
  *                                    escalate  — cancel workflow; note is persisted
  */
 
-import { Worker } from 'bullmq';
-import IORedis from 'ioredis';
 import { flagForReview, getReviewQueue } from '../engine/workflow-store.js';
 import { resetStepForRetry } from '../engine/workflow-store.js';
-import { addStep, Priority } from '../engine/queue.js';
+import { addStep, Priority, createDeadLetterWorker } from '../engine/queue.js';
 import { logger } from '../engine/logger.js';
 import { DEFAULT_TENANT, assertTenantId } from '../engine/tenant.js';
 import { notifyWorkflowStatus } from '../engine/notifier.js';
-
-const connection = new IORedis(process.env.REDIS_URL || undefined, {
-  maxRetriesPerRequest: null,
-});
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -178,8 +172,8 @@ export function getDlqWorker(tenantId = DEFAULT_TENANT) {
 
   const dlqName = `aegis-dead-letter:${tenantId}`;
 
-  const worker = new Worker(
-    dlqName,
+  const worker = createDeadLetterWorker(
+    tenantId,
     async (job) => {
       const entry = job.data;
 
@@ -283,8 +277,7 @@ export function getDlqWorker(tenantId = DEFAULT_TENANT) {
       );
 
       return { processed: true, humanReview: true, dlqAttempt };
-    },
-    { connection }
+    }
   );
 
   worker.on('failed', (job, err) => {

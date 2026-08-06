@@ -49,11 +49,6 @@ vi.mock('ioredis', () => ({
   })),
 }));
 
-vi.mock('bullmq', () => ({
-  Worker: vi.fn().mockImplementation(() => ({ on: vi.fn() })),
-  Queue:  vi.fn().mockImplementation(() => ({ add: vi.fn() })),
-}));
-
 vi.mock('dotenv', () => ({ default: { config: vi.fn() }, config: vi.fn() }));
 
 // ─── Mock child_process (git binary) ─────────────────────────────────────────

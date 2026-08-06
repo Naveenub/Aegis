@@ -21,11 +21,10 @@
 import { execFileSync, spawnSync } from 'child_process';
 import fs   from 'fs';
 import path from 'path';
-import { Worker } from 'bullmq';
-import IORedis from 'ioredis';
+
 import { acquireLock, releaseLock } from './lock.js';
 import { applyPatch, parsePatch } from './code-writer.js';
-import { getDeadLetterQueue, addStep } from './queue.js';
+import { getDeadLetterQueue, addStep, createTaskWorker } from './queue.js';
 import { getOperationId, isApplied, markApplied } from './idempotency.js';
 import { recordStart, recordRetry, recordSuccess, recordFailure, recordStepStart, recordStepEnd } from './metrics.js';
 import { startSpan, attachPatch, attachTestResult, endSpan } from './tracer.js';
@@ -346,8 +345,6 @@ export async function removeWorkflowWorktree(workflowId, tenantId) {
 // In a horizontally-scaled deployment every worker process subscribes to the
 // same set of queues, so any process can pick up any tenant's jobs.
 
-const connection = new IORedis();
-
 const PAUSE_POLL_INTERVAL = 3000;
 const PAUSE_POLL_MAX_WAIT = 10 * 60 * 1000;
 
@@ -368,10 +365,8 @@ export function getWorker(tenantId) {
   assertTenantId(tenantId);
   if (_workers.has(tenantId)) return _workers.get(tenantId);
 
-  const queueName = `aegis-tasks:${tenantId}`;
-
-  const worker = new Worker(
-    queueName,
+  const worker = createTaskWorker(
+    tenantId,
     async (job) => {
       const { step, workflowId, tenantId: jobTenantId } = job.data;
 
@@ -670,8 +665,7 @@ export function getWorker(tenantId) {
       } finally {
         await slot.release();
       }
-    },
-    { connection }
+    }
   );
 
   worker.on('failed', async (job, err) => {

@@ -39,11 +39,6 @@ vi.mock('ioredis', () => ({
   })),
 }));
 
-vi.mock('bullmq', () => ({
-  Worker: vi.fn().mockImplementation(() => ({ on: vi.fn() })),
-  Queue:  vi.fn().mockImplementation(() => ({ add: vi.fn() })),
-}));
-
 vi.mock('dotenv', () => ({ default: { config: vi.fn() }, config: vi.fn() }));
 
 // ─── Mock child_process ───────────────────────────────────────────────────────
@@ -90,9 +85,10 @@ vi.mock('../engine/lock.js', () => ({
 }));
 
 vi.mock('../engine/queue.js', () => ({
-  getTaskQueue:     vi.fn(() => ({ add: vi.fn() })),
+  getTaskQueue:       vi.fn(() => ({ add: vi.fn() })),
   getDeadLetterQueue: vi.fn(() => ({ add: vi.fn() })),
-  addStep:          vi.fn(),
+  addStep:            vi.fn(),
+  createTaskWorker:   vi.fn(() => ({ on: vi.fn() })),
 }));
 
 vi.mock('../engine/idempotency.js', () => ({

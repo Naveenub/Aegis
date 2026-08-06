@@ -1,83 +1,18 @@
-import { Queue, QueueEvents } from 'bullmq';
-import IORedis from 'ioredis';
-import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
+import { getQueueAdapter } from './queue-adapter.js';
 
-const connection = new IORedis(process.env.REDIS_URL || undefined);
+// Public queue surface for the rest of the app. Delegates to whichever
+// backend adapter is selected (see engine/queue-adapter.js).
+const adapter = getQueueAdapter();
 
-// ─── Priority tiers (lower number = higher priority in BullMQ) ────────────────
-export const Priority = {
-  CRITICAL: 0,
-  HIGH:     1,
-  NORMAL:   5,
-  LOW:      10
-};
-
-// Each tenant gets its own BullMQ queue so jobs never interleave.
-// Queues are created lazily and cached for the process lifetime.
-const _queues     = new Map();
-const _dlQueues   = new Map();
-const _qEvents    = new Map();
-
-function tenantQueueName(tenantId) {
-  return `aegis-tasks:${tenantId}`;
-}
-
-function tenantDLQName(tenantId) {
-  return `aegis-dead-letter:${tenantId}`;
-}
-
-export function getTaskQueue(tenantId = DEFAULT_TENANT) {
-  assertTenantId(tenantId);
-  if (!_queues.has(tenantId)) {
-    _queues.set(tenantId, new Queue(tenantQueueName(tenantId), {
-      connection,
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 2000 },
-        removeOnComplete: true,
-        removeOnFail: false
-      }
-    }));
-  }
-  return _queues.get(tenantId);
-}
-
-export function getDeadLetterQueue(tenantId = DEFAULT_TENANT) {
-  assertTenantId(tenantId);
-  if (!_dlQueues.has(tenantId)) {
-    _dlQueues.set(tenantId, new Queue(tenantDLQName(tenantId), { connection }));
-  }
-  return _dlQueues.get(tenantId);
-}
-
-export function getQueueEvents(tenantId = DEFAULT_TENANT) {
-  assertTenantId(tenantId);
-  if (!_qEvents.has(tenantId)) {
-    _qEvents.set(tenantId, new QueueEvents(tenantQueueName(tenantId), { connection }));
-  }
-  return _qEvents.get(tenantId);
-}
-
-/**
- * Schedule a workflow step with explicit priority.
- *
- * @param {string} workflowId
- * @param {object} step
- * @param {number} [priority]   - Priority.* constant (default NORMAL)
- * @param {string} [tenantId]
- * @param {object} [jobOpts]    - Extra BullMQ job options merged over defaults.
- *                                Useful for the DLQ worker which passes { delay }
- *                                to defer CRITICAL-lane retries by a back-off period.
- */
-export async function addStep(workflowId, step, priority = Priority.NORMAL, tenantId = DEFAULT_TENANT, jobOpts = {}) {
-  return getTaskQueue(tenantId).add(
-    'step',
-    { workflowId, step, tenantId },
-    { priority, ...jobOpts }
-  );
-}
+export const Priority               = adapter.Priority;
+export const getTaskQueue           = adapter.getTaskQueue;
+export const getDeadLetterQueue     = adapter.getDeadLetterQueue;
+export const getQueueEvents         = adapter.getQueueEvents;
+export const addStep                = adapter.addStep;
+export const createTaskWorker       = adapter.createTaskWorker;
+export const createDeadLetterWorker = adapter.createDeadLetterWorker;
 
 // Legacy single-tenant exports kept for backwards compat (maps to DEFAULT_TENANT)
-export const taskQueue     = getTaskQueue(DEFAULT_TENANT);
-export const deadLetterQueue = getDeadLetterQueue(DEFAULT_TENANT);
-export const queueEvents   = getQueueEvents(DEFAULT_TENANT);
+export const taskQueue       = getTaskQueue();
+export const deadLetterQueue = getDeadLetterQueue();
+export const queueEvents     = getQueueEvents();
