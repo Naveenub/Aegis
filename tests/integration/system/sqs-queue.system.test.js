@@ -15,7 +15,6 @@ import { SQSClient, CreateQueueCommand, DeleteQueueCommand } from '@aws-sdk/clie
 import { createSQSAdapter } from '../../../engine/adapters/sqs-adapter.js';
 
 const TEST_TENANT = `sys-sqs-${Date.now()}`;
-const probeQueueNames = [];
 
 async function isSQSReachable() {
   const client = new SQSClient({ region: process.env.AWS_REGION || 'us-east-1' });
