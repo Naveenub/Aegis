@@ -170,6 +170,22 @@ export async function initVectorIndex(tenantId = DEFAULT_TENANT) {
   // Probe first so we know what Redis supports before trying FT.CREATE.
   const hasSearch = await _probeRedisSearch();
 
+  // Plain Redis means every process (server/worker/dlq-worker) falls back to
+  // its own local, unsynced HNSW index — a memory written by one container is
+  // invisible to search in another. That's silent data loss in any deploy
+  // with more than one process sharing REDIS_URL. Fail fast unless the
+  // operator has explicitly acknowledged single-process/dev usage.
+  if (!hasSearch && process.env.AEGIS_ALLOW_HNSW_FALLBACK !== 'true') {
+    throw new Error(
+      '[vector-memory] Redis Stack (RediSearch) is not available at ' +
+      `${process.env.REDIS_URL || 'default REDIS_URL'}, but AEGIS_ALLOW_HNSW_FALLBACK ` +
+      'is not set. In any multi-container deploy this silently desyncs memory across ' +
+      'processes. Fix: use image redis/redis-stack-server (see docker-compose.yml / ' +
+      'k8s/03-redis.yaml), or set AEGIS_ALLOW_HNSW_FALLBACK=true if this is a ' +
+      'single-process/dev environment.'
+    );
+  }
+
   if (hasSearch) {
     const idx    = indexName(tenantId);
     const prefix = memoryPrefix(tenantId);
