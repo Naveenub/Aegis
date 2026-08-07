@@ -65,6 +65,12 @@ const redis = new IORedis(process.env.REDIS_URL || undefined);
 
 let SIGNING_KEY = process.env.AEGIS_AUDIT_SIGNING_KEY;
 if (!SIGNING_KEY) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      '[audit-log] AEGIS_AUDIT_SIGNING_KEY is required when NODE_ENV=production. ' +
+      'Refusing to start with an ephemeral signing key.',
+    );
+  }
   SIGNING_KEY = randomBytes(32).toString('hex');
   console.warn(
     '[audit-log] AEGIS_AUDIT_SIGNING_KEY not set — using an ephemeral process-local key. ' +
