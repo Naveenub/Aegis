@@ -38,6 +38,7 @@ import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
 import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
 import { notifyWorkflowStatus } from './notifier.js';
 import { acquireSlot } from './concurrency.js';
+import { recordAuditEvent } from './audit-log.js';
 import { assertTenantId } from './tenant.js';
 import { pushAndOpenPR } from './git-remote.js';
 
@@ -572,6 +573,23 @@ export function getWorker(tenantId) {
                 worktreeLock = null;
 
                 const mergeResult = await finaliseWorkflow(workflowId, tenant);
+
+                // Compliance record of the moment a workflow's changes actually
+                // land on (or fail to land on) the tenant's base branch. This is
+                // deliberately the only git-level audit hook — per-step commits
+                // and retry rollbacks are internal execution plumbing, not
+                // actor-driven actions, and would just add noise to the trail.
+                recordAuditEvent(tenant, {
+                  actorId: 'system',
+                  actorType: 'system',
+                  action: mergeResult.merged ? 'workflow.merged' : 'workflow.merge_conflict',
+                  resourceType: 'workflow',
+                  resourceId: workflowId,
+                  detail: {
+                    resolvedVia: mergeResult.resolvedVia ?? null,
+                    conflicts: mergeResult.conflicts ?? [],
+                  },
+                }).catch(err => console.error('[audit] workflow.merged', err));
  
                 if (mergeResult.merged) {
                   // Record how the merge was resolved so operators can track

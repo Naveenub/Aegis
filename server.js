@@ -43,6 +43,8 @@
  *   GET    /tenants/:id/keys                   List API keys for a tenant
  *   POST   /tenants/:id/keys                   Create an API key
  *   DELETE /tenants/:id/keys/:kid              Revoke an API key
+ *   GET    /tenants/:id/audit-log              Query the compliance audit trail
+ *   GET    /tenants/:id/audit-log/export       Export audit trail (JSON or CSV)
  */
 
 import 'dotenv/config';
@@ -66,6 +68,7 @@ import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
+import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
@@ -128,10 +131,18 @@ app.post(
     }
 
     try {
+      const effectiveTenant = tenantId ?? req.resolvedTenantId;
       const workflowId = await runSystem(task.trim(), {
-        tenantId: tenantId ?? req.resolvedTenantId,
+        tenantId: effectiveTenant,
         priority,
       });
+      recordAuditEvent(effectiveTenant, {
+        actorId: req.resolvedKeyId ?? 'env-key',
+        action: 'workflow.submitted',
+        resourceType: 'workflow',
+        resourceId: workflowId,
+        detail: { task: task.trim().slice(0, 500), priority: priority ?? null },
+      }).catch(err => console.error('[audit] workflow.submitted', err));
       res.status(202).json({ workflowId, status: 'submitted' });
     } catch (err) {
       console.error('[POST /task]', err);
@@ -179,7 +190,7 @@ app.post(
   '/cancel',
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
   async (req, res) => {
-    const { workflowId, reason } = req.body ?? {};
+    const { workflowId, reason, tenantId } = req.body ?? {};
 
     if (!workflowId) {
       return res.status(400).json({ error: '`workflowId` is required.' });
@@ -187,6 +198,13 @@ app.post(
 
     try {
       await cancelWorkflow(workflowId, reason ?? 'user request');
+      recordAuditEvent(tenantId ?? req.resolvedTenantId ?? 'default', {
+        actorId: req.resolvedKeyId ?? 'env-key',
+        action: 'workflow.cancelled',
+        resourceType: 'workflow',
+        resourceId: workflowId,
+        detail: { reason: reason ?? 'user request' },
+      }).catch(err => console.error('[audit] workflow.cancelled', err));
       res.json({ ok: true, workflowId });
     } catch (err) {
       console.error('[POST /cancel]', err);
@@ -695,6 +713,14 @@ app.post('/review-queue/resolve', requireApiKey, async (req, res) => {
       await cancelWorkflow(workflowId, `escalated by operator: ${note ?? '(no note)'}`);
     }
 
+    recordAuditEvent(effectiveTenant, {
+      actorId: req.resolvedKeyId ?? 'env-key',
+      action: 'review.resolved',
+      resourceType: 'workflowStep',
+      resourceId: `${workflowId}/${stepId}`,
+      detail: { resolution, note: note ?? '' },
+    }).catch(err => console.error('[audit] review.resolved', err));
+
     res.json({ ok: true, workflowId, stepId, resolution });
   } catch (err) {
     console.error('[POST /review-queue/resolve]', err);
@@ -862,6 +888,13 @@ app.post('/tenants/:id/keys', requireApiKey, async (req, res) => {
 
   try {
     const result = await createKey(req.params.id, { label, expiresAt: expiresAt ?? null });
+    recordAuditEvent(req.params.id, {
+      actorId: req.resolvedKeyId ?? 'env-key',
+      action: 'key.created',
+      resourceType: 'apiKey',
+      resourceId: result.keyId,
+      detail: { label: result.record.label, expiresAt: result.record.expiresAt },
+    }).catch(err => console.error('[audit] key.created', err));
     res.status(201).json(result);
   } catch (err) {
     console.error('[POST /tenants/:id/keys]', err);
@@ -877,7 +910,16 @@ app.delete('/tenants/:id/keys/:keyId', requireApiKey, async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
 
   try {
-    await revokeKey(req.params.id, req.params.keyId);
+    const revoked = await revokeKey(req.params.id, req.params.keyId);
+    if (revoked) {
+      recordAuditEvent(req.params.id, {
+        actorId: req.resolvedKeyId ?? 'env-key',
+        action: 'key.revoked',
+        resourceType: 'apiKey',
+        resourceId: req.params.keyId,
+        detail: {},
+      }).catch(err => console.error('[audit] key.revoked', err));
+    }
     res.json({ ok: true, keyId: req.params.keyId });
   } catch (err) {
     console.error('[DELETE /tenants/:id/keys/:keyId]', err);
@@ -885,6 +927,67 @@ app.delete('/tenants/:id/keys/:keyId', requireApiKey, async (req, res) => {
   }
 });
 
+
+// ─── Audit log / compliance export ─────────────────────────────────────────────
+
+/**
+ * GET /tenants/:id/audit-log
+ * Query the tamper-evident compliance audit trail for a tenant.
+ *
+ * Query: ?from=<ms>&to=<ms>&action=<action>&resourceType=<type>&limit=<n>
+ * Returns: { events: AuditEvent[], chainValid: boolean }
+ */
+app.get('/tenants/:id/audit-log', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+
+  const { from, to, action, resourceType, limit } = req.query;
+
+  try {
+    const events = await queryAuditEvents(req.params.id, {
+      from:         from ? Number(from) : undefined,
+      to:           to   ? Number(to)   : undefined,
+      action:       action ?? null,
+      resourceType: resourceType ?? null,
+      limit:        limit ? Number(limit) : undefined,
+    });
+    res.json({ events, chainValid: verifyChain(events).ok });
+  } catch (err) {
+    console.error('[GET /tenants/:id/audit-log]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /tenants/:id/audit-log/export
+ * Export the full compliance audit trail as JSON or CSV, with chain
+ * integrity verified server-side (chainValid in the JSON payload / a
+ * `X-Audit-Chain-Valid` header on CSV, since CSV has no metadata envelope).
+ *
+ * Query: ?from=<ms>&to=<ms>&format=json|csv
+ */
+app.get('/tenants/:id/audit-log/export', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+
+  const { from, to, format } = req.query;
+  const fmt = format === 'csv' ? 'csv' : 'json';
+
+  try {
+    const result = await exportAuditEvents(req.params.id, {
+      from: from ? Number(from) : undefined,
+      to:   to   ? Number(to)   : undefined,
+      format: fmt,
+    });
+    res.set('Content-Type', result.contentType);
+    if (fmt === 'csv') {
+      res.set('X-Audit-Chain-Valid', String(result.chainValid));
+      res.set('Content-Disposition', `attachment; filename="audit-${req.params.id}-${Date.now()}.csv"`);
+    }
+    res.send(result.body);
+  } catch (err) {
+    console.error('[GET /tenants/:id/audit-log/export]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── SSE live-push stream ─────────────────────────────────────────────────────
 
