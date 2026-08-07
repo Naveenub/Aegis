@@ -18,7 +18,7 @@
  * mocked to a no-op so tests don't depend on redlock/timing.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../engine/lock.js', () => ({
   acquireLock: vi.fn(async () => ({ id: 'lock-stub' })),
