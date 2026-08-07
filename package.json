@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
+    "@aws-sdk/client-sqs": "^3.600.0",
     "acorn": "^8.16.0",
     "bullmq": "^4.0.0",
     "dotenv": "^16.0.0",

@@ -1,4 +1,6 @@
 import { createBullMQAdapter } from './adapters/bullmq-adapter.js';
+import { createSQSAdapter } from './adapters/sqs-adapter.js';
+import { createRedisStreamsAdapter } from './adapters/redis-streams-adapter.js';
 
 /**
  * Queue adapter interface. Any backend must implement:
@@ -12,9 +14,11 @@ import { createBullMQAdapter } from './adapters/bullmq-adapter.js';
  *   createDeadLetterWorker(tenantId, processor) -> worker handle { on }
  *
  * Backend selection is via the QUEUE_BACKEND env var (default: "bullmq").
- * Only "bullmq" is implemented today; add a new backend by writing an
- * engine/adapters/<name>-adapter.js that returns this same shape and
- * wiring it in below.
+ * Supported: "bullmq" (Redis-backed, native priority), "sqs", "redis-streams".
+ * The latter two have no native per-message priority, so they fan work
+ * across 4 physical queues/streams per tenant (see adapters/priority-tiers.js).
+ * Add another backend by writing engine/adapters/<name>-adapter.js that
+ * returns this same shape and wiring it in below.
  */
 let _adapter;
 
@@ -22,10 +26,20 @@ export function getQueueAdapter() {
   if (_adapter) return _adapter;
 
   const backend = process.env.QUEUE_BACKEND || 'bullmq';
-  if (backend !== 'bullmq') {
-    throw new Error(`Unsupported QUEUE_BACKEND: "${backend}". Only "bullmq" is implemented.`);
+  switch (backend) {
+    case 'bullmq':
+      _adapter = createBullMQAdapter();
+      break;
+    case 'sqs':
+      _adapter = createSQSAdapter();
+      break;
+    case 'redis-streams':
+      _adapter = createRedisStreamsAdapter();
+      break;
+    default:
+      throw new Error(
+        `Unsupported QUEUE_BACKEND: "${backend}". Must be one of: bullmq, sqs, redis-streams.`
+      );
   }
-
-  _adapter = createBullMQAdapter();
   return _adapter;
 }
