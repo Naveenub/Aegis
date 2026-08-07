@@ -39,7 +39,7 @@ import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
 import { notifyWorkflowStatus } from './notifier.js';
 import { acquireSlot } from './concurrency.js';
 import { recordAuditEvent } from './audit-log.js';
-import { assertTenantId } from './tenant.js';
+import { assertTenantId, assertWorkflowId } from './tenant.js';
 import { pushAndOpenPR } from './git-remote.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -77,6 +77,7 @@ export function worktreeDir(tenantId) {
  * Worktree path: <WORKTREES_BASE>/<tenantId>/<workflowId>
  */
 export async function ensureWorkflowBranch(workflowId, tenantId) {
+  assertWorkflowId(workflowId);
   const branch   = `aegis/${tenantId}/${workflowId}`;
   const cwd      = path.join(WORKTREES_BASE, tenantId, workflowId);
   const lockName = `worktree:${workflowId}`;
@@ -216,6 +217,7 @@ export function revertStepCommit(workflowId, stepId, cwd) {
  * @returns {{ merged: boolean, conflicts: string[], resolvedVia?: string }}
  */
 export async function finaliseWorkflow(workflowId, tenantId) {
+  assertWorkflowId(workflowId);
   const mergeStrategy = (process.env.AEGIS_MERGE_STRATEGY ?? 'rebase').trim().toLowerCase();
   const branch     = `aegis/${tenantId}/${workflowId}`;
   const baseBranch = `aegis-tenant/${tenantId}`;
@@ -323,6 +325,7 @@ export async function finaliseWorkflow(workflowId, tenantId) {
  * Best-effort — does not throw on failure.
  */
 export async function removeWorkflowWorktree(workflowId, tenantId) {
+  assertWorkflowId(workflowId);
   const worktreePath = path.join(WORKTREES_BASE, tenantId, workflowId);
   const branch       = `aegis/${tenantId}/${workflowId}`;
 

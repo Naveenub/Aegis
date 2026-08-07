@@ -21,3 +21,15 @@ export function assertTenantId(tenantId) {
   }
   return tenantId;
 }
+
+/**
+ * Validate and normalise a workflowId.
+ * Throws if the value is not a safe identifier (prevents path traversal —
+ * workflowId is joined onto worktree filesystem paths in git.js).
+ */
+export function assertWorkflowId(workflowId) {
+  if (typeof workflowId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(workflowId)) {
+    throw new Error(`Invalid workflowId: "${workflowId}". Must be 1-64 alphanumeric/dash/underscore chars.`);
+  }
+  return workflowId;
+}
