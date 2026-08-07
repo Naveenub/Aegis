@@ -86,6 +86,12 @@ vi.mock('ioredis', () => {
       return sorted.slice(start, end);
     }),
 
+    // ── pub/sub ──────────────────────────────────────────────────────────────
+    // publishWorkflowEvent() fires on cancel/fail/complete; best-effort, so the
+    // mock just needs to resolve (and .catch() safely if a test wants to force
+    // an error path).
+    publish: vi.fn(async () => 1),
+
     // ── pipeline — used by createWorkflow and flagForReview ─────────────────
     pipeline: vi.fn(() => {
       const ops = [];
