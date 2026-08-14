@@ -282,7 +282,7 @@ function runDirect(cmd, cwd) {
       timeout: TIMEOUT_MS,
       env: {
         ...process.env,
-        NODE_OPTIONS: `--max-old-space-size=512`,
+        NODE_OPTIONS: '--max-old-space-size=512',
       },
     });
     return { success: true, output: output.toString() || 'OK' };

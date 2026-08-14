@@ -600,7 +600,7 @@ export function getWorker(tenantId) {
                   if (mergeResult.resolvedVia === 'rebase') {
                     await updateJob(job.id, {
                       status: 'completed',
-                      result: `merged via auto-rebase (conflicts resolved automatically)`,
+                      result: 'merged via auto-rebase (conflicts resolved automatically)',
                     }, tenant);
                   }
  

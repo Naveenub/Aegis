@@ -131,7 +131,7 @@ export async function assertWorkflowQuota(tenantId = DEFAULT_TENANT) {
     throw new QuotaExceededError(
       `Tenant "${tenantId}" has reached the active workflow limit ` +
       `(${active}/${quota.maxActiveWorkflows}). ` +
-      `Cancel or complete existing workflows before submitting new ones.`,
+      'Cancel or complete existing workflows before submitting new ones.',
       { dimension: 'activeWorkflows', current: active, limit: quota.maxActiveWorkflows }
     );
   }
@@ -140,7 +140,7 @@ export async function assertWorkflowQuota(tenantId = DEFAULT_TENANT) {
     throw new QuotaExceededError(
       `Tenant "${tenantId}" has reached the daily workflow limit ` +
       `(${daily}/${quota.maxDailyWorkflows}). ` +
-      `Limit resets at UTC midnight.`,
+      'Limit resets at UTC midnight.',
       { dimension: 'dailyWorkflows', current: daily, limit: quota.maxDailyWorkflows }
     );
   }

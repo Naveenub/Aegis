@@ -162,7 +162,7 @@ if (!finalWorkflow) {
   console.warn('       Context file will reflect jobs up to this point.');
 } else {
   const statusLine = finalWorkflow.status === 'completed'
-    ? `✔  completed`
+    ? '✔  completed'
     : `✘  ${finalWorkflow.status}${finalWorkflow.cancelReason ? ` (${finalWorkflow.cancelReason})` : ''}`;
   console.info(`\n  ${statusLine}`);
 

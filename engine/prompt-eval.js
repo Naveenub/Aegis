@@ -842,7 +842,7 @@ PATCH:
   "content": "import path from 'path';\\nconst SAFE_ROOT = path.resolve('./public');\\napp.get('/file', (req, res) => {\\n  const requested = path.resolve(SAFE_ROOT, req.query.path ?? '');\\n  if (!requested.startsWith(SAFE_ROOT + path.sep)) return res.status(403).json({ error: 'Forbidden' });\\n  try { res.send(fs.readFileSync(requested, 'utf-8')); } catch { res.status(404).json({ error: 'Not found' }); }\\n});"
 }`,
 
-  'review-guard': `APPROVED`,
+  'review-guard': 'APPROVED',
 
   'meta-reviewer': `## Summary
 Workflow wf-001 completed successfully in 45s. The test-writer agent required

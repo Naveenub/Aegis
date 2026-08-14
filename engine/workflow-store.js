@@ -533,7 +533,7 @@ export async function rewindStep(workflowId, stepId, {
     return {
       ok:     false,
       reason: `Step "${stepId}" cannot be rewound — current status is "${target.status}". ` +
-              `Only completed steps can be rewound.`,
+              'Only completed steps can be rewound.',
     };
   }
 
