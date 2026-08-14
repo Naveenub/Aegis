@@ -1,0 +1,77 @@
+# Render Blueprint — one-click deploy for AEGIS.
+# https://render.com/docs/blueprint-spec
+#
+# Deliberately NOT a 1:1 port of docker-compose.yml's server/worker/dlq-worker
+# split. Two things compose gets from a single Docker host don't exist across
+# separate Render services:
+#
+#   1. Shared filesystem. server (finalise/rewind) and worker (apply/commit)
+#      must see the same git checkout (see k8s/README.md's RWX PVC note) —
+#      Render disks are per-service, not shared across services.
+#   2. Docker-in-Docker. sandbox.js shells out to `docker run`; Render grants
+#      no privileged/nested-Docker access (same restriction on Railway).
+#
+# Fix for (1): run all three processes in one service so they share one
+# container's filesystem + attached disk. Fix for (2): AEGIS_SANDBOX_MODE=local
+# — agent-generated code lint/tests run directly on the dyno, not walled off
+# by sandbox.js's container boundary.
+#
+# Net effect: this is a single-node trial/eval deploy, not the isolated,
+# horizontally-scaled topology docker-compose.yml or k8s/ gives you. For a
+# production multi-tenant deployment with real sandbox isolation, self-host
+# with docker-compose (dind sidecar) or k8s/ instead.
+
+databases:
+  - name: aegis-postgres
+    plan: free
+    databaseName: aegis
+    user: aegis
+
+services:
+  # Redis Stack — plain Render Key Value doesn't ship FT.SEARCH, which
+  # vector-memory.js requires (see k8s/README.md item 2).
+  - type: pserv
+    name: aegis-redis
+    runtime: image
+    plan: starter
+    image:
+      url: docker.io/redis/redis-stack-server:latest
+    disk:
+      name: aegis-redis-data
+      mountPath: /data
+
+  - type: web
+    name: aegis
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: >-
+      sh -c "export REDIS_URL=redis://$REDIS_HOSTPORT; node server.js & node workers/agent-worker.js & node workers/dlq-worker.js & wait -n"
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: aegis-repo
+      mountPath: /repo
+    envVars:
+      - key: AEGIS_REPO_ROOT
+        value: /repo
+      - key: REDIS_HOSTPORT
+        fromService:
+          name: aegis-redis
+          type: pserv
+          property: hostport
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aegis-postgres
+          property: connectionString
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AEGIS_API_KEY_DEFAULT
+        generateValue: true
+      - key: AEGIS_AUDIT_SIGNING_KEY
+        generateValue: true
+      - key: AEGIS_TENANTS
+        value: default
+      - key: CLAUDE_AUTONOMY
+        value: "true"
+      - key: AEGIS_SANDBOX_MODE
+        value: local
