@@ -55,6 +55,7 @@ vi.mock('ioredis', () => {
   }
 
   const client = {
+    on: () => {},
     // ── string ops ──────────────────────────────────────────────────────────
     get:  vi.fn(async (k)    => kv.get(k) ?? null),
     set:  vi.fn(async (k, v) => { kv.set(k, v); return 'OK'; }),

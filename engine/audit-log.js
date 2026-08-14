@@ -61,7 +61,17 @@ import IORedis from 'ioredis';
 import { assertTenantId } from './tenant.js';
 import { acquireLock, releaseLock } from './lock.js';
 
-const redis = new IORedis(process.env.REDIS_URL || undefined);
+const redis = new IORedis(process.env.REDIS_URL || undefined, {
+  lazyConnect:          true,
+  enableOfflineQueue:   false,
+  maxRetriesPerRequest: 1,
+  connectTimeout:       3000,
+  retryStrategy:        () => null,
+});
+// Without a listener, ioredis logs an unhandled 'error' event for every
+// connection failure. Rejections already surface per-command to callers,
+// so this listener only silences that duplicate console noise.
+redis.on('error', () => {});
 
 let SIGNING_KEY = process.env.AEGIS_AUDIT_SIGNING_KEY;
 if (!SIGNING_KEY) {

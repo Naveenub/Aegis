@@ -39,6 +39,7 @@ vi.mock('ioredis', () => {
   }
 
   const client = {
+    on: () => {},
     // Prune members whose score ≤ cutoff
     zremrangebyscore: vi.fn(async (key, _min, max) => {
       const z = getZset(key);

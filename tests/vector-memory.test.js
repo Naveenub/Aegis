@@ -23,6 +23,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // factories are moved before all imports/declarations by vitest's transformer.
 
 const redisMock = vi.hoisted(() => ({
+  on: () => {},
   call: vi.fn(),
   pipeline: vi.fn(),
   hset: vi.fn(),

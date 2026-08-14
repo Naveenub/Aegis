@@ -27,6 +27,7 @@ vi.mock('ioredis', () => {
   const hstore = new Map();
 
   const client = {
+    on:              () => {},
     get:             vi.fn(async k => store.get(k) ?? null),
     set:             vi.fn(async (k, v) => { store.set(k, v); return 'OK'; }),
     exists:          vi.fn(async k => (store.has(k) ? 1 : 0)),

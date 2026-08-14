@@ -27,6 +27,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('ioredis', () => ({
   default: vi.fn(() => ({
+    on: () => {},
     get: vi.fn(async () => null),
     set: vi.fn(async () => 'OK'),
     hget: vi.fn(async () => null),

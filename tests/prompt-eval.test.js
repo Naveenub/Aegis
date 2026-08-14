@@ -29,6 +29,7 @@ const { mockRpush, mockLrange } = vi.hoisted(() => ({
 
 vi.mock('ioredis', () => ({
   default: vi.fn().mockImplementation(() => ({
+    on:     () => {},
     rpush:  mockRpush,
     lrange: mockLrange,
   })),
