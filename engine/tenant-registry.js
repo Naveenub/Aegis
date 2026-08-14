@@ -70,6 +70,30 @@ export async function registerTenant(tenantId, meta = {}) {
 }
 
 /**
+ * Set the Stripe subscription-item mapping used to report metered usage for
+ * this tenant. One subscription item per metered dimension (workflow_run,
+ * agent_step, tokens, sandbox_minutes) — see billing/stripe-reporter.js.
+ *
+ * @param {string} tenantId
+ * @param {Record<string,string>} stripeItems - eventType -> Stripe subscription item id
+ */
+export async function setBillingConfig(tenantId, stripeItems) {
+  assertTenantId(tenantId);
+  await redis.hset(TENANT_META_KEY(tenantId), { stripeItems: JSON.stringify(stripeItems) });
+}
+
+/**
+ * Read the Stripe subscription-item mapping for a tenant.
+ * @param {string} tenantId
+ * @returns {Promise<Record<string,string>|null>}
+ */
+export async function getBillingConfig(tenantId) {
+  assertTenantId(tenantId);
+  const raw = await redis.hget(TENANT_META_KEY(tenantId), 'stripeItems');
+  return raw ? JSON.parse(raw) : null;
+}
+
+/**
  * Seed the registry from the AEGIS_TENANTS env var (and the default tenant)
  * at process start.  Called once during server / worker bootstrap.
  *

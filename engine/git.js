@@ -498,7 +498,7 @@ export function getWorker(tenantId) {
           try {
             ({ cwd, lock: worktreeLock } = await ensureWorkflowBranch(workflowId, tenant));
 
-            const review = runReviewPipeline(patch, cwd, file);
+            const review = runReviewPipeline(patch, cwd, file, tenant);
             if (!review.ok) {
               await recordFailure(job.id);
               await updateJob(job.id, { status: 'failed', result: review.message }, tenant);
@@ -550,7 +550,7 @@ export function getWorker(tenantId) {
             applyPatch(file, content, cwd);
             commitChanges(`Aegis: ${step.id}`, cwd);
 
-            const testResult = runTests(cwd, [file]);
+            const testResult = runTests(cwd, [file], tenant);
             await attachTestResult(workflowId, step.id, { success: testResult.success, output: testResult.output });
 
             if (testResult.success) {

@@ -34,7 +34,7 @@ function findTestFiles(root) {
  *                                 Empty = run the full discovered suite.
  * @returns {{ success: boolean, output: string }}
  */
-function vitestRun(cwd, projectRoot, targets = []) {
+function vitestRun(cwd, projectRoot, targets = [], tenantId) {
   const vitest = path.join(projectRoot, 'node_modules', '.bin', 'vitest');
 
   const cmd = [
@@ -45,7 +45,7 @@ function vitestRun(cwd, projectRoot, targets = []) {
     ...targets,
   ].join(' ');
 
-  return runInSandbox(cmd, cwd, projectRoot);
+  return runInSandbox(cmd, cwd, projectRoot, tenantId);
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -76,9 +76,10 @@ function vitestRun(cwd, projectRoot, targets = []) {
  * @param {string[]} [files] - Source files that were patched (vitest resolves
  *                             related test files via its coverage/relation map).
  *                             If empty, only the full-suite pass runs.
+ * @param {string}   [tenantId] - Tenant to attribute sandbox-minutes usage to.
  * @returns {{ success: boolean, output: string }}
  */
-export function runTests(cwd, files = []) {
+export function runTests(cwd, files = [], tenantId) {
   const projectRoot = path.resolve(import.meta.dirname, '..');
 
   // ── Pass 1: scoped run ────────────────────────────────────────────────────
@@ -115,7 +116,7 @@ export function runTests(cwd, files = []) {
     }
 
     if (scopedTargets.size > 0) {
-      scopedResult = vitestRun(cwd, projectRoot, [...scopedTargets]);
+      scopedResult = vitestRun(cwd, projectRoot, [...scopedTargets], tenantId);
 
       // Fast-fail: if the directly-related tests already break, no need to
       // spend time on the full suite.  The worker will roll back immediately.
@@ -144,7 +145,7 @@ export function runTests(cwd, files = []) {
     };
   }
 
-  const fullResult = vitestRun(cwd, projectRoot, allTests);
+  const fullResult = vitestRun(cwd, projectRoot, allTests, tenantId);
 
   // ── Combine outputs ───────────────────────────────────────────────────────
   const sections = [];

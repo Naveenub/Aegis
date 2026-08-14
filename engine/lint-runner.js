@@ -18,9 +18,10 @@ import { runInSandbox } from './sandbox.js';
  *
  * @param {string}   cwd     - Absolute path to the tenant worktree directory.
  * @param {string[]} [files] - Relative paths (within cwd) of files to lint.
+ * @param {string}   [tenantId] - Tenant to attribute sandbox-minutes usage to.
  * @returns {{ success: boolean, output: string }}
  */
-export function runLint(cwd, files = []) {
+export function runLint(cwd, files = [], tenantId) {
   const projectRoot = path.resolve(import.meta.dirname, '..');
 
   // Resolve the eslint binary path as seen inside the container.
@@ -41,5 +42,5 @@ export function runLint(cwd, files = []) {
     targets,
   ].join(' ');
 
-  return runInSandbox(cmd, cwd, projectRoot);
+  return runInSandbox(cmd, cwd, projectRoot, tenantId);
 }

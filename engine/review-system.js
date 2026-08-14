@@ -72,8 +72,9 @@ export function validatePatch(patch, root) {
  * @param {string} patch   - Raw patch JSON string.
  * @param {string} [cwd]   - Tenant worktree directory (from ensureWorkflowBranch).
  * @param {string} [file]  - Relative path of the file being patched (for scoped lint).
+ * @param {string} [tenantId] - Tenant to attribute sandbox-minutes usage to.
  */
-export function runReviewPipeline(patch, cwd, file) {
+export function runReviewPipeline(patch, cwd, file, tenantId) {
   // 1. structural + path validation -- pass cwd as root so path.resolve uses
   //    the worktree as the anchor, not process.cwd() of the server process.
   const base = validatePatch(patch, cwd);
@@ -82,8 +83,8 @@ export function runReviewPipeline(patch, cwd, file) {
   // 2. lint -- scoped to the patched file when we know it, whole worktree otherwise
   const lintFiles = file ? [file] : [];
   const lint = cwd
-    ? runLint(cwd, lintFiles)
-    : runLint(process.cwd(), lintFiles);
+    ? runLint(cwd, lintFiles, tenantId)
+    : runLint(process.cwd(), lintFiles, tenantId);
 
   if (!lint.success) {
     return reject('Lint failed:\n' + lint.output);
@@ -91,8 +92,8 @@ export function runReviewPipeline(patch, cwd, file) {
 
   // 3. pre-apply baseline test -- full suite in the worktree
   const tests = cwd
-    ? runTests(cwd)
-    : runTests(process.cwd());
+    ? runTests(cwd, [], tenantId)
+    : runTests(process.cwd(), [], tenantId);
 
   if (!tests.success) {
     return reject('Tests failed:\n' + tests.output);

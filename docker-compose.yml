@@ -16,6 +16,25 @@ services:
       timeout: 3s
       retries: 5
 
+  # Append-only store for engine/usage-recorder.js. Separate from Redis
+  # because metered billing events must survive independently of the
+  # rate-limit counters (tenant-quota.js) and must be queryable/aggregatable
+  # for the Stripe reporter (engine/billing/stripe-reporter.js).
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis
+      POSTGRES_DB: aegis
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   server:
     build: .
     command: node server.js
@@ -25,8 +44,11 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
       - repo:/repo
@@ -71,12 +93,15 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       DOCKER_HOST: tcp://dind:2375
+      DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis
     volumes:
       - repo:/repo
     depends_on:
       redis:
         condition: service_healthy
       dind:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   dlq-worker:
@@ -96,3 +121,4 @@ volumes:
   # server (finalise/rewind) and worker (apply/commit) see the same git state.
   repo:
   dind-data:
+  postgres-data:

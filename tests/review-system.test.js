@@ -165,12 +165,12 @@ describe('runReviewPipeline() — happy path', () => {
 describe('runReviewPipeline() — cwd propagation', () => {
   it('passes cwd to runLint when provided', () => {
     runReviewPipeline(VALID_PATCH, '/tmp/worktree-abc');
-    expect(runLint).toHaveBeenCalledWith('/tmp/worktree-abc', expect.any(Array));
+    expect(runLint).toHaveBeenCalledWith('/tmp/worktree-abc', expect.any(Array), undefined);
   });
 
   it('passes cwd to runTests when provided', () => {
     runReviewPipeline(VALID_PATCH, '/tmp/worktree-abc');
-    expect(runTests).toHaveBeenCalledWith('/tmp/worktree-abc');
+    expect(runTests).toHaveBeenCalledWith('/tmp/worktree-abc', [], undefined);
   });
 
   it('passes the file path to runLint as scoped lint target', () => {
@@ -187,12 +187,18 @@ describe('runReviewPipeline() — cwd propagation', () => {
 
   it('falls back to process.cwd() for lint when cwd is omitted', () => {
     runReviewPipeline(VALID_PATCH);
-    expect(runLint).toHaveBeenCalledWith(process.cwd(), []);
+    expect(runLint).toHaveBeenCalledWith(process.cwd(), [], undefined);
   });
 
   it('falls back to process.cwd() for tests when cwd is omitted', () => {
     runReviewPipeline(VALID_PATCH);
-    expect(runTests).toHaveBeenCalledWith(process.cwd());
+    expect(runTests).toHaveBeenCalledWith(process.cwd(), [], undefined);
+  });
+
+  it('passes tenantId through to runLint and runTests when provided', () => {
+    runReviewPipeline(VALID_PATCH, '/tmp/worktree-abc', undefined, 'acme');
+    expect(runLint).toHaveBeenCalledWith('/tmp/worktree-abc', [], 'acme');
+    expect(runTests).toHaveBeenCalledWith('/tmp/worktree-abc', [], 'acme');
   });
 });
 

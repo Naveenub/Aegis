@@ -5,6 +5,7 @@ import { searchMemory } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 import { analyzeRepo, formatRepoContext } from './repo-scanner.js';
 import { recordAgentCost } from './metrics.js';
+import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -232,6 +233,17 @@ export async function runAgent(
   } catch (err) {
     console.error(`[agent-runner] cost recording failed for agent "${agent}":`, err.message);
   }
+
+  // Metered billing — mirrors the same call site as cost tracking above.
+  recordUsageEvent({
+    tenantId, eventType: EVENT_TYPES.AGENT_STEP, quantity: 1,
+    metadata: { agent, workflowId: context.workflowId },
+  });
+  recordUsageEvent({
+    tenantId, eventType: EVENT_TYPES.TOKENS,
+    quantity: (response.usage?.input_tokens ?? 0) + (response.usage?.output_tokens ?? 0),
+    metadata: { agent, workflowId: context.workflowId, model: response.model ?? model },
+  });
 
   return response.content
     .filter((b) => b.type === 'text')

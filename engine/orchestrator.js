@@ -5,6 +5,7 @@ import { createWorkflow, getRunnableSteps } from './workflow-store.js';
 import { initVectorIndex } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 import { assertWorkflowQuota, trackWorkflowStart } from './tenant-quota.js';
+import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 import { scanRepo } from './repo-scanner.js';
 import { worktreeDir } from './git.js';
 // crypto.randomUUID() is built into Node 14.17+ — no external package needed.
@@ -329,6 +330,9 @@ async function scheduleValidatedPlan(workflowId, tasks, tenantId, priority, opts
 
   // Record usage for quota tracking and billing
   await trackWorkflowStart(tenantId);
+  recordUsageEvent({
+    tenantId, eventType: EVENT_TYPES.WORKFLOW_RUN, quantity: 1, metadata: { workflowId },
+  });
 
   const steps = await getRunnableSteps(workflowId, tenantId);
 

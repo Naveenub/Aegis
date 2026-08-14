@@ -1,6 +1,7 @@
 import { execSync, execFileSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 
 /**
  * sandbox.js
@@ -132,36 +133,47 @@ if (DISABLE_EXPLICITLY) {
  * @param {string} cmd         - Shell command to run
  * @param {string} cwd         - Absolute path to the tenant worktree on the host
  * @param {string} projectRoot - Absolute path to the project root (for node_modules)
+ * @param {string} [tenantId]  - Tenant to attribute sandbox-minutes usage to.
+ *                               Optional so existing callers (tests, direct
+ *                               script invocations) keep working unmetered.
  * @returns {{ success: boolean, output: string }}
  */
-export function runInSandbox(cmd, cwd, projectRoot) {
+export function runInSandbox(cmd, cwd, projectRoot, tenantId) {
   const dockerAvailable = isDockerAvailable();
+  const startedAt = Date.now();
 
-  // ── Rule 1: Docker is up — always sandbox ────────────────────────────────
-  if (dockerAvailable) {
-    return runDocker(cmd, cwd, projectRoot);
+  const result = dockerAvailable
+    ? runDocker(cmd, cwd, projectRoot)
+    : UNSANDBOXED_OK
+      ? runDirect(cmd, cwd)
+      : {
+          success: false,
+          output:
+            '[sandbox] Execution blocked: Docker is not available and no unsandboxed ' +
+            'fallback is configured.\n\n' +
+            'Fix options:\n' +
+            '  • Start Docker (recommended for production)\n' +
+            '  • Set AEGIS_SANDBOX_MODE=local in .env  (local dev without Docker)\n' +
+            '  • CI pipelines are detected automatically via the CI=true env var\n' +
+            '    (GitHub Actions, GitLab CI, CircleCI, Travis CI, Buildkite, etc.)\n\n' +
+            'Never set AEGIS_SANDBOX_MODE=local or AEGIS_SANDBOX_DISABLE=true in production.',
+        };
+
+  // Billable regardless of pass/fail — the container/process still consumed
+  // wall-clock time. Not billable when execution was blocked outright (rule
+  // 3): nothing ran, so there's nothing to meter.
+  const blocked = !dockerAvailable && !UNSANDBOXED_OK;
+  if (tenantId && !blocked) {
+    const minutes = (Date.now() - startedAt) / 60000;
+    recordUsageEvent({
+      tenantId,
+      eventType: EVENT_TYPES.SANDBOX_MINUTES,
+      quantity: minutes,
+      metadata: { mode: dockerAvailable ? 'docker' : 'direct' },
+    });
   }
 
-  // ── Rule 2: No Docker, but a recognised fallback is active ───────────────
-  if (UNSANDBOXED_OK) {
-    return runDirect(cmd, cwd);
-  }
-
-  // ── Rule 3: No Docker, no explicit opt-in — hard fail ───────────────────
-  // Returning { success: false } causes the worker's review pipeline to reject
-  // the patch and trigger a retry or DLQ routing — no host code execution occurs.
-  return {
-    success: false,
-    output:
-      '[sandbox] Execution blocked: Docker is not available and no unsandboxed ' +
-      'fallback is configured.\n\n' +
-      'Fix options:\n' +
-      '  • Start Docker (recommended for production)\n' +
-      '  • Set AEGIS_SANDBOX_MODE=local in .env  (local dev without Docker)\n' +
-      '  • CI pipelines are detected automatically via the CI=true env var\n' +
-      '    (GitHub Actions, GitLab CI, CircleCI, Travis CI, Buildkite, etc.)\n\n' +
-      'Never set AEGIS_SANDBOX_MODE=local or AEGIS_SANDBOX_DISABLE=true in production.',
-  };
+  return result;
 }
 
 // ─── Docker execution ─────────────────────────────────────────────────────────
