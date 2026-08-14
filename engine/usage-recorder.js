@@ -143,6 +143,28 @@ export async function getUnreportedUsage() {
 }
 
 /**
+ * Sum a tenant's usage for one event type since a given timestamp, regardless
+ * of report status. Used by billing/allowance.js to check consumption against
+ * a tier's included allowance for the current billing period.
+ *
+ * @param {string} tenantId
+ * @param {string} eventType  - one of EVENT_TYPES
+ * @param {Date}   since      - start of the current billing period
+ * @returns {Promise<number>}
+ */
+export async function getUsageInPeriod(tenantId, eventType, since) {
+  assertTenantId(tenantId);
+  await ensureSchema();
+  const { rows } = await getPool().query(
+    `SELECT COALESCE(SUM(quantity), 0) AS quantity
+     FROM usage_events
+     WHERE tenant_id = $1 AND event_type = $2 AND occurred_at >= $3`,
+    [tenantId, eventType, since]
+  );
+  return Number(rows[0].quantity);
+}
+
+/**
  * Mark a batch of rows as reported once Stripe has accepted the usage record.
  *
  * @param {number[]} ids
