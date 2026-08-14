@@ -40,6 +40,7 @@
  *   GET    /tenants                            List registered tenants
  *   POST   /tenants                            Register a new tenant
  *   GET    /tenants/:id                        Get tenant metadata
+ *   GET    /tenants/:id/billing                 Tier + usage vs. included allowance
  *   GET    /tenants/:id/keys                   List API keys for a tenant
  *   POST   /tenants/:id/keys                   Create an API key
  *   DELETE /tenants/:id/keys/:kid              Revoke an API key
@@ -63,7 +64,11 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getTier } from './engine/tenant-registry.js';
+import { setQuota } from './engine/tenant-quota.js';
+import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
+import { checkAllowance } from './engine/billing/allowance.js';
+import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
@@ -819,18 +824,27 @@ app.get('/tenants', requireApiKey, async (_req, res) => {
  * POST /tenants
  * Register a new tenant.
  *
- * Body: { tenantId: string, label?: string }
+ * Body: { tenantId: string, label?: string, tier?: 'starter'|'pro'|'enterprise' }
+ * Unknown/omitted tier falls back to DEFAULT_TIER. Sets tenant-quota.js
+ * limits from the tier's `quota` block at creation time.
  */
 app.post('/tenants', requireApiKey, async (req, res) => {
-  const { tenantId, label } = req.body ?? {};
+  const { tenantId, label, tier } = req.body ?? {};
 
   if (!tenantId || typeof tenantId !== 'string' || !tenantId.trim()) {
     return res.status(400).json({ error: '`tenantId` (string) is required.' });
   }
+  if (tier !== undefined && !TIERS[tier]) {
+    return res.status(400).json({ error: `Unknown tier "${tier}". Valid: ${Object.keys(TIERS).join(', ')}.` });
+  }
 
   try {
-    const tenant = await registerTenant(tenantId.trim(), { label });
-    res.status(201).json(tenant);
+    const id = tenantId.trim();
+    const resolvedTier = tier ?? DEFAULT_TIER;
+    const tenant = await registerTenant(id, { label });
+    await setTier(id, resolvedTier);
+    await setQuota(id, getTierConfig(resolvedTier).quota);
+    res.status(201).json({ ...tenant, tier: resolvedTier });
   } catch (err) {
     console.error('[POST /tenants]', err);
     res.status(500).json({ error: err.message });
@@ -850,6 +864,28 @@ app.get('/tenants/:id', requireApiKey, async (req, res) => {
     res.json(tenant);
   } catch (err) {
     console.error('[GET /tenants/:id]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /tenants/:id/billing
+ * Current tier and this billing period's usage vs. included allowance,
+ * per metered dimension. Overage is informational — it's already flowing to
+ * Stripe via billing/stripe-reporter.js regardless of this endpoint.
+ */
+app.get('/tenants/:id/billing', requireApiKey, async (req, res) => {
+  try {
+    const tenant = await getTenant(req.params.id);
+    if (!tenant) {
+      return res.status(404).json({ error: `Tenant "${req.params.id}" not found.` });
+    }
+    const usage = await Promise.all(
+      Object.values(EVENT_TYPES).map((eventType) => checkAllowance(req.params.id, eventType))
+    );
+    res.json({ tenantId: req.params.id, tier: usage[0]?.tier ?? DEFAULT_TIER, usage });
+  } catch (err) {
+    console.error('[GET /tenants/:id/billing]', err);
     res.status(500).json({ error: err.message });
   }
 });
