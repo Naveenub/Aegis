@@ -94,6 +94,32 @@ export async function getBillingConfig(tenantId) {
 }
 
 /**
+ * Set the pricing tier for a tenant. Validity of the tier name itself is
+ * billing/tiers.js's concern (getTierConfig() falls back to DEFAULT_TIER for
+ * unknown values) — this just persists whatever string is passed.
+ *
+ * @param {string} tenantId
+ * @param {string} tier
+ */
+export async function setTier(tenantId, tier) {
+  assertTenantId(tenantId);
+  await redis.hset(TENANT_META_KEY(tenantId), { tier });
+}
+
+/**
+ * Read a tenant's pricing tier. Returns null if never set (caller should
+ * treat null as DEFAULT_TIER — see billing/tiers.js).
+ *
+ * @param {string} tenantId
+ * @returns {Promise<string|null>}
+ */
+export async function getTier(tenantId) {
+  assertTenantId(tenantId);
+  const tier = await redis.hget(TENANT_META_KEY(tenantId), 'tier');
+  return tier ?? null;
+}
+
+/**
  * Seed the registry from the AEGIS_TENANTS env var (and the default tenant)
  * at process start.  Called once during server / worker bootstrap.
  *
