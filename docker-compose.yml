@@ -45,6 +45,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis
+      AEGIS_REPO_ROOT: /repo
     depends_on:
       redis:
         condition: service_healthy
@@ -94,6 +95,7 @@ services:
       REDIS_URL: redis://redis:6379
       DOCKER_HOST: tcp://dind:2375
       DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis
+      AEGIS_REPO_ROOT: /repo
     volumes:
       - repo:/repo
     depends_on:
