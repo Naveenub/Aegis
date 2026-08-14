@@ -74,6 +74,7 @@ import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
+import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 
@@ -1176,6 +1177,12 @@ app.get('/events', requireApiKey, (req, res) => {
     // No API-key auth: webhook requests are authenticated via HMAC signature
     // (GitHub) or a shared secret token (GitLab) inside webhookRouter itself.
     app.use('/webhooks', webhookRouter);
+
+// ─── Inbound webhooks (Stripe → log "partner paid") ──────────────────────────
+    //
+    // POST /webhooks/stripe — logs a flag line on checkout/invoice payment
+    // events. No tenant provisioning, no metering — see stripe-webhook.js.
+    app.use('/webhooks', stripeWebhookRouter);
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 
