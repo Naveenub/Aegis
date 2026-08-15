@@ -198,15 +198,15 @@ npm run test:coverage # with coverage
 
 ### One-click (trial / eval)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/YOUR_ORG/aegis)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Naveenub/aegis)
 
 Provisions Postgres, a Redis Stack private service, and a single combined
 web service (server + worker + dlq-worker sharing one disk). You'll be
 prompted for `ANTHROPIC_API_KEY` during setup. This topology trades away
 Docker-sandboxed patch execution (runs with `AEGIS_SANDBOX_MODE=local`
 instead — see `render.yaml` for why) and horizontal worker scaling in
-exchange for a deploy with no self-hosting step. Swap `YOUR_ORG` for your
-fork before sharing the button.
+exchange for a deploy with no self-hosting step. Fork the repo first if
+you're deploying your own copy.
 
 ### Self-hosted (production)
 

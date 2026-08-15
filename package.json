@@ -3,6 +3,25 @@
   "version": "2.0.0",
   "description": "Distributed, self-healing AI workflow engine with multi-agent orchestration, DAG execution, Git-backed rollback, and vector memory.",
   "type": "module",
+  "license": "MIT",
+  "author": "Naveen Badiger <badigernaveen2@gmail.com> (https://github.com/Naveenub)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Naveenub/aegis.git"
+  },
+  "homepage": "https://github.com/Naveenub/aegis#readme",
+  "bugs": {
+    "url": "https://github.com/Naveenub/aegis/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "multi-agent-orchestration",
+    "llm",
+    "dag",
+    "workflow-engine",
+    "docker-sandbox",
+    "multi-tenant"
+  ],
   "engines": {
     "node": ">=20.0.0"
   },
