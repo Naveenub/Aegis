@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: aegis-billing-flush
+  namespace: aegis
+spec:
+  schedule: "0 * * * *" # hourly
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: billing-flush
+              image: your-registry/aegis:latest
+              command: ["node", "scripts/billing-flush.js"]
+              envFrom:
+                - configMapRef:
+                    name: aegis-config
+                - secretRef:
+                    name: aegis-secrets
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi

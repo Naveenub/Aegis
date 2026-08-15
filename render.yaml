@@ -75,3 +75,16 @@ services:
         value: "true"
       - key: AEGIS_SANDBOX_MODE
         value: local
+
+  - type: cron
+    name: aegis-billing-flush
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: npm run billing:flush
+    plan: starter
+    schedule: "0 * * * *" # hourly
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aegis-postgres
+          property: connectionString

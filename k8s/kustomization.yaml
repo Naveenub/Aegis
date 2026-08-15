@@ -12,3 +12,4 @@ resources:
   - 07-dlq-worker.yaml
   - 08-hpa.yaml
   - 09-ingress.yaml
+  - 10-billing-flush-cronjob.yaml
