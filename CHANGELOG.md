@@ -25,7 +25,7 @@ Major release. This snapshot summarizes AEGIS as it stands today — a Git-backe
 ### Known limitations
 
 - `npm run test:system` requires a live Docker daemon and Redis Stack; it won't run in sandboxed/CI environments without those.
-- The local-HNSW vector memory fallback (plain Redis, no Stack) is single-process only and silently returns empty results across the default multi-container deployment — Redis Stack is required for correct behavior.
+- The local-HNSW vector memory fallback (plain Redis, no Stack) is single-process only and desyncs memory across a multi-container deployment. `initVectorIndex()` now fails fast with a descriptive error in that case unless `AEGIS_ALLOW_HNSW_FALLBACK=true` is explicitly set (single-process/dev only) — see `engine/vector-memory.js`.
 
 ---
 
