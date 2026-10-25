@@ -71,8 +71,8 @@ async function main() {
   console.info('─'.repeat(60));
 
   // API-level failures (billing, auth, network) say nothing about prompt
-  // quality. Report them as infrastructure errors (exit 2, same as the other
-  // infra paths above) instead of as a prompt regression (exit 1).
+  // quality. Exit 3 (distinct from 1 = prompt regression and 2 = harness
+  // crash/misconfig) so CI can tell an outage apart from a real failure.
   const apiFailures = report.agents.flatMap(a => a.cases).filter(c => c.apiError);
   if (apiFailures.length > 0) {
     console.error(
@@ -86,7 +86,7 @@ async function main() {
         '  ANTHROPIC_API_KEY secret at a key from a funded organization.'
       );
     }
-    process.exit(2);
+    process.exit(3);
   }
 
   if (!report.passed) {
