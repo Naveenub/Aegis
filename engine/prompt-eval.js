@@ -97,6 +97,14 @@ const redis = new IORedis(process.env.REDIS_URL || undefined, {
 // so this listener only silences that duplicate console noise.
 redis.on('error', () => {});
 
+// With lazyConnect + enableOfflineQueue:false, the first command is rejected
+// ("Stream isn't writeable") because nothing has opened the socket yet.
+// Connect explicitly; an unreachable Redis rejects here and the callers' own
+// try/catch treats it as the usual non-fatal "history unavailable" case.
+async function ensureConnected() {
+  if (redis.status === 'wait') await redis.connect();
+}
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 export const PASS_THRESHOLD  = 6;   // minimum score out of 8 per case
@@ -709,7 +717,10 @@ export async function evalAgent(agent, cases, opts = {}) {
     cases:     results,
   };
 
-  if (!dryRun) {
+  // Cases that never reached the API (billing, auth, network) score 0 for
+  // reasons unrelated to the prompt; recording them would show up in the
+  // meta-reviewer's trend data as a prompt regression.
+  if (!dryRun && !results.some(r => r.apiError)) {
     await recordEvalResult(evalResult);
   }
 
@@ -777,6 +788,7 @@ export async function recordEvalResult(result) {
       })),
     });
 
+    await ensureConnected();
     await redis.rpush(EVAL_HISTORY_KEY, entry);
   } catch (err) {
     // Non-fatal: eval history is advisory, never abort real work
@@ -792,6 +804,7 @@ export async function recordEvalResult(result) {
  */
 export async function readEvalHistory(n = 20) {
   try {
+    await ensureConnected();
     // LRANGE with negative indices reads from the tail (most recent entries)
     const entries = await redis.lrange(EVAL_HISTORY_KEY, -n, -1);
     return entries.map(e => JSON.parse(e));

@@ -70,6 +70,25 @@ async function main() {
   console.info(report.summary);
   console.info('─'.repeat(60));
 
+  // API-level failures (billing, auth, network) say nothing about prompt
+  // quality. Report them as infrastructure errors (exit 2, same as the other
+  // infra paths above) instead of as a prompt regression (exit 1).
+  const apiFailures = report.agents.flatMap(a => a.cases).filter(c => c.apiError);
+  if (apiFailures.length > 0) {
+    console.error(
+      `\n[prompt-eval] ERROR — ${apiFailures.length} case(s) could not reach the Claude API; ` +
+      'results are not a prompt-quality signal.\n' +
+      `  First error: ${apiFailures[0].apiError}`
+    );
+    if (/credit balance is too low/i.test(apiFailures[0].apiError)) {
+      console.error(
+        '  Fix: add credits at console.anthropic.com → Plans & Billing, or point the\n' +
+        '  ANTHROPIC_API_KEY secret at a key from a funded organization.'
+      );
+    }
+    process.exit(2);
+  }
+
   if (!report.passed) {
     console.error('\n[prompt-eval] FAIL — one or more agents did not meet the pass threshold.');
     process.exit(1);
