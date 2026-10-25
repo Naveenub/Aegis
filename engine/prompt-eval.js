@@ -341,10 +341,23 @@ Produce a structured improvement report.`,
  * Returns null if no PATCH block is found or if value is literally "null".
  */
 function extractPatch(raw) {
-  const match = raw.match(/PATCH:\s*(\{[\s\S]*\}|null)/);
-  if (!match) return null;
-  const value = match[1].trim();
-  return value === 'null' ? 'NULL' : value;
+  const m = raw.match(/PATCH:\s*/);
+  if (!m) return null;
+  const rest = raw.slice(m.index + m[0].length);
+  if (/^null\b/.test(rest)) return 'NULL';
+  if (rest[0] !== '{') return null;
+  // Balanced-brace scan (string-aware) so trailing prose that contains `}`
+  // is not swallowed into the JSON. Unbalanced (e.g. truncated) input returns
+  // the remainder so the caller reports a precise JSON parse error.
+  let depth = 0, inStr = false, esc = false;
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest[i];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return rest.slice(0, i + 1);
+  }
+  return rest.trim();
 }
 
 function scorePatchAgent(raw, agent, expectNull) {
@@ -424,6 +437,14 @@ function scorePatchAgent(raw, agent, expectNull) {
     notes.push(`FAIL: reasoning section (${keyword}) missing`);
   }
 
+  // A patch with no usable target file or content cannot be applied, so it
+  // must never reach the pass threshold on reasoning points alone.
+  if (!(typeof parsed.file === 'string' && parsed.file.length > 0 &&
+        typeof parsed.content === 'string' && parsed.content.length > 0)) {
+    score = Math.min(score, PASS_THRESHOLD - 1);
+    notes.push('CAP: unusable patch (file/content invalid) — cannot pass');
+  }
+  
   return { score, notes };
 }
 
@@ -478,6 +499,8 @@ function scorePlanner(raw) {
   } else {
     const bad = parsed.tasks.filter(t => !VALID_AGENTS.has(t.agent)).map(t => t.agent);
     notes.push(`FAIL: unknown agents: ${bad.join(', ')}`);
+    score = Math.min(score, PASS_THRESHOLD -1);
+    notes.push('CAP: plan references agents outside the roaster - cannot pass');
   }
 
   return { score, notes };
@@ -617,6 +640,9 @@ function scoreMetaReviewer(raw) {
  * @returns {{ score: number, notes: string[] }}
  */
 export function scoreResponse(agent, raw, expectNull = false) {
+  if (typeof raw !== 'string') {
+    return { score : 0, notes: ['FAIL: response is not a string (got ${raw === null ? 'null' : typeof raw})'] };
+  }
   const PATCH_AGENTS = new Set(['debugger', 'feature-builder', 'refactorer', 'security-editor']);
 
   if (PATCH_AGENTS.has(agent))  return scorePatchAgent(raw, agent, expectNull);
