@@ -641,7 +641,7 @@ function scoreMetaReviewer(raw) {
  */
 export function scoreResponse(agent, raw, expectNull = false) {
   if (typeof raw !== 'string') {
-    return { score : 0, notes: ['FAIL: response is not a string (got ${raw === null ? 'null' : typeof raw})'] };
+    return { score : 0, notes: [`FAIL: response is not a string (got ${raw === null ? 'null' : typeof raw})`] };
   }
   const PATCH_AGENTS = new Set(['debugger', 'feature-builder', 'refactorer', 'security-editor']);
 
