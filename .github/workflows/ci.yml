@@ -121,7 +121,16 @@ jobs:
             echo "  Name:  ANTHROPIC_API_KEY  |  Value: sk-ant-<your-key>"
             exit 1
           fi
-          npm run eval
+          # Exit 3 = the Claude API was unreachable (billing, auth, outage): warn
+          # but don't block the merge. Exit 1 (prompt regression) and 2 (harness
+          # crash) still fail the job.
+          code=0
+          npm run eval || code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "::warning::Prompt eval could not reach the Claude API — gate skipped. See the log for the error."
+            exit 0
+          fi
+          exit "$code"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
