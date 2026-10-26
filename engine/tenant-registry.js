@@ -80,6 +80,19 @@ export async function registerTenant(tenantId, meta = {}) {
 }
 
 /**
+ * Remove a tenant from the registry (set membership + metadata). Does NOT
+ * touch keys, quota counters, or Stripe — billing/pending-cleanup.js
+ * orchestrates those.
+ *
+ * @param {string} tenantId
+ */
+export async function removeTenant(tenantId) {
+  assertTenantId(tenantId);
+  await redis.srem(TENANTS_SET_KEY, tenantId);
+  await redis.del(TENANT_META_KEY(tenantId));
+}
+
+/**
  * Set the Stripe subscription-item mapping used to report metered usage for
  * this tenant. One subscription item per metered dimension (workflow_run,
  * agent_step, tokens, sandbox_minutes) — see billing/stripe-reporter.js.

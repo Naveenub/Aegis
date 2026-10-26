@@ -97,3 +97,24 @@ export async function createPortalSession(customerId, returnUrl = process.env.BI
   });
   return session.url;
 }
+
+/**
+ * True if the customer has any subscription that is (or was recently)
+ * paying: active, trialing, or past_due. Used by pending-cleanup to avoid
+ * deleting a tenant whose payment succeeded but whose webhook was missed.
+ *
+ * @param {string} customerId
+ * @returns {Promise<boolean>}
+ */
+export async function hasLiveSubscription(customerId) {
+  const subs = await getClient().subscriptions.list({ customer: customerId, status: 'all', limit: 20 });
+  return subs.data.some((sub) => ['active', 'trialing', 'past_due'].includes(sub.status));
+}
+
+/**
+ * Delete a Stripe customer (also cancels any incomplete subscriptions).
+ * @param {string} customerId
+ */
+export async function deleteCustomer(customerId) {
+  await getClient().customers.del(customerId);
+}

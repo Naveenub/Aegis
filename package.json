@@ -38,6 +38,7 @@
     "test:watch": "vitest",
     "eval": "node scripts/run-prompt-eval.js",
     "billing:flush": "node scripts/billing-flush.js",
+    "billing:cleanup": "node scripts/cleanup-pending.js",
     "onboard": "node scripts/onboard-design-partner.js",
     "check": "npm run lint && npm run test:coverage",
     "test:coverage": "vitest run --coverage",

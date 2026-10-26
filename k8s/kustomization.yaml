@@ -13,3 +13,4 @@ resources:
   - 08-hpa.yaml
   - 09-ingress.yaml
   - 10-billing-flush-cronjob.yaml
+  - 11-pending-cleanup-cronjob.yaml
