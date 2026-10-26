@@ -17,7 +17,7 @@ import { setQuota } from '../tenant-quota.js';
 import { createKey } from '../key-store.js';
 import { recordAuditEvent } from '../audit-log.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './tiers.js';
-import { provisionSubscription, cancelSubscription } from './stripe-customer.js';
+import { provisionSubscription, cancelSubscription, getBasePrice } from './stripe-customer.js';
 
 export async function signupTenant(input) {
   const { email, tenantId, label, tier } = input ?? {};
@@ -98,16 +98,35 @@ export async function signupTenant(input) {
  */
 export const SELF_SERVE_TIERS = Object.freeze(['starter', 'pro']);
 
-export function getSignupConfig() {
+const PRICE_TTL_MS = 5 * 60 * 1000;
+let _priceCache = null; // { at, prices }
+
+async function loadPrices() {
+  if (_priceCache && Date.now() - _priceCache.at < PRICE_TTL_MS) return _priceCache.prices;
+  const prices = {};
+  await Promise.all(SELF_SERVE_TIERS.map(async (id) => {
+    try {
+      prices[id] = await getBasePrice(id);
+    } catch (err) {
+      console.error(`[signup] Could not load Stripe price for ${id}`, err.message);
+      prices[id] = null; // page falls back to showing no price for this tier
+    }
+  }));
+  _priceCache = { at: Date.now(), prices };
+  return prices;
+}
+
+export async function getSignupConfig() {
   const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
   if (!publishableKey || !publishableKey.startsWith('pk_')) {
     return { status: 503, body: { error: 'Self-serve signup is not configured.' } };
   }
+  const prices = await loadPrices();
   return {
     status: 200,
     body: {
       publishableKey,
-      tiers: SELF_SERVE_TIERS.map((id) => ({ id, label: TIERS[id].label })),
+      tiers: SELF_SERVE_TIERS.map((id) => ({ id, label: TIERS[id].label, price: prices[id] ?? null })),
       defaultTier: DEFAULT_TIER,
     },
   };

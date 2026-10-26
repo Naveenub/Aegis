@@ -18,7 +18,7 @@ const createKey = vi.fn();
 vi.mock('../engine/key-store.js', () => ({ createKey }));
 const recordAuditEvent = vi.fn();
 vi.mock('../engine/audit-log.js', () => ({ recordAuditEvent }));
-const stripe = { provisionSubscription: vi.fn(), cancelSubscription: vi.fn() };
+const stripe = { provisionSubscription: vi.fn(), cancelSubscription: vi.fn(), getBasePrice: vi.fn() };
 vi.mock('../engine/billing/stripe-customer.js', () => stripe);
 
 let signupTenant;
@@ -121,24 +121,35 @@ describe('getSignupConfig', () => {
   it('503s when the publishable key is unset', async () => {
     delete process.env.STRIPE_PUBLISHABLE_KEY;
     const { getSignupConfig } = await import('../engine/billing/signup.js');
-    expect(getSignupConfig().status).toBe(503);
+    expect((await getSignupConfig()).status).toBe(503);
   });
 
   it('503s when the value is not a publishable key (e.g. a secret key pasted by mistake)', async () => {
     process.env.STRIPE_PUBLISHABLE_KEY = 'sk_live_oops';
     const { getSignupConfig } = await import('../engine/billing/signup.js');
-    const r = getSignupConfig();
+    const r = await getSignupConfig();
     expect(r.status).toBe(503);
     expect(JSON.stringify(r.body)).not.toContain('sk_live_oops');
   });
 
-  it('returns the key and only the self-serve tiers', async () => {
+  it('returns the key, only the self-serve tiers, and their Stripe prices', async () => {
     process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_123';
+    stripe.getBasePrice.mockImplementation(async (t) => ({ amount: t === 'pro' ? 9900 : 2900, currency: 'usd', interval: 'month' }));
     const { getSignupConfig } = await import('../engine/billing/signup.js');
-    const r = getSignupConfig();
+    const r = await getSignupConfig();
     expect(r.status).toBe(200);
     expect(r.body.publishableKey).toBe('pk_test_123');
     expect(r.body.tiers.map((t) => t.id)).toEqual(['starter', 'pro']);
+    expect(r.body.tiers[1].price).toEqual({ amount: 9900, currency: 'usd', interval: 'month' });
     expect(r.body.defaultTier).toBe('starter');
+  });
+
+  it('still serves config with price null when Stripe lookup fails', async () => {
+    process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_123';
+    stripe.getBasePrice.mockRejectedValue(new Error('stripe down'));
+    const { getSignupConfig } = await import('../engine/billing/signup.js');
+    const r = await getSignupConfig();
+    expect(r.status).toBe(200);
+    expect(r.body.tiers.every((t) => t.price === null)).toBe(true);
   });
 });

@@ -853,11 +853,11 @@ app.post('/signup', taskRateLimiter, async (req, res) => {
 /**
  * GET /signup/config
  * Unauthenticated. Returns the Stripe publishable key (public by design) and
- * the self-serve tiers so the signup page can mount Stripe.js. 503 when
+ * the self-serve tiers with their base prices (read from Stripe, cached 5 min) so the signup page can mount Stripe.js. 503 when
  * STRIPE_PUBLISHABLE_KEY is unset.
  */
-app.get('/signup/config', (_req, res) => {
-  const { status, body } = getSignupConfig();
+app.get('/signup/config', async (_req, res) => {
+  const { status, body } = await getSignupConfig();
   res.status(status).set('Cache-Control', 'no-store').json(body);
 });
 

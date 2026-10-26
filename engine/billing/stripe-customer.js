@@ -118,3 +118,19 @@ export async function hasLiveSubscription(customerId) {
 export async function deleteCustomer(customerId) {
   await getClient().customers.del(customerId);
 }
+
+/**
+ * Display info for a tier's base recurring price, read from Stripe so the
+ * signup page never hardcodes amounts. Returns null if the price env var is
+ * unset or the price has no fixed unit amount.
+ *
+ * @param {string} tier
+ * @returns {Promise<{ amount: number, currency: string, interval: string|null }|null>}
+ */
+export async function getBasePrice(tier) {
+  const id = process.env[`STRIPE_PRICE_${tier.toUpperCase()}`];
+  if (!id) return null;
+  const price = await getClient().prices.retrieve(id);
+  if (price.unit_amount == null) return null;
+  return { amount: price.unit_amount, currency: price.currency, interval: price.recurring?.interval ?? null };
+}
