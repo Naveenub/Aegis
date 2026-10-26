@@ -104,6 +104,25 @@ export async function getBillingConfig(tenantId) {
 }
 
 /**
+ * Store the Stripe customer id used to attribute Billing Meter events.
+ * @param {string} tenantId
+ * @param {string} customerId - Stripe customer id (cus_...)
+ */
+export async function setStripeCustomerId(tenantId, customerId) {
+  assertTenantId(tenantId);
+  await redis.hset(TENANT_META_KEY(tenantId), { stripeCustomerId: customerId });
+}
+
+/**
+ * @param {string} tenantId
+ * @returns {Promise<string|null>}
+ */
+export async function getStripeCustomerId(tenantId) {
+  assertTenantId(tenantId);
+  return (await redis.hget(TENANT_META_KEY(tenantId), 'stripeCustomerId')) ?? null;
+}
+
+/**
  * Set the pricing tier for a tenant. Validity of the tier name itself is
  * billing/tiers.js's concern (getTierConfig() falls back to DEFAULT_TIER for
  * unknown values) — this just persists whatever string is passed.

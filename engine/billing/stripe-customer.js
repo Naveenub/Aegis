@@ -3,9 +3,11 @@
  *
  * Self-serve signup: creates a Stripe customer + subscription (tier base
  * price + one metered subscription item per usage.EVENT_TYPES dimension) in
- * a single call, returning the item map POST /signup needs for
- * tenant-registry.js setBillingConfig(). Usage reporting against the created
- * items is unchanged — see billing/stripe-reporter.js.
+ * a single call, returning the customer id POST /signup stores via
+ * tenant-registry.js setStripeCustomerId(). Usage is reported as Billing Meter events keyed by
+ * customer id — see billing/stripe-reporter.js. The STRIPE_PRICE_* metered
+ * prices must each be attached to a Stripe Meter whose event_name matches
+ * METER_EVENT_NAME in stripe-reporter.js.
  *
  * Configuration: STRIPE_SECRET_KEY, STRIPE_PRICE_{TIER} (base price per
  * tier), and STRIPE_PRICE_WORKFLOW_RUN / _AGENT_STEP / _TOKENS /
@@ -41,9 +43,7 @@ function requirePrice(envVar) {
  * @param {string} params.email
  * @param {string} params.tenantId  - stored as customer/subscription metadata for support lookups
  * @param {string} params.tier      - 'starter' | 'pro' | 'enterprise'
- * @returns {Promise<{ customerId: string, subscriptionId: string, stripeItems: Record<string,string> }>}
- *   stripeItems maps EVENT_TYPES values -> Stripe subscription item id, ready
- *   for tenant-registry.js setBillingConfig().
+ * @returns {Promise<{ customerId: string, subscriptionId: string }>}
  */
 export async function provisionSubscription({ email, tenantId, tier }) {
   const client = getClient();
@@ -61,16 +61,7 @@ export async function provisionSubscription({ email, tenantId, tier }) {
     metadata: { tenantId },
   });
 
-  // Key by price id (not array position) so this stays correct regardless of
-  // how Stripe orders items in the response.
-  const priceToEventType = new Map(metered.map(({ eventType, price }) => [price, eventType]));
-  const stripeItems = {};
-  for (const item of subscription.items.data) {
-    const eventType = priceToEventType.get(item.price.id);
-    if (eventType) stripeItems[eventType] = item.id;
-  }
-
-  return { customerId: customer.id, subscriptionId: subscription.id, stripeItems };
+  return { customerId: customer.id, subscriptionId: subscription.id };
 }
 
 /**

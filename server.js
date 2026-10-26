@@ -65,7 +65,7 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setBillingConfig } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setStripeCustomerId } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
@@ -100,7 +100,10 @@ const dashboardHtml = (() => {
 const app  = express();
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
 
-app.use(express.json());
+// /webhooks/* routers parse their own raw body for signature verification;
+// the global JSON parser must not consume it first.
+const jsonParser = express.json();
+app.use((req, res, next) => (req.path.startsWith('/webhooks') ? next() : jsonParser(req, res, next)));
 
 // Trust the first proxy so req.ip resolves correctly behind a load balancer.
 app.set('trust proxy', 1);
@@ -854,7 +857,7 @@ app.post('/signup', taskRateLimiter, async (req, res) => {
     await registerTenant(id, { label });
     await setTier(id, resolvedTier);
     await setQuota(id, getTierConfig(resolvedTier).quota);
-    await setBillingConfig(id, subscription.stripeItems);
+    await setStripeCustomerId(id, subscription.customerId);
     const key = await createKey(id, { label: label || 'signup' });
 
     recordAuditEvent(id, {

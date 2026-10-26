@@ -1,28 +1,30 @@
 /**
  * engine/billing/stripe-reporter.js
  *
- * Pushes aggregated, unreported rows from usage-recorder.js to Stripe's
- * metered-billing Usage Records API (subscriptionItems.createUsageRecord,
- * action: 'increment'). Run periodically (cron, k8s CronJob, or
- * `npm run billing:flush`) — see scripts/billing-flush.js.
+ * Pushes aggregated, unreported rows from usage-recorder.js to Stripe using
+ * Billing Meters (stripe.billing.meterEvents.create). The legacy
+ * subscriptionItems.createUsageRecord API was removed in stripe-node v22.
+ * Run periodically (cron, k8s CronJob, or `npm run billing:flush`) — see
+ * scripts/billing-flush.js.
  *
- * Each tenant must have a Stripe subscription item per metered dimension,
- * configured via tenant-registry.js setBillingConfig(tenantId, {
- *   workflow_run:    'si_...',
- *   agent_step:      'si_...',
- *   tokens:          'si_...',
- *   sandbox_minutes: 'si_...',
- * }).
+ * Stripe setup (one-time, per usage dimension):
+ *   1. Create a Meter with event_name = METER_EVENT_NAME[eventType] below,
+ *      customer mapping key "stripe_customer_id", value key "value",
+ *      aggregation "sum".
+ *   2. Create a metered recurring Price attached to that Meter and put its id
+ *      in STRIPE_PRICE_{WORKFLOW_RUN|AGENT_STEP|TOKENS|SANDBOX_MINUTES}.
  *
- * A tenant with no billing config is skipped (not an error) — usage keeps
- * accumulating in Postgres and will be reported once config is added.
+ * Each tenant needs a stripe customer id (tenant-registry.js
+ * setStripeCustomerId — set automatically by POST /signup). A tenant without
+ * one is skipped (not an error); usage stays in Postgres until it is set.
  *
- * Configuration: STRIPE_SECRET_KEY.
+ * Configuration: STRIPE_SECRET_KEY; optional STRIPE_METER_EVENT_{TYPE}
+ * overrides for the meter event names.
  */
 
 import Stripe from 'stripe';
-import { getUnreportedUsage, markReported } from '../usage-recorder.js';
-import { getBillingConfig } from '../tenant-registry.js';
+import { getUnreportedUsage, markReported, EVENT_TYPES } from '../usage-recorder.js';
+import { getStripeCustomerId } from '../tenant-registry.js';
 import { logger } from '../logger.js';
 
 let _client = null;
@@ -31,9 +33,30 @@ function getClient() {
   return _client;
 }
 
+const DEFAULT_METER_EVENT_NAME = {
+  [EVENT_TYPES.WORKFLOW_RUN]:    'aegis_workflow_run',
+  [EVENT_TYPES.AGENT_STEP]:      'aegis_agent_step',
+  [EVENT_TYPES.TOKENS]:          'aegis_tokens',
+  [EVENT_TYPES.SANDBOX_MINUTES]: 'aegis_sandbox_minutes',
+};
+
+export function meterEventName(eventType) {
+  const override = process.env[`STRIPE_METER_EVENT_${eventType.toUpperCase()}`];
+  return override || DEFAULT_METER_EVENT_NAME[eventType];
+}
+
+function idRange(ids) {
+  const big = ids.map((i) => BigInt(i));
+  const min = big.reduce((a, b) => (b < a ? b : a));
+  const max = big.reduce((a, b) => (b > a ? b : a));
+  return `${min}-${max}`;
+}
+
 /**
  * Aggregate all unreported usage_events and report each tenant/event_type
- * group to Stripe as one incremental usage record.
+ * group to Stripe as one meter event. The event `identifier` is derived from
+ * the row-id range, so a retry after a failed markReported() is deduplicated
+ * by Stripe instead of double-billed.
  *
  * @returns {Promise<{ reported: number, skipped: number, failed: number }>}
  */
@@ -46,29 +69,34 @@ export async function flushUsageToStripe() {
   for (const group of groups) {
     const { tenantId, eventType, quantity, ids } = group;
 
-    const config = await getBillingConfig(tenantId);
-    const subscriptionItem = config?.[eventType];
+    const customerId = await getStripeCustomerId(tenantId);
+    const eventName = meterEventName(eventType);
 
-    if (!subscriptionItem) {
+    if (!customerId || !eventName) {
       logger.warn(
         { tenantId, eventType },
-        '[stripe-reporter] no subscription item configured — skipping (usage retained for later flush)'
+        '[stripe-reporter] no Stripe customer / meter configured — skipping (usage retained for later flush)'
       );
       skipped++;
       continue;
     }
 
     try {
-      // Stripe usage records take integer quantities; token counts and
-      // sandbox-minutes are rounded up so partial usage is never under-billed.
-      const record = await getClient().subscriptionItems.createUsageRecord(
-        subscriptionItem,
-        { quantity: Math.ceil(quantity), timestamp, action: 'increment' }
-      );
-      await markReported(ids, record.id);
+      // Meter values are integers; round up so partial usage is never under-billed.
+      const identifier = `aegis-${tenantId}-${eventType}-${idRange(ids)}`;
+      const event = await getClient().billing.meterEvents.create({
+        event_name: eventName,
+        identifier,
+        timestamp,
+        payload: {
+          stripe_customer_id: customerId,
+          value: String(Math.ceil(quantity)),
+        },
+      });
+      await markReported(ids, event?.identifier ?? identifier);
       reported++;
     } catch (err) {
-      logger.error({ err, tenantId, eventType }, '[stripe-reporter] usage record push failed');
+      logger.error({ err, tenantId, eventType }, '[stripe-reporter] meter event push failed');
       failed++;
     }
   }
