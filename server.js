@@ -972,6 +972,8 @@ app.get('/tenants/:id', requireApiKey, async (req, res) => {
  * Stripe via billing/stripe-reporter.js regardless of this endpoint.
  */
 app.get('/tenants/:id/billing', allowInactiveTenant, requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+
   try {
     const tenant = await getTenant(req.params.id);
     if (!tenant) {
