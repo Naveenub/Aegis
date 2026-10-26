@@ -91,4 +91,26 @@ describe('stripe webhook', () => {
     constructEventMock.mockReturnValue(event('invoice.paid', { metadata: { tenantId: 'acme' } }));
     expect((await post()).status).toBe(500);
   });
+
+  it.each([
+    ['active', 'active'],
+    ['trialing', 'active'],
+    ['past_due', 'suspended'],
+    ['unpaid', 'suspended'],
+    ['canceled', 'suspended'],
+  ])('customer.subscription.updated status=%s -> %s', async (subStatus, expected) => {
+    constructEventMock.mockReturnValue(
+      event('customer.subscription.updated', { status: subStatus, metadata: { tenantId: 'acme' } })
+    );
+    await post();
+    expect(setStatusMock).toHaveBeenCalledWith('acme', expected);
+  });
+
+  it('customer.subscription.updated with status=incomplete changes nothing', async () => {
+    constructEventMock.mockReturnValue(
+      event('customer.subscription.updated', { status: 'incomplete', metadata: { tenantId: 'acme' } })
+    );
+    expect((await post()).status).toBe(200);
+    expect(setStatusMock).not.toHaveBeenCalled();
+  });
 });

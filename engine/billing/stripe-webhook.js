@@ -5,6 +5,8 @@
  *   invoice.paid                     → tenant status 'active'
  *   invoice.payment_failed           → tenant status 'suspended'
  *   customer.subscription.deleted    → tenant status 'suspended'
+ *   customer.subscription.updated    → active/trialing → 'active';
+ *                                      past_due/unpaid/canceled → 'suspended'
  *   checkout.session.completed       → log only (manual Payment Link flow)
  * The tenant is resolved from metadata.tenantId (set on the subscription by
  * stripe-customer.js). Events with no resolvable, registered tenant are
@@ -20,7 +22,8 @@
  *                          rejected (fail closed, matches webhook-receiver.js).
  *
  * Subscribe the endpoint to: checkout.session.completed, invoice.paid,
- * invoice.payment_failed, customer.subscription.deleted.
+ * invoice.payment_failed, customer.subscription.deleted,
+ * customer.subscription.updated.
  *
  * Routes registered
  * ───────────────────
@@ -43,7 +46,23 @@ const STATUS_BY_EVENT = {
   'invoice.paid':                  'active',
   'invoice.payment_failed':        'suspended',
   'customer.subscription.deleted': 'suspended',
+  // Status derived from the subscription itself — see subscriptionStatus().
+  'customer.subscription.updated': 'derived',
 };
+
+// active/trialing → active; past_due/unpaid/canceled/incomplete_expired →
+// suspended; incomplete/paused → no change (null).
+function subscriptionStatus(sub) {
+  switch (sub.status) {
+    case 'active':
+    case 'trialing': return 'active';
+    case 'past_due':
+    case 'unpaid':
+    case 'canceled':
+    case 'incomplete_expired': return 'suspended';
+    default: return null;
+  }
+}
 
 function resolveTenantId(obj) {
   return (
@@ -76,7 +95,8 @@ stripeWebhookRouter.post('/stripe', async (req, res) => {
 
   if (event.type in STATUS_BY_EVENT) {
     const tenantId = resolveTenantId(event.data.object);
-    const status = STATUS_BY_EVENT[event.type];
+    const mapped = STATUS_BY_EVENT[event.type];
+    const status = mapped === 'derived' ? subscriptionStatus(event.data.object) : mapped;
     console.log(`[stripe-webhook] ${event.type} tenant=${tenantId ?? '(unknown)'} id=${event.id}`);
 
     if (status && tenantId) {

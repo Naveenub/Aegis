@@ -79,3 +79,21 @@ export async function provisionSubscription({ email, tenantId, tier }) {
 export async function cancelSubscription(subscriptionId) {
   await getClient().subscriptions.cancel(subscriptionId);
 }
+
+/**
+ * Stripe-hosted billing portal session so a tenant can update their card,
+ * view invoices, or cancel. Paying an outstanding invoice fires invoice.paid,
+ * which re-activates the tenant (see stripe-webhook.js).
+ *
+ * @param {string} customerId
+ * @param {string} [returnUrl]  defaults to BILLING_RETURN_URL
+ * @returns {Promise<string>}   portal URL
+ */
+export async function createPortalSession(customerId, returnUrl = process.env.BILLING_RETURN_URL) {
+  if (!returnUrl) throw new Error('No return URL — set BILLING_RETURN_URL.');
+  const session = await getClient().billingPortal.sessions.create({
+    customer: customerId,
+    return_url: returnUrl,
+  });
+  return session.url;
+}

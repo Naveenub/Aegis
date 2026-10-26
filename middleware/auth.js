@@ -51,6 +51,27 @@ if (!GLOBAL_KEY && !Object.keys(process.env).some(k => k.startsWith('AEGIS_API_K
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
+/**
+ * Billing gate lookup. Returns null when the key may proceed, else the
+ * tenant's non-active status ('pending' | 'suspended'). Static env keys are
+ * never gated. Throws on a status-store error (callers fail closed).
+ */
+async function inactiveStatus(resolved) {
+  if (resolved.keyId === 'env') return null;
+  const status = await getStatus(resolved.tenantId);
+  return status === 'active' ? null : status;
+}
+
+/**
+ * Route-level opt-out of the billing gate, placed BEFORE requireApiKey, for
+ * endpoints a pending/suspended tenant must still reach to fix billing
+ * (e.g. POST /billing/portal, GET /tenants/:id/billing).
+ */
+export function allowInactiveTenant(req, _res, next) {
+  req.allowInactive = true;
+  next();
+}
+
 /** Normalise tenantId → env-var suffix: "acme-corp" → "ACME_CORP" */
 function tenantEnvSuffix(tenantId) {
   return String(tenantId).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
@@ -170,21 +191,21 @@ export async function requireApiKey(req, res, next, requestedTenantId) {
   }
 
   // Billing gate: signed-up-but-unpaid or payment-failed tenants are blocked.
-  // Static env keys and tenants with no status are unaffected.
-  if (resolved.keyId !== 'env') {
+  if (!req.allowInactive) {
+    let blocked;
     try {
-      const status = await getStatus(resolved.tenantId);
-      if (status !== 'active') {
-        return res.status(402).json({
-          error: status === 'pending'
-            ? 'Payment required: complete your first payment to activate this account.'
-            : 'Account suspended: payment failed or subscription cancelled.',
-          status,
-        });
-      }
+      blocked = await inactiveStatus(resolved);
     } catch (err) {
       console.error('[auth] Status check error:', err.message);
       return res.status(503).json({ error: 'Authentication service unavailable.' });
+    }
+    if (blocked) {
+      return res.status(402).json({
+        error: blocked === 'pending'
+          ? 'Payment required: complete your first payment to activate this account.'
+          : 'Account suspended: payment failed or subscription cancelled.',
+        status: blocked,
+      });
     }
   }
 
@@ -206,7 +227,8 @@ export async function optionalApiKey(req, res, next) {
 
   try {
     const resolved = await resolveKey(provided, undefined);
-    if (resolved) {
+    // Pending/suspended tenants are treated as unauthenticated here.
+    if (resolved && !(await inactiveStatus(resolved))) {
       req.authenticated    = true;
       req.resolvedTenantId = resolved.tenantId;
       req.resolvedKeyId    = resolved.keyId;

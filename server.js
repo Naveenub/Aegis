@@ -38,6 +38,7 @@
  *   GET    /dashboard                          Observability UI (HTML)
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
+ *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
  *   GET    /tenants                            List registered tenants
  *   POST   /tenants                            Register a new tenant
  *   GET    /tenants/:id                        Get tenant metadata
@@ -65,11 +66,11 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setStripeCustomerId, setStatus } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setStripeCustomerId, getStripeCustomerId, setStatus } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
-import { provisionSubscription, cancelSubscription } from './engine/billing/stripe-customer.js';
+import { provisionSubscription, cancelSubscription, createPortalSession } from './engine/billing/stripe-customer.js';
 import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
@@ -79,7 +80,7 @@ import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
-import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
+import { requireApiKey, optionalApiKey, assertTenantAccess, allowInactiveTenant } from './middleware/auth.js';
 import { taskRateLimiter } from './middleware/rate-limit.js';
 
 // ─── Dashboard HTML (read once at startup) ────────────────────────────────────
@@ -894,6 +895,27 @@ app.post('/signup', taskRateLimiter, async (req, res) => {
   }
 });
 
+/**
+ * POST /billing/portal
+ * Returns a Stripe billing-portal URL for the calling tenant (update card,
+ * pay an open invoice, cancel). Reachable while pending/suspended — paying
+ * fires invoice.paid, which re-activates the tenant.
+ *
+ * Returns: { url: string }
+ */
+app.post('/billing/portal', allowInactiveTenant, requireApiKey, async (req, res) => {
+  try {
+    const customerId = await getStripeCustomerId(req.resolvedTenantId);
+    if (!customerId) {
+      return res.status(404).json({ error: 'No Stripe customer on file for this tenant.' });
+    }
+    res.json({ url: await createPortalSession(customerId) });
+  } catch (err) {
+    console.error('[POST /billing/portal]', err);
+    res.status(502).json({ error: `Billing portal unavailable: ${err.message}` });
+  }
+});
+
 // ─── Tenant management ────────────────────────────────────────────────────────
 /**
  * GET /tenants
@@ -963,7 +985,7 @@ app.get('/tenants/:id', requireApiKey, async (req, res) => {
  * per metered dimension. Overage is informational — it's already flowing to
  * Stripe via billing/stripe-reporter.js regardless of this endpoint.
  */
-app.get('/tenants/:id/billing', requireApiKey, async (req, res) => {
+app.get('/tenants/:id/billing', allowInactiveTenant, requireApiKey, async (req, res) => {
   try {
     const tenant = await getTenant(req.params.id);
     if (!tenant) {
