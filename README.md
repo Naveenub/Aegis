@@ -135,7 +135,7 @@ npm run dlq-worker   # DLQ worker (separate process)
 node cli/claude.js "add input validation to the login endpoint"
 ```
 
-> **No Docker installed?** `sandbox.js` hard-fails by default when Docker is unavailable, so agents never run patches unsandboxed on your host by accident. For local dev without Docker, set `AEGIS_SANDBOX_MODE=local` in your `.env`. Never set this in production. Note that `.env.example` ships with `AEGIS_SANDBOX_MODE=local` already uncommented — remove it for any real deployment.
+> **No Docker installed?** `sandbox.js` hard-fails by default when Docker is unavailable, so agents never run patches unsandboxed on your host by accident. For local dev without Docker, set `AEGIS_SANDBOX_MODE=local` in your `.env`. Never set this in production.
 
 ### Submitting a task
 
@@ -285,7 +285,7 @@ STRIPE_WEBHOOK_SECRET=...      # optional — billing
 
 Vector memory reranking, concurrency limits per priority tier, rate limits, DLQ backoff, anomaly thresholds, PR automation, Slack/Discord webhooks, and inbound webhook secrets are all separately tunable.
 
-> **Security note:** never commit real secrets. Keep `.env` out of version control (it is already in `.dockerignore`), and replace the example API key and signing key in `.env.example` with your own generated values.
+> **Security note:** never commit real secrets. Keep `.env` out of version control (it is already in `.dockerignore`), and generate your own values for `AEGIS_API_KEY_*` and `AEGIS_AUDIT_SIGNING_KEY` (the commands are in `.env.example`).
 
 ---
 
@@ -320,7 +320,7 @@ The system suite (`tests/integration/system/`) exercises the Docker sandbox, git
 ### Self-hosted with Docker Compose (production)
 
 ```bash
-cp .env.example .env   # fill in ANTHROPIC_API_KEY at minimum; remove AEGIS_SANDBOX_MODE=local
+cp .env.example .env   # fill in ANTHROPIC_API_KEY at minimum
 docker compose up -d --build
 ```
 
