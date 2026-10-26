@@ -953,6 +953,8 @@ app.post('/tenants', requireApiKey, async (req, res) => {
  * Get metadata for a single tenant.
  */
 app.get('/tenants/:id', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+
   try {
     const tenant = await getTenant(req.params.id);
     if (!tenant) {
