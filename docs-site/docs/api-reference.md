@@ -29,6 +29,7 @@ Auth: `Authorization: Bearer <key>` where the key is `AEGIS_API_KEY_{TENANTID}` 
 | GET | `/anomalies` | Active anomaly alerts |
 | GET/POST | `/tenants`, `/tenants/:id` | Tenant management |
 | GET/POST/DELETE | `/tenants/:id/keys[/:keyId]` | Per-tenant API key management |
+| GET | `/signup/config` | Public signup config: Stripe publishable key and self-serve tiers (unauthenticated; 503 if unconfigured) |
 | POST | `/signup` | Self-serve signup (unauthenticated) — see [Billing](billing) |
 | GET | `/tenants/:id/billing` | Tier and this month's usage vs. included allowance |
 | POST | `/billing/portal` | Stripe billing-portal URL (update card, pay invoice) |

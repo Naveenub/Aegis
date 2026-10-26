@@ -86,3 +86,29 @@ export async function signupTenant(input) {
     return { status: 500, body: { error: err.message } };
   }
 }
+
+/**
+ * Public, non-secret config the signup page needs to mount Stripe.js.
+ * The publishable key is meant to be exposed to browsers; it is read from
+ * STRIPE_PUBLISHABLE_KEY so no key is baked into the landing assets. Without
+ * it, self-serve signup is reported as unavailable (503) and the page falls
+ * back to the contact email.
+ *
+ * Only starter and pro are offered self-serve; enterprise stays sales-led.
+ */
+export const SELF_SERVE_TIERS = Object.freeze(['starter', 'pro']);
+
+export function getSignupConfig() {
+  const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
+  if (!publishableKey || !publishableKey.startsWith('pk_')) {
+    return { status: 503, body: { error: 'Self-serve signup is not configured.' } };
+  }
+  return {
+    status: 200,
+    body: {
+      publishableKey,
+      tiers: SELF_SERVE_TIERS.map((id) => ({ id, label: TIERS[id].label })),
+      defaultTier: DEFAULT_TIER,
+    },
+  };
+}

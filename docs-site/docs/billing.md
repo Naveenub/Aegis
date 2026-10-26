@@ -67,7 +67,11 @@ Meter event names default to `aegis_workflow_run`, `aegis_agent_step`, `aegis_to
 }
 ```
 
-The tenant starts `pending`. Confirm the first payment in your frontend with Stripe.js using `clientSecret`; Stripe's `invoice.paid` webhook then sets the tenant `active`. Until then every authenticated call returns **402**.
+### Built-in signup page
+
+The server ships a signup page at `/get-started` (the landing page's pricing buttons link to it). It calls `POST /signup`, shows the API key once, mounts Stripe's Payment Element with `clientSecret`, and confirms the payment. It reads the publishable key from `GET /signup/config`, so set `STRIPE_PUBLISHABLE_KEY` (`pk_...`) on the server; without it the page falls back to a contact-us message. The page is served from the same origin as the API, so no CORS setup is needed. Only `starter` and `pro` are offered self-serve; `enterprise` stays sales-led.
+
+If you build your own frontend instead, the tenant starts `pending`. Confirm the first payment with Stripe.js using `clientSecret`; Stripe's `invoice.paid` webhook then sets the tenant `active`. Until then every authenticated call returns **402**.
 
 | Tenant status | Set by | API access |
 |---|---|---|

@@ -5,7 +5,7 @@
  * (pending vs active), Stripe failure, and rollback of a partial signup.
  * All collaborators are mocked.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const reg = {
   getTenant: vi.fn(), registerTenant: vi.fn(), setTier: vi.fn(),
@@ -108,5 +108,37 @@ describe('signupTenant provisioning', () => {
     expect(r.status).toBe(500);
     expect(stripe.cancelSubscription).toHaveBeenCalledWith('sub_1');
     expect(reg.removeTenant).toHaveBeenCalledWith('acme');
+  });
+});
+
+describe('getSignupConfig', () => {
+  const saved = process.env.STRIPE_PUBLISHABLE_KEY;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.STRIPE_PUBLISHABLE_KEY;
+    else process.env.STRIPE_PUBLISHABLE_KEY = saved;
+  });
+
+  it('503s when the publishable key is unset', async () => {
+    delete process.env.STRIPE_PUBLISHABLE_KEY;
+    const { getSignupConfig } = await import('../engine/billing/signup.js');
+    expect(getSignupConfig().status).toBe(503);
+  });
+
+  it('503s when the value is not a publishable key (e.g. a secret key pasted by mistake)', async () => {
+    process.env.STRIPE_PUBLISHABLE_KEY = 'sk_live_oops';
+    const { getSignupConfig } = await import('../engine/billing/signup.js');
+    const r = getSignupConfig();
+    expect(r.status).toBe(503);
+    expect(JSON.stringify(r.body)).not.toContain('sk_live_oops');
+  });
+
+  it('returns the key and only the self-serve tiers', async () => {
+    process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_123';
+    const { getSignupConfig } = await import('../engine/billing/signup.js');
+    const r = getSignupConfig();
+    expect(r.status).toBe(200);
+    expect(r.body.publishableKey).toBe('pk_test_123');
+    expect(r.body.tiers.map((t) => t.id)).toEqual(['starter', 'pro']);
+    expect(r.body.defaultTier).toBe('starter');
   });
 });

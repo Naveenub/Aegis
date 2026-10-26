@@ -37,6 +37,9 @@
  *   GET    /api/metrics                        Structured metrics (dashboard)
  *   GET    /dashboard                          Observability UI (HTML)
  *   GET    /events                             SSE live-push stream (metrics + workflows)
+ *   GET    /                                   Marketing landing page (HTML)
+ *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
+ *   GET    /signup/config                      Public signup config (Stripe publishable key)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
  *   GET    /tenants                            List registered tenants
@@ -80,7 +83,7 @@ import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
-import { signupTenant } from './engine/billing/signup.js';
+import { signupTenant, getSignupConfig } from './engine/billing/signup.js';
 import { requireApiKey, optionalApiKey, assertTenantAccess, allowInactiveTenant } from './middleware/auth.js';
 import { taskRateLimiter } from './middleware/rate-limit.js';
 
@@ -97,6 +100,18 @@ const dashboardHtml = (() => {
     return `<!DOCTYPE html><html><body><pre>Dashboard HTML not found at ${DASHBOARD_HTML}.\nRun the server from the project root.</pre></body></html>`;
   }
 })();
+
+// ─── Landing + signup pages (read once at startup) ───────────────────────────
+const readLanding = (name) => {
+  try {
+    return readFileSync(join(__dirname, 'landing', name), 'utf-8');
+  } catch (err) {
+    console.warn(`[landing] Could not read landing/${name}:`, err.message);
+    return null;
+  }
+};
+const landingHtml = readLanding('index.html');
+const signupHtml  = readLanding('signup.html');
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app  = express();
@@ -834,6 +849,26 @@ app.post('/signup', taskRateLimiter, async (req, res) => {
   const { status, body } = await signupTenant(req.body);
   res.status(status).json(body);
 });
+
+/**
+ * GET /signup/config
+ * Unauthenticated. Returns the Stripe publishable key (public by design) and
+ * the self-serve tiers so the signup page can mount Stripe.js. 503 when
+ * STRIPE_PUBLISHABLE_KEY is unset.
+ */
+app.get('/signup/config', (_req, res) => {
+  const { status, body } = getSignupConfig();
+  res.status(status).set('Cache-Control', 'no-store').json(body);
+});
+
+/**
+ * GET /  and  GET /get-started
+ * Unauthenticated static pages: the marketing landing page and the self-serve
+ * signup page (calls POST /signup, then confirms payment with Stripe.js).
+ * Served from the same origin as the API so no CORS configuration is needed.
+ */
+app.get('/', (_req, res, next) => (landingHtml ? res.type('html').send(landingHtml) : next()));
+app.get('/get-started', (_req, res, next) => (signupHtml ? res.type('html').send(signupHtml) : next()));
 
 /**
  * POST /billing/portal

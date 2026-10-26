@@ -210,6 +210,7 @@ Auth: `Authorization: Bearer <key>` or `x-api-key: <key>`. Keys resolve in this 
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/signup/config` | Unauthenticated; Stripe publishable key and self-serve tiers for the signup page |
 | POST | `/signup` | Unauthenticated self-serve signup (Stripe customer + subscription, tenant, first API key) |
 | POST | `/billing/portal` | Stripe billing-portal URL |
 | GET/POST | `/tenants`, `/tenants/:id` | Tenant management |
@@ -235,6 +236,7 @@ Billing is optional. A deployment without Stripe or Postgres still runs; usage s
 - **Tiers** (`engine/billing/tiers.js`) — `starter` (default), `pro`, and `enterprise`. Each defines hard quota ceilings (`maxActiveWorkflows`, `maxDailyWorkflows`, `maxQueuedJobs`) and an included monthly allowance for four metered dimensions: workflow runs, agent steps, tokens, and sandbox minutes. Enterprise allowances are unlimited.
 - **Metering** — every billable action is appended to an immutable `usage_events` table in Postgres (`DATABASE_URL`). This is separate from `tenant-quota.js`, which only holds live rate-limit counters in Redis.
 - **Reporting** — `npm run billing:flush` pushes unreported usage to Stripe's metered billing API. Run it on a schedule (hourly cron, the k8s CronJob, or the Render cron in `render.yaml`). Without `STRIPE_SECRET_KEY` it fails closed and usage keeps accumulating.
+- **Signup page** — `/get-started` is a built-in page that calls `POST /signup` and confirms the first payment with Stripe.js. Set `STRIPE_PUBLISHABLE_KEY`; the landing page's pricing buttons link to it.
 - **Signup** — `POST /signup` creates a Stripe customer and subscription, registers the tenant as `pending`, and issues a first API key. The key is unusable (`402`) until the first payment succeeds and Stripe's `invoice.paid` webhook flips the tenant to `active`.
 - **Tenant status** — `POST /webhooks/stripe` (signature-verified with `STRIPE_WEBHOOK_SECRET`) sets tenants `active` on `invoice.paid`, and `suspended` on `invoice.payment_failed` or subscription deletion/past-due. Subscribe the endpoint to `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.deleted`, and `customer.subscription.updated`.
 - **Cleanup** — `npm run billing:cleanup` removes (or reconciles) self-serve signups that never paid; defaults to tenants pending longer than 48 h, supports `--hours=N` and `--dry-run`.

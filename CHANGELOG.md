@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Self-serve signup page** — `/get-started` (`landing/signup.html`) calls `POST /signup`, shows the API key once, and confirms the first payment with Stripe.js (Payment Element, including redirect-return handling). New `GET /signup/config` serves the publishable key from `STRIPE_PUBLISHABLE_KEY`. The server now serves the landing page at `/`, and the Starter/Pro pricing buttons link to the signup page instead of a mailto.
+
 ## v2.0.0
 
 Major release. This snapshot summarizes AEGIS as it stands today — a Git-backed, DAG-driven multi-agent orchestration engine.
