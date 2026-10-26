@@ -82,7 +82,7 @@
 
   <div id="unavailable" class="msg warn hidden">
     Self-serve signup isn't available right now.
-    <a href="mailto:badigernaveen2@gmail.com?subject=AEGIS%20access%20request">Email us</a> and we'll set you up.
+    <a href="mailto:{{CONTACT_EMAIL}}?subject=AEGIS%20access%20request">Email us</a> and we'll set you up.
   </div>
 
   <div id="error" class="msg error hidden" role="alert"></div>
@@ -104,6 +104,7 @@
       <select id="tier" name="tier"></select>
       <p class="hint">Base price shown. Usage beyond your plan's included monthly allowance is billed as metered overage.</p>
     </div>
+    <p class="hint" style="margin:0 0 16px">By continuing you agree to the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
     <button id="account-submit" class="btn" type="submit" disabled>Continue to payment</button>
   </form>
 
@@ -131,6 +132,7 @@
     <p class="hint">See the <a href="https://github.com/Naveenub/aegis/blob/main/README.md">README</a> for the full API.</p>
   </section>
 </main>
+<footer style="max-width:520px;margin:0 auto;padding:0 28px 40px;font-size:13px;color:var(--muted-2)"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="mailto:{{CONTACT_EMAIL}}">Contact</a></footer>
 
 <script src="https://js.stripe.com/v3/"></script>
 <script>

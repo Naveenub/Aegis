@@ -167,6 +167,8 @@
   .tier ul{list-style:none;margin:0 0 24px;padding:0;font-size:13.5px;color:var(--muted);flex:1;}
   .tier li{padding:7px 0;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:12px;}
   .tier li b{font-family:var(--mono);font-weight:600;color:var(--text);}
+  .tier-price{font-family:var(--mono);font-size:22px;font-weight:700;margin:0 0 14px;min-height:30px;}
+  .tier-price small{font-size:12px;font-weight:400;color:var(--muted);}
   .pricing-foot{font-family:var(--mono);font-size:12px;color:var(--muted-2);margin-top:16px;}
   .footer-note{font-family:var(--mono);font-size:12px;color:var(--muted-2);}
 </style>
@@ -378,6 +380,7 @@ Failures ──▶ workers/dlq-worker.js: retry with backoff, escalate to
         <div class="tier">
           <h3>Starter</h3>
           <p class="tier-note">For a single team trying AEGIS on real repos.</p>
+          <p class="tier-price" data-tier="starter">&nbsp;</p>
           <ul>
             <li>Workflow runs <b>500</b></li>
             <li>Agent steps <b>5,000</b></li>
@@ -390,6 +393,7 @@ Failures ──▶ workers/dlq-worker.js: retry with backoff, escalate to
         <div class="tier featured">
           <h3>Pro</h3>
           <p class="tier-note">For teams running AEGIS across several services.</p>
+          <p class="tier-price" data-tier="pro">&nbsp;</p>
           <ul>
             <li>Workflow runs <b>5,000</b></li>
             <li>Agent steps <b>50,000</b></li>
@@ -402,6 +406,7 @@ Failures ──▶ workers/dlq-worker.js: retry with backoff, escalate to
         <div class="tier">
           <h3>Enterprise</h3>
           <p class="tier-note">Unlimited metered usage, higher concurrency, dedicated onboarding.</p>
+          <p class="tier-price">Custom</p>
           <ul>
             <li>Workflow runs <b>Unlimited</b></li>
             <li>Agent steps <b>Unlimited</b></li>
@@ -409,10 +414,10 @@ Failures ──▶ workers/dlq-worker.js: retry with backoff, escalate to
             <li>Sandbox minutes <b>Unlimited</b></li>
             <li>Concurrent workflows <b>50</b></li>
           </ul>
-          <a href="mailto:badigernaveen2@gmail.com?subject=AEGIS%20access%20request%20Enterprise" class="btn btn-ghost">Contact us</a>
+          <a href="mailto:{{CONTACT_EMAIL}}?subject=AEGIS%20access%20request%20Enterprise" class="btn btn-ghost">Contact us</a>
         </div>
       </div>
-      <p class="pricing-foot">Allowances reset monthly (UTC). Contact us for plan pricing.</p>
+      <p class="pricing-foot">Allowances reset monthly (UTC). Starter and Pro base prices are shown live from checkout; Enterprise is quoted individually.</p>
     </div>
   </section>
 
@@ -463,9 +468,27 @@ curl -X POST localhost:3000/task \
       <a href="https://github.com/Naveenub/aegis/blob/main/README.md">README</a>
       <a href="https://github.com/Naveenub/aegis/blob/main/CHANGELOG.md">Changelog</a>
       <a href="#quickstart">Quickstart</a>
+      <a href="/terms">Terms</a>
+      <a href="/privacy">Privacy</a>
+      <a href="mailto:{{CONTACT_EMAIL}}">Contact</a>
     </div>
   </div>
 </footer>
 
+<script>
+(function () {
+  fetch('/signup/config').then(function (r) { if (!r.ok) throw 0; return r.json(); }).then(function (cfg) {
+    cfg.tiers.forEach(function (t) {
+      var el = document.querySelector('.tier-price[data-tier="' + t.id + '"]');
+      if (!el || !t.price) return;
+      var amt = new Intl.NumberFormat(undefined, { style: 'currency', currency: t.price.currency.toUpperCase() }).format(t.price.amount / 100);
+      el.textContent = amt;
+      if (t.price.interval) { var s = document.createElement('small'); s.textContent = ' / ' + t.price.interval; el.appendChild(s); }
+    });
+  }).catch(function () {
+    document.querySelectorAll('.tier-price[data-tier]').forEach(function (el) { el.textContent = 'See checkout'; });
+  });
+})();
+</script>
 </body>
 </html>

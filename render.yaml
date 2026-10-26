@@ -16,7 +16,7 @@
 # — agent-generated code lint/tests run directly on the dyno, not walled off
 # by sandbox.js's container boundary.
 #
-# Net effect: this is a single-node trial/eval deploy, not the isolated,
+# Net effect: this is a single-node demo/eval deploy (no self-serve billing), not the isolated,
 # horizontally-scaled topology docker-compose.yml or k8s/ gives you. For a
 # production multi-tenant deployment with real sandbox isolation, self-host
 # with docker-compose (dind sidecar) or k8s/ instead.
@@ -73,8 +73,54 @@ services:
         value: default
       - key: CLAUDE_AUTONOMY
         value: "true"
+      # Unsandboxed: tenant code runs directly on this service. Because of that,
+      # self-serve signup (/signup, /signup/config) is DISABLED while this is
+      # `local` (see engine/billing/signup.js). Do not set
+      # AEGIS_ALLOW_UNSANDBOXED_SIGNUP=true for paying customers — launch paid
+      # on docker-compose (dind) or k8s/ instead.
       - key: AEGIS_SANDBOX_MODE
         value: local
+      # ── Stripe (set in the Render dashboard; sync: false = never stored in git) ──
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_PRO
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE
+        sync: false
+      - key: STRIPE_PRICE_STARTER_WORKFLOW_RUN
+        sync: false
+      - key: STRIPE_PRICE_STARTER_AGENT_STEP
+        sync: false
+      - key: STRIPE_PRICE_STARTER_TOKENS
+        sync: false
+      - key: STRIPE_PRICE_STARTER_SANDBOX_MINUTES
+        sync: false
+      - key: STRIPE_PRICE_PRO_WORKFLOW_RUN
+        sync: false
+      - key: STRIPE_PRICE_PRO_AGENT_STEP
+        sync: false
+      - key: STRIPE_PRICE_PRO_TOKENS
+        sync: false
+      - key: STRIPE_PRICE_PRO_SANDBOX_MINUTES
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_WORKFLOW_RUN
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_AGENT_STEP
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_TOKENS
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_SANDBOX_MINUTES
+        sync: false
+      - key: BILLING_RETURN_URL
+        sync: false
+      - key: AEGIS_CONTACT_EMAIL
+        sync: false
 
   - type: cron
     name: aegis-billing-flush
@@ -88,3 +134,21 @@ services:
         fromDatabase:
           name: aegis-postgres
           property: connectionString
+      - key: STRIPE_SECRET_KEY
+        sync: false
+
+  # Deletes unpaid signups (pending > 48h) and their Stripe customers.
+  - type: cron
+    name: aegis-pending-cleanup
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: npm run billing:cleanup
+    plan: starter
+    schedule: "0 3 * * *" # daily 03:00 UTC
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aegis-postgres
+          property: connectionString
+      - key: STRIPE_SECRET_KEY
+        sync: false

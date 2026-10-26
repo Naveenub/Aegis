@@ -39,6 +39,7 @@
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   GET    /                                   Marketing landing page (HTML)
  *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
+ *   GET    /terms, /privacy                    Legal pages (HTML)
  *   GET    /signup/config                      Public signup config (Stripe publishable key)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
@@ -102,9 +103,15 @@ const dashboardHtml = (() => {
 })();
 
 // ─── Landing + signup pages (read once at startup) ───────────────────────────
+const CONTACT_EMAIL = process.env.AEGIS_CONTACT_EMAIL || '';
+if (!CONTACT_EMAIL) console.warn('[landing] AEGIS_CONTACT_EMAIL is unset — contact links will be omitted.');
 const readLanding = (name) => {
   try {
-    return readFileSync(join(__dirname, 'landing', name), 'utf-8');
+    const html = readFileSync(join(__dirname, 'landing', name), 'utf-8');
+    // {{CONTACT_EMAIL}} appears only inside mailto: hrefs and link text.
+    return CONTACT_EMAIL
+      ? html.replaceAll('{{CONTACT_EMAIL}}', CONTACT_EMAIL)
+      : html.replace(/<a [^>]*href="mailto:\{\{CONTACT_EMAIL\}\}[^"]*"[^>]*>(.*?)<\/a>/gs, '$1').replaceAll('{{CONTACT_EMAIL}}', 'our team');
   } catch (err) {
     console.warn(`[landing] Could not read landing/${name}:`, err.message);
     return null;
@@ -112,6 +119,8 @@ const readLanding = (name) => {
 };
 const landingHtml = readLanding('index.html');
 const signupHtml  = readLanding('signup.html');
+const termsHtml   = readLanding('terms.html');
+const privacyHtml = readLanding('privacy.html');
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app  = express();
@@ -869,6 +878,8 @@ app.get('/signup/config', async (_req, res) => {
  */
 app.get('/', (_req, res, next) => (landingHtml ? res.type('html').send(landingHtml) : next()));
 app.get('/get-started', (_req, res, next) => (signupHtml ? res.type('html').send(signupHtml) : next()));
+app.get('/terms', (_req, res, next) => (termsHtml ? res.type('html').send(termsHtml) : next()));
+app.get('/privacy', (_req, res, next) => (privacyHtml ? res.type('html').send(privacyHtml) : next()));
 
 /**
  * POST /billing/portal

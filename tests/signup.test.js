@@ -111,6 +111,31 @@ describe('signupTenant provisioning', () => {
   });
 });
 
+describe('unsandboxed guard', () => {
+  const saved = { m: process.env.AEGIS_SANDBOX_MODE, a: process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP, k: process.env.STRIPE_PUBLISHABLE_KEY };
+  afterEach(() => {
+    for (const [k, v] of [['AEGIS_SANDBOX_MODE', saved.m], ['AEGIS_ALLOW_UNSANDBOXED_SIGNUP', saved.a], ['STRIPE_PUBLISHABLE_KEY', saved.k]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  it('503s config and signup when sandbox mode is local', async () => {
+    process.env.AEGIS_SANDBOX_MODE = 'local';
+    delete process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP;
+    process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_123';
+    const { getSignupConfig, signupTenant } = await import('../engine/billing/signup.js');
+    expect((await getSignupConfig()).status).toBe(503);
+    expect((await signupTenant({ email: 'a@b.co', tenantId: 'acme' })).status).toBe(503);
+  });
+
+  it('allows opt-in for demo deploys', async () => {
+    process.env.AEGIS_SANDBOX_MODE = 'local';
+    process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP = 'true';
+    const { unsandboxedSignupBlocked } = await import('../engine/billing/signup.js');
+    expect(unsandboxedSignupBlocked()).toBe(false);
+  });
+});
+
 describe('getSignupConfig', () => {
   const saved = process.env.STRIPE_PUBLISHABLE_KEY;
   afterEach(() => {
