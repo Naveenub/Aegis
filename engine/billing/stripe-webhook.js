@@ -1,13 +1,16 @@
 /**
  * engine/billing/stripe-webhook.js
  *
- * Minimal inbound Stripe webhook — verifies the signature and logs a
- * "partner paid" flag line for checkout/invoice payment events. Deliberately
- * does nothing else: no tenant provisioning, no metering, no DB writes. That
- * pipeline is stripe-customer.js / stripe-reporter.js and is unaffected by
- * this file — this exists only so manual Stripe Payment Link invoices
- * (design-partner flow, see scripts/onboard-design-partner.js) show up in
- * server logs instead of only in the Stripe dashboard.
+ * Inbound Stripe webhook — verifies the signature, then:
+ *   invoice.paid                     → tenant status 'active'
+ *   invoice.payment_failed           → tenant status 'suspended'
+ *   customer.subscription.deleted    → tenant status 'suspended'
+ *   checkout.session.completed       → log only (manual Payment Link flow)
+ * The tenant is resolved from metadata.tenantId (set on the subscription by
+ * stripe-customer.js). Events with no resolvable, registered tenant are
+ * logged and acknowledged without changing anything, so manual design-partner
+ * invoices are unaffected. Status changes are idempotent; a failed write
+ * returns 500 so Stripe retries.
  *
  * Environment variables
  * ──────────────────────
@@ -16,10 +19,8 @@
  *                          endpoint settings page. No secret = every request
  *                          rejected (fail closed, matches webhook-receiver.js).
  *
- * Usage (wire into server.js)
- * ─────────────────────────────
- *   import { stripeWebhookRouter } from './engine/billing/stripe-webhook.js';
- *   app.use('/webhooks', stripeWebhookRouter);
+ * Subscribe the endpoint to: checkout.session.completed, invoice.paid,
+ * invoice.payment_failed, customer.subscription.deleted.
  *
  * Routes registered
  * ───────────────────
@@ -28,6 +29,7 @@
 
 import express from 'express';
 import Stripe from 'stripe';
+import { getTenant, setStatus } from '../tenant-registry.js';
 
 let _client = null;
 function getClient() {
@@ -35,8 +37,23 @@ function getClient() {
   return _client;
 }
 
-// Events that mean money landed. Anything else is acknowledged and ignored.
-const PAID_EVENTS = new Set(['checkout.session.completed', 'invoice.paid']);
+// event type -> tenant status to apply (null = log only)
+const STATUS_BY_EVENT = {
+  'checkout.session.completed':    null,
+  'invoice.paid':                  'active',
+  'invoice.payment_failed':        'suspended',
+  'customer.subscription.deleted': 'suspended',
+};
+
+function resolveTenantId(obj) {
+  return (
+    obj.metadata?.tenantId ??
+    obj.parent?.subscription_details?.metadata?.tenantId ??   // invoices (current API)
+    obj.subscription_details?.metadata?.tenantId ??           // invoices (older API)
+    obj.client_reference_id ??
+    null
+  );
+}
 
 export const stripeWebhookRouter = express.Router();
 
@@ -44,7 +61,7 @@ export const stripeWebhookRouter = express.Router();
 // pattern as webhook-receiver.js's GitHub/GitLab routes.
 stripeWebhookRouter.use(express.raw({ type: 'application/json', limit: '2mb' }));
 
-stripeWebhookRouter.post('/stripe', (req, res) => {
+stripeWebhookRouter.post('/stripe', async (req, res) => {
   const secret = (process.env.STRIPE_WEBHOOK_SECRET ?? '').trim();
   if (!secret) {
     return res.status(401).json({ error: 'STRIPE_WEBHOOK_SECRET is not configured.' });
@@ -57,13 +74,24 @@ stripeWebhookRouter.post('/stripe', (req, res) => {
     return res.status(401).json({ error: `Invalid Stripe webhook signature: ${err.message}` });
   }
 
-  if (PAID_EVENTS.has(event.type)) {
-    const obj = event.data.object;
-    const tenantId = obj.metadata?.tenantId ?? obj.client_reference_id ?? '(unknown)';
-    console.log(`[stripe-webhook] PARTNER PAID — tenant=${tenantId} event=${event.type} id=${event.id}`);
+  if (event.type in STATUS_BY_EVENT) {
+    const tenantId = resolveTenantId(event.data.object);
+    const status = STATUS_BY_EVENT[event.type];
+    console.log(`[stripe-webhook] ${event.type} tenant=${tenantId ?? '(unknown)'} id=${event.id}`);
+
+    if (status && tenantId) {
+      try {
+        if (await getTenant(tenantId)) {
+          await setStatus(tenantId, status);
+          console.log(`[stripe-webhook] tenant=${tenantId} status=${status}`);
+        }
+      } catch (err) {
+        console.error('[stripe-webhook] status update failed', err);
+        return res.status(500).json({ error: 'Status update failed; retry.' });
+      }
+    }
   }
 
-  // Ack everything we understood the signature of, whether or not it was a
-  // paid event — Stripe retries on non-2xx.
+  // Ack everything we verified the signature of — Stripe retries on non-2xx.
   res.status(200).json({ received: true });
 });

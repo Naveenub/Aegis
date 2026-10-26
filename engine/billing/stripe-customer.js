@@ -5,13 +5,12 @@
  * price + one metered subscription item per usage.EVENT_TYPES dimension) in
  * a single call, returning the customer id POST /signup stores via
  * tenant-registry.js setStripeCustomerId(). Usage is reported as Billing Meter events keyed by
- * customer id — see billing/stripe-reporter.js. The STRIPE_PRICE_* metered
- * prices must each be attached to a Stripe Meter whose event_name matches
- * METER_EVENT_NAME in stripe-reporter.js.
+ * customer id — see billing/stripe-reporter.js. Metered prices are per tier
+ * (STRIPE_PRICE_{TIER}_{EVENT_TYPE}) and attached to the Stripe Meters whose
+ * event_name matches stripe-reporter.js — run scripts/stripe-setup.js.
  *
  * Configuration: STRIPE_SECRET_KEY, STRIPE_PRICE_{TIER} (base price per
- * tier), and STRIPE_PRICE_WORKFLOW_RUN / _AGENT_STEP / _TOKENS /
- * _SANDBOX_MINUTES (metered, usage-type prices, shared across tiers).
+ * tier), and STRIPE_PRICE_{TIER}_{WORKFLOW_RUN|AGENT_STEP|TOKENS|SANDBOX_MINUTES}.
  */
 
 import Stripe from 'stripe';
@@ -22,13 +21,6 @@ function getClient() {
   if (!_client) _client = new Stripe(process.env.STRIPE_SECRET_KEY);
   return _client;
 }
-
-const METERED_PRICE_ENV = {
-  [EVENT_TYPES.WORKFLOW_RUN]:    'STRIPE_PRICE_WORKFLOW_RUN',
-  [EVENT_TYPES.AGENT_STEP]:      'STRIPE_PRICE_AGENT_STEP',
-  [EVENT_TYPES.TOKENS]:          'STRIPE_PRICE_TOKENS',
-  [EVENT_TYPES.SANDBOX_MINUTES]: 'STRIPE_PRICE_SANDBOX_MINUTES',
-};
 
 function requirePrice(envVar) {
   const price = process.env[envVar];
@@ -43,14 +35,17 @@ function requirePrice(envVar) {
  * @param {string} params.email
  * @param {string} params.tenantId  - stored as customer/subscription metadata for support lookups
  * @param {string} params.tier      - 'starter' | 'pro' | 'enterprise'
- * @returns {Promise<{ customerId: string, subscriptionId: string }>}
+ * @returns {Promise<{ customerId: string, subscriptionId: string, status: string, clientSecret: string|null }>}
  */
 export async function provisionSubscription({ email, tenantId, tier }) {
   const client = getClient();
   const basePrice = requirePrice(`STRIPE_PRICE_${tier.toUpperCase()}`);
+  // Per-tier metered prices (graduated: the tier's included allowance is the
+  // free first band, overage is priced above it) — created by
+  // scripts/stripe-setup.js as STRIPE_PRICE_{TIER}_{EVENT_TYPE}.
   const metered = Object.values(EVENT_TYPES).map((eventType) => ({
     eventType,
-    price: requirePrice(METERED_PRICE_ENV[eventType]),
+    price: requirePrice(`STRIPE_PRICE_${tier.toUpperCase()}_${eventType.toUpperCase()}`),
   }));
 
   const customer = await client.customers.create({ email, metadata: { tenantId } });
@@ -59,9 +54,19 @@ export async function provisionSubscription({ email, tenantId, tier }) {
     customer: customer.id,
     items: [{ price: basePrice }, ...metered.map(({ price }) => ({ price }))],
     metadata: { tenantId },
+    // Gate on first payment: subscription stays 'incomplete' until the
+    // client confirms the PaymentIntent with clientSecret (Stripe.js).
+    payment_behavior: 'default_incomplete',
+    payment_settings: { save_default_payment_method: 'on_subscription' },
+    expand: ['latest_invoice.confirmation_secret'],
   });
 
-  return { customerId: customer.id, subscriptionId: subscription.id };
+  return {
+    customerId: customer.id,
+    subscriptionId: subscription.id,
+    status: subscription.status, // 'active' only if the first invoice was $0
+    clientSecret: subscription.latest_invoice?.confirmation_secret?.client_secret ?? null,
+  };
 }
 
 /**

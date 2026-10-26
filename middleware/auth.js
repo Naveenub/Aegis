@@ -36,6 +36,7 @@
  */
 
 import { hashKey, lookupByHash } from '../engine/key-store.js';
+import { getStatus } from '../engine/tenant-registry.js';
 
 const GLOBAL_KEY        = process.env.AEGIS_API_KEY ?? '';
 const DEFAULT_TENANT_ID = 'default';
@@ -166,6 +167,25 @@ export async function requireApiKey(req, res, next, requestedTenantId) {
 
   if (!resolved) {
     return res.status(403).json({ error: 'Invalid or revoked API key.' });
+  }
+
+  // Billing gate: signed-up-but-unpaid or payment-failed tenants are blocked.
+  // Static env keys and tenants with no status are unaffected.
+  if (resolved.keyId !== 'env') {
+    try {
+      const status = await getStatus(resolved.tenantId);
+      if (status !== 'active') {
+        return res.status(402).json({
+          error: status === 'pending'
+            ? 'Payment required: complete your first payment to activate this account.'
+            : 'Account suspended: payment failed or subscription cancelled.',
+          status,
+        });
+      }
+    } catch (err) {
+      console.error('[auth] Status check error:', err.message);
+      return res.status(503).json({ error: 'Authentication service unavailable.' });
+    }
   }
 
   req.resolvedTenantId = resolved.tenantId;

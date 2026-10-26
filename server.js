@@ -65,7 +65,7 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setStripeCustomerId } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setStripeCustomerId, setStatus } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
@@ -819,7 +819,10 @@ app.get('/anomalies', requireApiKey, anomalyHandler);
  * quota, billing config, and a first API key.
  *
  * Body:    { email: string, tenantId: string, label?: string, tier?: 'starter'|'pro'|'enterprise' }
- * Returns: { tenantId, tier, apiKey, keyId, stripeCustomerId, stripeSubscriptionId }
+ * Returns: { tenantId, tier, apiKey, keyId, stripeCustomerId, stripeSubscriptionId, status, clientSecret }
+ *
+ * The account is 'pending' (API calls return 402) until the first payment is
+ * confirmed via clientSecret and Stripe's invoice.paid webhook activates it.
  *
  * apiKey is returned ONCE — same rule as POST /tenants/:id/keys.
  * If tenant provisioning fails after the Stripe subscription is created, the
@@ -858,6 +861,9 @@ app.post('/signup', taskRateLimiter, async (req, res) => {
     await setTier(id, resolvedTier);
     await setQuota(id, getTierConfig(resolvedTier).quota);
     await setStripeCustomerId(id, subscription.customerId);
+    // Unpaid until Stripe confirms (invoice.paid webhook flips this to active).
+    const status = subscription.status === 'active' ? 'active' : 'pending';
+    await setStatus(id, status);
     const key = await createKey(id, { label: label || 'signup' });
 
     recordAuditEvent(id, {
@@ -875,6 +881,9 @@ app.post('/signup', taskRateLimiter, async (req, res) => {
       keyId: key.keyId,
       stripeCustomerId: subscription.customerId,
       stripeSubscriptionId: subscription.subscriptionId,
+      status,
+      // Confirm payment client-side with Stripe.js; the key works once status is active.
+      clientSecret: subscription.clientSecret,
     });
   } catch (err) {
     console.error('[POST /signup] Tenant provisioning failed after Stripe subscription created', err);

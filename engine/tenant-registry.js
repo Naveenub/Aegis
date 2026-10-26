@@ -123,6 +123,28 @@ export async function getStripeCustomerId(tenantId) {
 }
 
 /**
+ * Account status gate. 'active' | 'pending' (signed up, first payment not yet
+ * confirmed) | 'suspended' (payment failed / subscription cancelled).
+ * Unset (design-partner and env-seeded tenants) is treated as active.
+ *
+ * @param {string} tenantId
+ * @param {'active'|'pending'|'suspended'} status
+ */
+export async function setStatus(tenantId, status) {
+  assertTenantId(tenantId);
+  await redis.hset(TENANT_META_KEY(tenantId), { status });
+}
+
+/**
+ * @param {string} tenantId
+ * @returns {Promise<'active'|'pending'|'suspended'>}
+ */
+export async function getStatus(tenantId) {
+  assertTenantId(tenantId);
+  return (await redis.hget(TENANT_META_KEY(tenantId), 'status')) ?? 'active';
+}
+
+/**
  * Set the pricing tier for a tenant. Validity of the tier name itself is
  * billing/tiers.js's concern (getTierConfig() falls back to DEFAULT_TIER for
  * unknown values) — this just persists whatever string is passed.
