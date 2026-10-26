@@ -31,7 +31,9 @@ export async function checkAllowance(tenantId, eventType) {
 
   const requestedTier = await getTier(tenantId);
   const config = getTierConfig(requestedTier);
-  const included = config.allowance[eventType] ?? 0;
+  // null = unlimited (must not be coerced to 0); an unknown event type has no allowance.
+  const rawIncluded = config.allowance[eventType];
+  const included = rawIncluded === undefined ? 0 : rawIncluded;
 
   // null = unlimited (see tiers.js) — no overage is possible, skip the query.
   if (included === null) {

@@ -29,4 +29,12 @@ Auth: `Authorization: Bearer <key>` where the key is `AEGIS_API_KEY_{TENANTID}` 
 | GET | `/anomalies` | Active anomaly alerts |
 | GET/POST | `/tenants`, `/tenants/:id` | Tenant management |
 | GET/POST/DELETE | `/tenants/:id/keys[/:keyId]` | Per-tenant API key management |
+| POST | `/signup` | Self-serve signup (unauthenticated) — see [Billing](billing) |
+| GET | `/tenants/:id/billing` | Tier and this month's usage vs. included allowance |
+| POST | `/billing/portal` | Stripe billing-portal URL (update card, pay invoice) |
+| POST | `/webhooks/stripe` | Stripe webhook (signature-verified) |
 | GET | `/events` | Live SSE event stream |
+
+## Billing status codes
+
+`402 Payment Required` is returned by every authenticated endpoint except `/billing/portal` and `/tenants/:id/billing` when the tenant is `pending` (first payment not yet confirmed) or `suspended` (payment failed or subscription cancelled). The body includes `status`. See [Billing](billing).

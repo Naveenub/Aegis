@@ -66,11 +66,11 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, setStripeCustomerId, getStripeCustomerId, setStatus } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
-import { provisionSubscription, cancelSubscription, createPortalSession } from './engine/billing/stripe-customer.js';
+import { createPortalSession } from './engine/billing/stripe-customer.js';
 import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
@@ -80,6 +80,7 @@ import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
+import { signupTenant } from './engine/billing/signup.js';
 import { requireApiKey, optionalApiKey, assertTenantAccess, allowInactiveTenant } from './middleware/auth.js';
 import { taskRateLimiter } from './middleware/rate-limit.js';
 
@@ -830,69 +831,8 @@ app.get('/anomalies', requireApiKey, anomalyHandler);
  * subscription is cancelled so a failed signup never leaves a live orphan.
  */
 app.post('/signup', taskRateLimiter, async (req, res) => {
-  const { email, tenantId, label, tier } = req.body ?? {};
-
-  if (!email || typeof email !== 'string' || !email.includes('@')) {
-    return res.status(400).json({ error: '`email` (string) is required.' });
-  }
-  if (!tenantId || typeof tenantId !== 'string' || !tenantId.trim()) {
-    return res.status(400).json({ error: '`tenantId` (string) is required.' });
-  }
-  if (tier !== undefined && !TIERS[tier]) {
-    return res.status(400).json({ error: `Unknown tier "${tier}". Valid: ${Object.keys(TIERS).join(', ')}.` });
-  }
-
-  const id = tenantId.trim();
-  const resolvedTier = tier ?? DEFAULT_TIER;
-
-  if (await getTenant(id)) {
-    return res.status(409).json({ error: `Tenant "${id}" already exists.` });
-  }
-
-  let subscription;
-  try {
-    subscription = await provisionSubscription({ email, tenantId: id, tier: resolvedTier });
-  } catch (err) {
-    console.error('[POST /signup] Stripe provisioning failed', err);
-    return res.status(502).json({ error: `Billing provisioning failed: ${err.message}` });
-  }
-
-  try {
-    await registerTenant(id, { label });
-    await setTier(id, resolvedTier);
-    await setQuota(id, getTierConfig(resolvedTier).quota);
-    await setStripeCustomerId(id, subscription.customerId);
-    // Unpaid until Stripe confirms (invoice.paid webhook flips this to active).
-    const status = subscription.status === 'active' ? 'active' : 'pending';
-    await setStatus(id, status);
-    const key = await createKey(id, { label: label || 'signup' });
-
-    recordAuditEvent(id, {
-      actorId: 'signup',
-      action: 'tenant.signup',
-      resourceType: 'tenant',
-      resourceId: id,
-      detail: { tier: resolvedTier, stripeCustomerId: subscription.customerId },
-    }).catch(err => console.error('[audit] tenant.signup', err));
-
-    res.status(201).json({
-      tenantId: id,
-      tier: resolvedTier,
-      apiKey: key.rawKey,
-      keyId: key.keyId,
-      stripeCustomerId: subscription.customerId,
-      stripeSubscriptionId: subscription.subscriptionId,
-      status,
-      // Confirm payment client-side with Stripe.js; the key works once status is active.
-      clientSecret: subscription.clientSecret,
-    });
-  } catch (err) {
-    console.error('[POST /signup] Tenant provisioning failed after Stripe subscription created', err);
-    await cancelSubscription(subscription.subscriptionId).catch(cancelErr =>
-      console.error('[POST /signup] Failed to roll back Stripe subscription', cancelErr)
-    );
-    res.status(500).json({ error: err.message });
-  }
+  const { status, body } = await signupTenant(req.body);
+  res.status(status).json(body);
 });
 
 /**
