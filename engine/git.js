@@ -9,7 +9,7 @@
  * Exports
  * ───────
  *   worktreeDir(tenantId)                         → string | null
- *   ensureWorkflowBranch(workflowId, tenantId)    → { cwd, lock }
+ *   ensureWorkflowBranch(workflowId, tenantId)    → { cwd, lock }   (syncs tenant base with default branch first)
  *   commitChanges(message, cwd)                   → void
  *   rollbackLastCommit(cwd)                       → void
  *   revertStepCommit(workflowId, stepId, cwd)     → { commitHash }
@@ -68,6 +68,88 @@ export function worktreeDir(tenantId) {
   return fs.existsSync(dir) ? dir : null;
 }
 
+// ─── Tenant base-branch sync ──────────────────────────────────────────────────
+
+/**
+ * Bring the tenant base branch (aegis-tenant/<id>) up to date with the repo's
+ * default branch.  The base branch is created from the default branch once;
+ * without this, changes that land upstream afterwards (human commits, merged
+ * PRs) never reach new workflows and show up later as merge conflicts.
+ *
+ * Runs inside the tenant's `_base` worktree (the only place the base branch is
+ * checked out) and merges the *resolved* upstream commit, so `baseRef` may be
+ * "HEAD" (legacy single-repo mode) or refs/remotes/origin/<default>.
+ *
+ * Never throws: a failed sync must not block workflows.  On conflict the merge
+ * is aborted and the base branch is left exactly as it was.
+ *
+ * AEGIS_BASE_SYNC = "merge" (default) | "off"
+ *
+ * @returns {{ synced: boolean, changed?: boolean, reason?: string, conflicts?: string[] }}
+ */
+function syncBaseBranch(baseWorktreePath, repoRoot, baseRef, baseBranch) {
+  if ((process.env.AEGIS_BASE_SYNC ?? 'merge').trim().toLowerCase() === 'off') {
+    return { synced: false, reason: 'disabled' };
+  }
+  try {
+    const up = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${baseRef}^{commit}`], {
+      cwd: repoRoot, encoding: 'utf-8',
+    });
+    const sha = up.status === 0 ? (up.stdout ?? '').trim() : '';
+    if (!sha) return { synced: false, reason: 'no-upstream' };
+
+    // Already contains the upstream tip — nothing to do.
+    const contained = spawnSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], {
+      cwd: baseWorktreePath, encoding: 'utf-8',
+    }).status === 0;
+    if (contained) return { synced: true, changed: false };
+
+    const merge = spawnSync(
+      'git', ['merge', '--no-edit', '-m', `Aegis: sync ${baseBranch} with default branch`, sha],
+      { cwd: baseWorktreePath, encoding: 'utf-8' },
+    );
+    if (merge.status === 0) return { synced: true, changed: true };
+
+    const conflicts = (spawnSync('git', ['diff', '--name-only', '--diff-filter=U'], {
+      cwd: baseWorktreePath, encoding: 'utf-8',
+    }).stdout ?? '').split('\n').filter(Boolean);
+    spawnSync('git', ['merge', '--abort'], { cwd: baseWorktreePath, encoding: 'utf-8' });
+    console.warn(`[git] ${baseBranch}: could not sync with default branch (conflicts: ${conflicts.join(', ') || 'unknown'}); left unchanged.`);
+    return { synced: false, reason: 'conflict', conflicts };
+  } catch (err) {
+    console.warn(`[git] ${baseBranch}: base sync failed: ${err.message}`);
+    return { synced: false, reason: 'error' };
+  }
+}
+
+/** Create the tenant's `_base` worktree (checked out on baseBranch) if missing. */
+function ensureBaseWorktree(tenantId, repoRoot, baseBranch) {
+  const baseWorktreePath = path.join(worktreesBase(), tenantId, '_base');
+  if (!fs.existsSync(baseWorktreePath)) {
+    fs.mkdirSync(path.join(worktreesBase(), tenantId), { recursive: true });
+    git(['worktree', 'add', '--no-guess-remote', baseWorktreePath, baseBranch], repoRoot);
+  }
+  return baseWorktreePath;
+}
+
+/**
+ * Lock-protected sync used before a new workflow branches off the base.
+ * Serialised with finaliseWorkflow via the same tenant-merge lock.
+ */
+async function syncTenantBase(tenantId, repoRoot, baseRef, baseBranch) {
+  let lock;
+  try {
+    lock = await acquireLock(`tenant-merge:${tenantId}`, tenantId);
+    const baseWorktreePath = ensureBaseWorktree(tenantId, repoRoot, baseBranch);
+    return syncBaseBranch(baseWorktreePath, repoRoot, baseRef, baseBranch);
+  } catch (err) {
+    console.warn(`[git] ${baseBranch}: base sync skipped: ${err.message}`);
+    return { synced: false, reason: 'error' };
+  } finally {
+    if (lock) await releaseLock(lock);
+  }
+}
+
 // ─── Per-workflow branch ──────────────────────────────────────────────────────
 
 /**
@@ -99,6 +181,9 @@ export async function ensureWorkflowBranch(workflowId, tenantId) {
       }).status === 0;
 
       if (baseExists) {
+        // Pull in anything that landed on the default branch since the base was
+        // created, so this workflow starts from current code.
+        await syncTenantBase(tenantId, REPO_ROOT, baseRef, baseBranch);
         git(['worktree', 'add', '-b', branch, cwd, baseBranch], REPO_ROOT);
       } else {
         // First workflow for this tenant — branch from the repo's default branch
@@ -251,6 +336,10 @@ export async function finaliseWorkflow(workflowId, tenantId) {
       fs.mkdirSync(path.join(WORKTREES_BASE, tenantId), { recursive: true });
       git(['worktree', 'add', '--no-guess-remote', baseWorktreePath, baseBranch], REPO_ROOT);
     }
+
+    // Keep the base branch current with the default branch (it is otherwise
+    // created once and never updated). Best-effort; conflicts leave it as-is.
+    syncBaseBranch(baseWorktreePath, REPO_ROOT, baseRef, baseBranch);
 
     // ── Attempt 1: clean --no-ff merge ─────────────────────────────────────────
     try {

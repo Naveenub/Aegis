@@ -470,6 +470,73 @@ describe('finaliseWorkflow()', () => {
   });
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6b. Tenant base-branch sync with the default branch
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('tenant base-branch sync', () => {
+  const call = (args0, args1) => spawnSyncMock.mock.calls.find(
+    ([bin, a]) => bin === 'git' && a[0] === args0 && (args1 === undefined || a[1] === args1),
+  );
+
+  /** Route spawnSync by git subcommand. */
+  function routeGit({ upstream = 'abc123', contained = false, mergeOk = true } = {}) {
+    spawnSyncMock.mockImplementation((bin, args) => {
+      if (args[0] === 'rev-parse' && args.includes('--quiet')) return gitOk(upstream);
+      if (args[0] === 'merge-base') return contained ? gitOk() : gitFail('');
+      if (args[0] === 'merge' && args[1] === '--no-edit') return mergeOk ? gitOk() : gitFail('CONFLICT');
+      if (args[0] === 'diff') return gitOk('engine/foo.js\n');
+      return gitOk();
+    });
+  }
+
+  it('finaliseWorkflow merges the default-branch tip into the base branch before merging', async () => {
+    routeGit({ contained: false, mergeOk: true });
+    await finaliseWorkflow('wf-sync', 'tenant-s');
+    const sync = call('merge', '--no-edit');
+    expect(sync).toBeDefined();
+    expect(sync[1]).toContain('abc123');
+  });
+
+  it('does nothing when the base branch already contains the upstream tip', async () => {
+    routeGit({ contained: true });
+    await finaliseWorkflow('wf-noop', 'tenant-s');
+    expect(call('merge', '--no-edit')).toBeUndefined();
+  });
+
+  it('aborts the sync merge on conflict and still proceeds with the workflow merge', async () => {
+    routeGit({ contained: false, mergeOk: false });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await finaliseWorkflow('wf-conf', 'tenant-s');
+    expect(call('merge', '--abort')).toBeDefined();
+    expect(result.merged).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('AEGIS_BASE_SYNC=off skips the sync', async () => {
+    process.env.AEGIS_BASE_SYNC = 'off';
+    try {
+      routeGit({ contained: false });
+      await finaliseWorkflow('wf-off', 'tenant-s');
+      expect(call('merge', '--no-edit')).toBeUndefined();
+    } finally {
+      delete process.env.AEGIS_BASE_SYNC;
+    }
+  });
+
+  it('ensureWorkflowBranch syncs an existing base branch before branching from it', async () => {
+    existsSyncMock.mockReturnValue(false);
+    routeGit({ contained: false, mergeOk: true });
+    await ensureWorkflowBranch('wf-new', 'tenant-s');
+    const syncIdx = spawnSyncMock.mock.calls.findIndex(([, a]) => a[0] === 'merge' && a[1] === '--no-edit');
+    const addIdx = spawnSyncMock.mock.calls.findIndex(([, a]) => a[0] === 'worktree' && a[1] === 'add' && a.includes('-b'));
+    expect(syncIdx).toBeGreaterThan(-1);
+    expect(addIdx).toBeGreaterThan(syncIdx);
+    expect(acquireLockMock).toHaveBeenCalledWith('tenant-merge:tenant-s', 'tenant-s');
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 7. removeWorkflowWorktree()
 // ═══════════════════════════════════════════════════════════════════════════════
