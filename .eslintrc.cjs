@@ -10,8 +10,12 @@ module.exports = {
   },
   overrides: [
     {
-      files: ['dashboard/src/api/client.js'],
+      files: ['api/client.js', 'dashboard/src/**/*.js'],
       env: { browser: true },
+    },
+    {
+      files: ['scripts/**/*.js', 'engine/billing/stripe-webhook.js'],
+      rules: { 'no-console': 'off' },
     },
   ],
   rules: {
