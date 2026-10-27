@@ -85,7 +85,7 @@ import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
-import { signupTenant, getSignupConfig } from './engine/billing/signup.js';
+import { signupTenant, getSignupConfig, logRunnerStartupStatus } from './engine/billing/signup.js';
 import { requireApiKey, optionalApiKey, assertTenantAccess, allowInactiveTenant } from './middleware/auth.js';
 import { taskRateLimiter } from './middleware/rate-limit.js';
 
@@ -1240,6 +1240,9 @@ async function start() {
   // Probe and log vector memory capability warnings at startup so operators
   // know immediately if OPENAI_API_KEY or Redis Stack is missing.
   await logVectorCapabilityWarnings();
+
+  // Warn early if no isolated sandbox runner is configured (DOCKER_HOST).
+  logRunnerStartupStatus();
 
   // Start in-process anomaly detection loop.
   // Evaluates metric rules every ANOMALY_INTERVAL_MS (default 60 s) and fires

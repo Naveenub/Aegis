@@ -40,9 +40,51 @@ export function unsandboxedSignupBlocked(env = process.env) {
   return !isolatedRunnerConfigured(env) && env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP !== 'true';
 }
 
+/**
+ * Human-readable explanation of why self-serve signup is off (null when it is
+ * enabled). Says what is wrong with the runner config and what to set.
+ */
+export function signupBlockedReason(env = process.env) {
+  if (!unsandboxedSignupBlocked(env)) return null;
+  const host = (env.DOCKER_HOST ?? '').trim();
+  const fix = 'Set DOCKER_HOST to an isolated remote runner (tcp:// with DOCKER_TLS_VERIFY=1, or ssh://).';
+  if (!host) {
+    return `Self-serve signup is disabled: no isolated sandbox runner is configured. ${fix}`;
+  }
+  if (host.startsWith('tcp://')) {
+    return 'Self-serve signup is disabled: the tcp:// DOCKER_HOST is not authenticated. Set DOCKER_TLS_VERIFY=1 (mutual TLS) or use an ssh:// runner.';
+  }
+  if (!host.startsWith('ssh://')) {
+    return `Self-serve signup is disabled: DOCKER_HOST points at a same-machine daemon, not an isolated runner. ${fix}`;
+  }
+  return `Self-serve signup is disabled. ${fix}`;
+}
+
+/**
+ * Startup check: surface a missing/unsafe runner in the logs instead of only
+ * as signup 503s. Always warns on Render (no nested Docker, so a missing
+ * DOCKER_HOST also blocks every lint/test step); elsewhere it logs at info
+ * level when signup is off.
+ */
+export function logRunnerStartupStatus(env = process.env, log = console) {
+  const reason = signupBlockedReason(env);
+  const onRender = env.RENDER === 'true';
+  const host = (env.DOCKER_HOST ?? '').trim();
+  if (onRender && !host) {
+    log.warn(
+      '[startup] DOCKER_HOST is not set. Render has no nested Docker, so lint/test steps will be ' +
+      'blocked and self-serve signup will return 503. Point DOCKER_HOST at your remote runner ' +
+      '(e.g. tcp://runner.example.com:2376) with DOCKER_TLS_VERIFY=1 — see the header of render.yaml.',
+    );
+  } else if (reason) {
+    (onRender ? log.warn : log.info)(`[startup] ${reason}`);
+  }
+  return reason;
+}
+
 export async function signupTenant(input) {
   if (unsandboxedSignupBlocked()) {
-    return { status: 503, body: { error: 'Self-serve signup is not available on this deployment.' } };
+    return { status: 503, body: { error: signupBlockedReason() } };
   }
   const { email, tenantId, label, tier } = input ?? {};
 

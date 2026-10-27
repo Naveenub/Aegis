@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- **Clearer signup-disabled diagnostics** — `POST /signup` now returns a 503 that says why signup is off and what to set (`DOCKER_HOST`, `DOCKER_TLS_VERIFY`) instead of the generic "not available" text. On startup the server logs a warning when `DOCKER_HOST` is missing (always on Render, where it also blocks lint/test steps), so a missing runner shows in the logs rather than only as signup 503s.
+
 - **Sandbox hardening for paid multi-tenant use** — the k8s `aegis-sandbox` Docker API is now mutual-TLS only (port 2376, `aegis-sandbox-server-tls` / `aegis-sandbox-client-tls` Secrets; see `k8s/README.md`), no longer plaintext 2375 behind a NetworkPolicy alone. Self-serve signup now requires an authenticated remote runner (`DOCKER_HOST` tcp:// + `DOCKER_TLS_VERIFY`, or ssh://); local mode, `CI=true`, unix sockets and the plaintext compose `dind` all refuse it unless `AEGIS_ALLOW_UNSANDBOXED_SIGNUP=true`. Docs and compose file now state the compose path is dev/single-tenant only. `provision-runner.sh certs` accepts `EXTRA_SANS`.
 
 - **Tenant base branch stays in sync with the default branch** — `aegis-tenant/<id>` was created from the default branch once and never updated, so upstream commits never reached new workflows and surfaced later as merge conflicts. The base branch now merges the default-branch tip before a new workflow branches from it and before each workflow merge (fast-forward when possible). A conflicting sync is aborted and leaves the base unchanged (logged, never blocks a workflow). Set `AEGIS_BASE_SYNC=off` to disable.

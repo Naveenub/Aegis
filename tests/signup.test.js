@@ -160,6 +160,31 @@ describe('isolated runner guard', () => {
     expect(unsandboxedSignupBlocked()).toBe(false);
   });
 
+  it('explains why signup is off and what to set', async () => {
+    clear();
+    const { signupTenant, signupBlockedReason } = await import('../engine/billing/signup.js');
+    const res = await signupTenant({ email: 'a@b.co', tenantId: 'acme' });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/DOCKER_HOST/);
+    process.env.DOCKER_HOST = 'tcp://dind:2375';
+    expect(signupBlockedReason()).toMatch(/DOCKER_TLS_VERIFY/);
+    process.env.DOCKER_HOST = 'unix:///var/run/docker.sock';
+    expect(signupBlockedReason()).toMatch(/same-machine/);
+    process.env.DOCKER_HOST = 'ssh://deploy@runner';
+    expect(signupBlockedReason()).toBeNull();
+  });
+
+  it('startup check warns on Render when DOCKER_HOST is missing', async () => {
+    const { logRunnerStartupStatus } = await import('../engine/billing/signup.js');
+    const log = { warn: vi.fn(), info: vi.fn() };
+    logRunnerStartupStatus({ RENDER: 'true' }, log);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('DOCKER_HOST is not set'));
+    const ok = { warn: vi.fn(), info: vi.fn() };
+    logRunnerStartupStatus({ RENDER: 'true', DOCKER_HOST: 'tcp://r:2376', DOCKER_TLS_VERIFY: '1' }, ok);
+    expect(ok.warn).not.toHaveBeenCalled();
+    expect(ok.info).not.toHaveBeenCalled();
+  });
+
   it('allows explicit opt-in for demo deploys', async () => {
     clear();
     process.env.AEGIS_SANDBOX_MODE = 'local';
