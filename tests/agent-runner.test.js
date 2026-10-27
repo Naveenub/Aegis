@@ -31,6 +31,16 @@ vi.mock('@anthropic-ai/sdk', () => ({
   })),
 }));
 
+const mockRecordUsage = vi.hoisted(() => vi.fn());
+
+vi.mock('../engine/usage-recorder.js', () => ({
+  EVENT_TYPES: {
+    WORKFLOW_RUN: 'workflow_run', AGENT_STEP: 'agent_step',
+    TOKENS_IN: 'tokens_in', TOKENS_OUT: 'tokens_out', SANDBOX_MINUTES: 'sandbox_minutes',
+  },
+  recordUsageEvent: mockRecordUsage,
+}));
+
 // ─── Mock vector-memory ───────────────────────────────────────────────────────
 
 vi.mock('../engine/vector-memory.js', () => ({
@@ -135,6 +145,24 @@ describe('runAgent() — basic invocation', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2. Anthropic API call shape
 // ═══════════════════════════════════════════════════════════════════════════════
+
+describe('runAgent() — token metering', () => {
+  it('meters input and output tokens as separate events', async () => {
+    mockRecordUsage.mockClear();
+    mockCreate.mockResolvedValue({
+      model: 'claude-sonnet-4-20250514',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 1000, output_tokens: 200 },
+    });
+    await runAgent('planner', 'task', {}, 'default');
+    const byType = Object.fromEntries(
+      mockRecordUsage.mock.calls.map(([e]) => [e.eventType, e.quantity])
+    );
+    expect(byType.tokens_in).toBe(1000);
+    expect(byType.tokens_out).toBe(200);
+    expect(byType).not.toHaveProperty('tokens');
+  });
+});
 
 describe('runAgent() — API call parameters', () => {
   it('calls messages.create with model and max_tokens', async () => {

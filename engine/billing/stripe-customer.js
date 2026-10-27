@@ -10,7 +10,7 @@
  * event_name matches stripe-reporter.js — run scripts/stripe-setup.js.
  *
  * Configuration: STRIPE_SECRET_KEY, STRIPE_PRICE_{TIER} (base price per
- * tier), and STRIPE_PRICE_{TIER}_{WORKFLOW_RUN|AGENT_STEP|TOKENS|SANDBOX_MINUTES}.
+ * tier), and STRIPE_PRICE_{TIER}_{WORKFLOW_RUN|AGENT_STEP|TOKENS_IN|TOKENS_OUT|SANDBOX_MINUTES}.
  */
 
 import Stripe from 'stripe';

@@ -105,7 +105,9 @@ services:
         sync: false
       - key: STRIPE_PRICE_STARTER_AGENT_STEP
         sync: false
-      - key: STRIPE_PRICE_STARTER_TOKENS
+      - key: STRIPE_PRICE_STARTER_TOKENS_IN
+        sync: false
+      - key: STRIPE_PRICE_STARTER_TOKENS_OUT
         sync: false
       - key: STRIPE_PRICE_STARTER_SANDBOX_MINUTES
         sync: false
@@ -113,7 +115,9 @@ services:
         sync: false
       - key: STRIPE_PRICE_PRO_AGENT_STEP
         sync: false
-      - key: STRIPE_PRICE_PRO_TOKENS
+      - key: STRIPE_PRICE_PRO_TOKENS_IN
+        sync: false
+      - key: STRIPE_PRICE_PRO_TOKENS_OUT
         sync: false
       - key: STRIPE_PRICE_PRO_SANDBOX_MINUTES
         sync: false
@@ -121,7 +125,9 @@ services:
         sync: false
       - key: STRIPE_PRICE_ENTERPRISE_AGENT_STEP
         sync: false
-      - key: STRIPE_PRICE_ENTERPRISE_TOKENS
+      - key: STRIPE_PRICE_ENTERPRISE_TOKENS_IN
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE_TOKENS_OUT
         sync: false
       - key: STRIPE_PRICE_ENTERPRISE_SANDBOX_MINUTES
         sync: false

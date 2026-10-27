@@ -20,7 +20,8 @@ export const TIERS = Object.freeze({
     allowance: {
       [EVENT_TYPES.WORKFLOW_RUN]:    500,
       [EVENT_TYPES.AGENT_STEP]:      5_000,
-      [EVENT_TYPES.TOKENS]:          2_000_000,
+      [EVENT_TYPES.TOKENS_IN]:       1_500_000,
+      [EVENT_TYPES.TOKENS_OUT]:      300_000,
       [EVENT_TYPES.SANDBOX_MINUTES]: 300,
     },
   },
@@ -30,7 +31,8 @@ export const TIERS = Object.freeze({
     allowance: {
       [EVENT_TYPES.WORKFLOW_RUN]:    5_000,
       [EVENT_TYPES.AGENT_STEP]:      50_000,
-      [EVENT_TYPES.TOKENS]:          20_000_000,
+      [EVENT_TYPES.TOKENS_IN]:       15_000_000,
+      [EVENT_TYPES.TOKENS_OUT]:      3_000_000,
       [EVENT_TYPES.SANDBOX_MINUTES]: 3_000,
     },
   },
@@ -43,7 +45,8 @@ export const TIERS = Object.freeze({
     allowance: {
       [EVENT_TYPES.WORKFLOW_RUN]:    null,
       [EVENT_TYPES.AGENT_STEP]:      null,
-      [EVENT_TYPES.TOKENS]:          null,
+      [EVENT_TYPES.TOKENS_IN]:       null,
+      [EVENT_TYPES.TOKENS_OUT]:      null,
       [EVENT_TYPES.SANDBOX_MINUTES]: null,
     },
   },

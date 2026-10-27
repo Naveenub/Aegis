@@ -11,7 +11,7 @@ const getUsageInPeriodMock = vi.fn();
 vi.mock('../engine/usage-recorder.js', () => ({
   EVENT_TYPES: {
     WORKFLOW_RUN: 'workflow_run', AGENT_STEP: 'agent_step',
-    TOKENS: 'tokens', SANDBOX_MINUTES: 'sandbox_minutes',
+    TOKENS_IN: 'tokens_in', TOKENS_OUT: 'tokens_out', SANDBOX_MINUTES: 'sandbox_minutes',
   },
   getUsageInPeriod: getUsageInPeriodMock,
 }));
@@ -30,7 +30,7 @@ beforeEach(async () => {
 
 describe('tiers', () => {
   it('defines starter, pro, enterprise with a quota and every metered allowance', () => {
-    const events = ['workflow_run', 'agent_step', 'tokens', 'sandbox_minutes'];
+    const events = ['workflow_run', 'agent_step', 'tokens_in', 'tokens_out', 'sandbox_minutes'];
     for (const name of ['starter', 'pro', 'enterprise']) {
       const t = tiers.TIERS[name];
       expect(t.quota).toEqual(expect.objectContaining({
@@ -44,7 +44,8 @@ describe('tiers', () => {
 
   it('allowances grow with the tier and enterprise is unlimited (null)', () => {
     const { starter, pro, enterprise } = tiers.TIERS;
-    expect(pro.allowance.tokens).toBeGreaterThan(starter.allowance.tokens);
+    expect(pro.allowance.tokens_in).toBeGreaterThan(starter.allowance.tokens_in);
+    expect(pro.allowance.tokens_out).toBeGreaterThan(starter.allowance.tokens_out);
     expect(Object.values(enterprise.allowance).every((v) => v === null)).toBe(true);
   });
 
@@ -74,13 +75,13 @@ describe('checkAllowance', () => {
   it('treats a tenant with no tier as starter', async () => {
     getTierMock.mockResolvedValue(null);
     getUsageInPeriodMock.mockResolvedValue(0);
-    expect((await checkAllowance('acme', 'tokens')).tier).toBe('starter');
+    expect((await checkAllowance('acme', 'tokens_in')).tier).toBe('starter');
   });
 
   it('skips the usage query for an unlimited tier', async () => {
     getTierMock.mockResolvedValue('enterprise');
-    const r = await checkAllowance('acme', 'tokens');
-    expect(r).toEqual({ tier: 'enterprise', eventType: 'tokens', used: null, included: null, overage: 0 });
+    const r = await checkAllowance('acme', 'tokens_in');
+    expect(r).toEqual({ tier: 'enterprise', eventType: 'tokens_in', used: null, included: null, overage: 0 });
     expect(getUsageInPeriodMock).not.toHaveBeenCalled();
   });
 
@@ -94,6 +95,6 @@ describe('checkAllowance', () => {
   });
 
   it('rejects an invalid tenant id', async () => {
-    await expect(checkAllowance('', 'tokens')).rejects.toThrow();
+    await expect(checkAllowance('', 'tokens_in')).rejects.toThrow();
   });
 });

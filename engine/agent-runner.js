@@ -239,11 +239,17 @@ export async function runAgent(
     tenantId, eventType: EVENT_TYPES.AGENT_STEP, quantity: 1,
     metadata: { agent, workflowId: context.workflowId },
   });
-  recordUsageEvent({
-    tenantId, eventType: EVENT_TYPES.TOKENS,
-    quantity: (response.usage?.input_tokens ?? 0) + (response.usage?.output_tokens ?? 0),
-    metadata: { agent, workflowId: context.workflowId, model: response.model ?? model },
-  });
+  // Input and output are separate meters: output costs 5x input, so a summed
+  // meter lets output-heavy tenants run at negative margin.
+  const tokenMeta = { agent, workflowId: context.workflowId, model: response.model ?? model };
+  const tokensIn  = response.usage?.input_tokens ?? 0;
+  const tokensOut = response.usage?.output_tokens ?? 0;
+  if (tokensIn > 0) {
+    recordUsageEvent({ tenantId, eventType: EVENT_TYPES.TOKENS_IN, quantity: tokensIn, metadata: tokenMeta });
+  }
+  if (tokensOut > 0) {
+    recordUsageEvent({ tenantId, eventType: EVENT_TYPES.TOKENS_OUT, quantity: tokensOut, metadata: tokenMeta });
+  }
 
   return response.content
     .filter((b) => b.type === 'text')

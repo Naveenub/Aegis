@@ -26,7 +26,7 @@ The source of truth is `engine/billing/tiers.js`. Prices are set in Stripe (see 
 
 ## How metering works
 
-1. Every billable action is written once to the append-only `usage_events` table in Postgres (`workflow_run`, `agent_step`, `tokens`, `sandbox_minutes`). Recording is best-effort and never fails a workflow.
+1. Every billable action is written once to the append-only `usage_events` table in Postgres (`workflow_run`, `agent_step`, `tokens_in`, `tokens_out`, `sandbox_minutes`). Recording is best-effort and never fails a workflow.
 2. `npm run billing:flush` (hourly CronJob in `k8s/10-billing-flush-cronjob.yaml`) sums unreported rows per tenant and event type and sends one **Stripe Billing Meter event** each. The event identifier is derived from the row-id range, so a retry is deduplicated by Stripe.
 3. Stripe invoices the graduated metered price: the tier's allowance is the free band, overage is charged above it.
 
@@ -40,18 +40,20 @@ Use a test-mode key first.
 STRIPE_SECRET_KEY=sk_test_... \
 BASE_USD_STARTER=... BASE_USD_PRO=... BASE_USD_ENTERPRISE=... \
 OVERAGE_USD_WORKFLOW_RUN=... OVERAGE_USD_AGENT_STEP=... \
-OVERAGE_USD_TOKENS=... OVERAGE_USD_SANDBOX_MINUTES=... \
+OVERAGE_USD_TOKENS_IN=... OVERAGE_USD_TOKENS_OUT=... OVERAGE_USD_SANDBOX_MINUTES=... \
 node scripts/stripe-setup.js          # add --dry-run to preview
 ```
 
-It creates 4 Meters, 3 base prices and 12 per-tier metered prices, and prints the env lines (`STRIPE_PRICE_{TIER}`, `STRIPE_PRICE_{TIER}_{EVENT}`). Add them, plus `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and `BILLING_RETURN_URL`, to your environment or Kubernetes secret.
+It creates 5 Meters, 3 base prices and 15 per-tier metered prices, and prints the env lines (`STRIPE_PRICE_{TIER}`, `STRIPE_PRICE_{TIER}_{EVENT}`). Add them, plus `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and `BILLING_RETURN_URL`, to your environment or Kubernetes secret.
 
 Then in the Stripe dashboard:
 
 - Add a webhook endpoint `POST /webhooks/stripe` subscribed to `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated` and `customer.subscription.deleted`.
 - Enable the **Customer portal** (Settings → Billing).
 
-Meter event names default to `aegis_workflow_run`, `aegis_agent_step`, `aegis_tokens`, `aegis_sandbox_minutes`; override with `STRIPE_METER_EVENT_<TYPE>`.
+Input and output tokens are separate meters because output costs 5x input ($3/M vs $15/M for Claude Sonnet). `stripe-setup.js` refuses overage prices below provider cost (`ALLOW_BELOW_COST=1` to override).
+
+Meter event names default to `aegis_workflow_run`, `aegis_agent_step`, `aegis_tokens_in`, `aegis_tokens_out`, `aegis_sandbox_minutes`; override with `STRIPE_METER_EVENT_<TYPE>`.
 
 ## Signup and payment gating
 

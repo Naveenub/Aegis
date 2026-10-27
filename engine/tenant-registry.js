@@ -95,7 +95,7 @@ export async function removeTenant(tenantId) {
 /**
  * Set the Stripe subscription-item mapping used to report metered usage for
  * this tenant. One subscription item per metered dimension (workflow_run,
- * agent_step, tokens, sandbox_minutes) — see billing/stripe-reporter.js.
+ * agent_step, tokens_in, tokens_out, sandbox_minutes) — see billing/stripe-reporter.js.
  *
  * @param {string} tenantId
  * @param {Record<string,string>} stripeItems - eventType -> Stripe subscription item id

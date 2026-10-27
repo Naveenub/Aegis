@@ -28,7 +28,8 @@ vi.mock('../engine/usage-recorder.js', () => ({
   EVENT_TYPES: {
     WORKFLOW_RUN: 'workflow_run',
     AGENT_STEP: 'agent_step',
-    TOKENS: 'tokens',
+    TOKENS_IN: 'tokens_in',
+    TOKENS_OUT: 'tokens_out',
     SANDBOX_MINUTES: 'sandbox_minutes',
   },
   getUnreportedUsage: getUnreportedUsageMock,
@@ -59,21 +60,21 @@ beforeEach(async () => {
 describe('flushUsageToStripe', () => {
   it('reports a configured group and marks it reported', async () => {
     getUnreportedUsageMock.mockResolvedValue([
-      { tenantId: 'acme', eventType: 'tokens', quantity: 1500.4, ids: [1, 2] },
+      { tenantId: 'acme', eventType: 'tokens_out', quantity: 1500.4, ids: [1, 2] },
     ]);
     getStripeCustomerIdMock.mockResolvedValue('cus_acme');
-    meterEventsCreateMock.mockResolvedValue({ identifier: 'aegis-acme-tokens-1-2' });
+    meterEventsCreateMock.mockResolvedValue({ identifier: 'aegis-acme-tokens_out-1-2' });
 
     const result = await flushUsageToStripe();
 
     expect(meterEventsCreateMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        event_name: 'aegis_tokens',
-        identifier: 'aegis-acme-tokens-1-2',
+        event_name: 'aegis_tokens_out',
+        identifier: 'aegis-acme-tokens_out-1-2',
         payload: { stripe_customer_id: 'cus_acme', value: '1501' },
       })
     );
-    expect(markReportedMock).toHaveBeenCalledWith([1, 2], 'aegis-acme-tokens-1-2');
+    expect(markReportedMock).toHaveBeenCalledWith([1, 2], 'aegis-acme-tokens_out-1-2');
     expect(result).toEqual({ reported: 1, skipped: 0, failed: 0 });
   });
 
@@ -92,7 +93,7 @@ describe('flushUsageToStripe', () => {
 
   it('counts a Stripe API failure without aborting the rest of the batch', async () => {
     getUnreportedUsageMock.mockResolvedValue([
-      { tenantId: 'acme', eventType: 'tokens', quantity: 10, ids: [1] },
+      { tenantId: 'acme', eventType: 'tokens_out', quantity: 10, ids: [1] },
       { tenantId: 'acme', eventType: 'agent_step', quantity: 2, ids: [2] },
     ]);
     getStripeCustomerIdMock.mockResolvedValue('cus_acme');

@@ -12,7 +12,7 @@
  *      customer mapping key "stripe_customer_id", value key "value",
  *      aggregation "sum".
  *   2. Create a metered recurring Price attached to that Meter and put its id
- *      in STRIPE_PRICE_{WORKFLOW_RUN|AGENT_STEP|TOKENS|SANDBOX_MINUTES}.
+ *      in STRIPE_PRICE_{TIER}_{WORKFLOW_RUN|AGENT_STEP|TOKENS_IN|TOKENS_OUT|SANDBOX_MINUTES}.
  *
  * Each tenant needs a stripe customer id (tenant-registry.js
  * setStripeCustomerId — set automatically by POST /signup). A tenant without
@@ -36,7 +36,8 @@ function getClient() {
 const DEFAULT_METER_EVENT_NAME = {
   [EVENT_TYPES.WORKFLOW_RUN]:    'aegis_workflow_run',
   [EVENT_TYPES.AGENT_STEP]:      'aegis_agent_step',
-  [EVENT_TYPES.TOKENS]:          'aegis_tokens',
+  [EVENT_TYPES.TOKENS_IN]:       'aegis_tokens_in',
+  [EVENT_TYPES.TOKENS_OUT]:      'aegis_tokens_out',
   [EVENT_TYPES.SANDBOX_MINUTES]: 'aegis_sandbox_minutes',
 };
 

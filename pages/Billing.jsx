@@ -8,7 +8,8 @@ import DataTable from '../components/DataTable';
 const EVENT_LABELS = {
   workflow_run: 'Workflow runs',
   agent_step: 'Agent steps',
-  tokens: 'Tokens',
+  tokens_in: 'Input tokens',
+  tokens_out: 'Output tokens',
   sandbox_minutes: 'Sandbox minutes',
 };
 

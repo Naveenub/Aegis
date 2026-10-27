@@ -69,8 +69,8 @@ describe('recordUsageEvent', () => {
   });
 
   it('never throws on a negative or non-numeric quantity', async () => {
-    await recordUsageEvent({ tenantId: 'acme', eventType: EVENT_TYPES.TOKENS, quantity: -5 });
-    await recordUsageEvent({ tenantId: 'acme', eventType: EVENT_TYPES.TOKENS, quantity: NaN });
+    await recordUsageEvent({ tenantId: 'acme', eventType: EVENT_TYPES.TOKENS_IN, quantity: -5 });
+    await recordUsageEvent({ tenantId: 'acme', eventType: EVENT_TYPES.TOKENS_IN, quantity: NaN });
     expect(queryMock.mock.calls.some(([sql]) => sql.includes('INSERT'))).toBe(false);
   });
 
@@ -92,14 +92,14 @@ describe('getUnreportedUsage', () => {
       if (sql.includes('CREATE TABLE')) return { rows: [] };
       return {
         rows: [
-          { tenant_id: 'acme', event_type: 'tokens', quantity: '1234', ids: [1, 2, 3] },
+          { tenant_id: 'acme', event_type: 'tokens_in', quantity: '1234', ids: [1, 2, 3] },
         ],
       };
     });
 
     const groups = await getUnreportedUsage();
     expect(groups).toEqual([
-      { tenantId: 'acme', eventType: 'tokens', quantity: 1234, ids: [1, 2, 3] },
+      { tenantId: 'acme', eventType: 'tokens_in', quantity: 1234, ids: [1, 2, 3] },
     ]);
   });
 });

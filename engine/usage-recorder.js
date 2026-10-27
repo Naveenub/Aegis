@@ -39,7 +39,8 @@ const { Pool } = pg;
 export const EVENT_TYPES = Object.freeze({
   WORKFLOW_RUN:    'workflow_run',
   AGENT_STEP:      'agent_step',
-  TOKENS:          'tokens',
+  TOKENS_IN:       'tokens_in',   // input tokens  (Claude list: $3/M)
+  TOKENS_OUT:      'tokens_out',  // output tokens (Claude list: $15/M) — metered separately, 5x the cost
   SANDBOX_MINUTES: 'sandbox_minutes',
 });
 
@@ -94,7 +95,7 @@ function ensureSchema() {
  * @param {object} event
  * @param {string} event.tenantId
  * @param {string} event.eventType   - one of EVENT_TYPES
- * @param {number} event.quantity    - metered amount (e.g. 1 run, 1 step, N tokens, N minutes)
+ * @param {number} event.quantity    - metered amount (e.g. 1 run, 1 step, N input tokens, N output tokens, N minutes)
  * @param {object} [event.metadata]  - arbitrary JSON context (workflowId, agent, model, ...)
  * @returns {Promise<void>}
  */
