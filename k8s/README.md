@@ -60,5 +60,6 @@ kubectl -n aegis get pods -w
 ## Not included
 
 No manifests for `.github/workflows/ci.yml`-triggered image builds, no
-NetworkPolicy, no PodDisruptionBudget, no cert-manager Certificate for the
-Ingress. Add per your cluster's conventions.
+PodDisruptionBudget, no cert-manager Certificate for the Ingress, and no
+NetworkPolicy beyond the one guarding the sandbox runner in `06a-sandbox.yaml`.
+Add per your cluster's conventions.
