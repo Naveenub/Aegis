@@ -319,7 +319,7 @@ The system suite (`tests/integration/system/`) exercises the Docker sandbox, git
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Naveenub/aegis)
 
-`render.yaml` provisions Postgres, a Redis Stack private service, a single combined web service (server + worker + dlq-worker sharing one disk), and an hourly billing-flush cron. You'll be prompted for `ANTHROPIC_API_KEY` during setup. This topology trades away Docker-sandboxed patch execution (it runs with `AEGIS_SANDBOX_MODE=local`) and horizontal worker scaling in exchange for a deploy with no self-hosting step. Fork the repo first if you're deploying your own copy.
+`render.yaml` provisions Postgres, a Redis Stack private service, a single combined web service (server + worker + dlq-worker sharing one disk), and an hourly billing-flush cron. You'll be prompted for `ANTHROPIC_API_KEY` during setup. Render offers no nested Docker, so tenant lint/test code runs on a remote Docker host you provision (`DOCKER_HOST` over mutual TLS, see the header of `render.yaml`) — a disposable VM or a gVisor/Firecracker/Kata host. If `DOCKER_HOST` is unset or unreachable, execution is blocked rather than run on the web service. The single-service topology also trades away horizontal worker scaling. Fork the repo first if you're deploying your own copy.
 
 ### Self-hosted with Docker Compose (production)
 

@@ -67,9 +67,13 @@ import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const DISABLE_EXPLICITLY = process.env.AEGIS_SANDBOX_DISABLE === 'true';
-const LOCAL_MODE         = process.env.AEGIS_SANDBOX_MODE === 'local';
-const IN_CI              = process.env.CI === 'true';
+// DOCKER_HOST set = an isolated remote runner is configured. If it is down we
+// block; the local/CI opt-ins below are void so tenant code can never fall back
+// to running on this host.
+const REMOTE_RUNNER      = Boolean(process.env.DOCKER_HOST);
+const DISABLE_EXPLICITLY = !REMOTE_RUNNER && process.env.AEGIS_SANDBOX_DISABLE === 'true';
+const LOCAL_MODE         = !REMOTE_RUNNER && process.env.AEGIS_SANDBOX_MODE === 'local';
+const IN_CI              = !REMOTE_RUNNER && process.env.CI === 'true';
 
 // Any of these signals that the operator has consciously accepted unsandboxed
 // execution — or that we are in a standard CI environment where Docker is
@@ -171,7 +175,14 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId) {
     ? (TRANSPORT === 'stream' ? runDockerStream(cmd, cwd) : runDocker(cmd, cwd, projectRoot))
     : UNSANDBOXED_OK
       ? runDirect(cmd, cwd)
-      : {
+      : REMOTE_RUNNER
+        ? {
+            success: false,
+            output:
+              '[sandbox] Execution blocked: DOCKER_HOST is set but the remote runner is ' +
+              'unreachable. Not falling back to host execution; check the runner and its TLS certs.',
+          }
+        : {
           success: false,
           output:
             '[sandbox] Execution blocked: Docker is not available and no unsandboxed ' +
