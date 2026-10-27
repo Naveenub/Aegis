@@ -1193,6 +1193,16 @@ app.get('/events', requireApiKey, (req, res) => {
   });
 });
 
+// ─── Inbound webhooks (Stripe → log "partner paid") ──────────────────────────
+    //
+    // POST /webhooks/stripe — logs a flag line on checkout/invoice payment
+    // events. No tenant provisioning, no metering — see stripe-webhook.js.
+    //
+    // Mounted BEFORE webhookRouter on purpose: webhookRouter's body middleware
+    // parses every /webhooks/* body into an object, which would make Stripe's
+    // signature check (it needs the raw bytes) fail with 401.
+    app.use('/webhooks', stripeWebhookRouter);
+
 // ─── Inbound webhooks (GitHub / GitLab → trigger workflows) ──────────────────
     //
     // POST /webhooks/github  — receives GitHub push + pull_request events
@@ -1201,12 +1211,6 @@ app.get('/events', requireApiKey, (req, res) => {
     // No API-key auth: webhook requests are authenticated via HMAC signature
     // (GitHub) or a shared secret token (GitLab) inside webhookRouter itself.
     app.use('/webhooks', webhookRouter);
-
-// ─── Inbound webhooks (Stripe → log "partner paid") ──────────────────────────
-    //
-    // POST /webhooks/stripe — logs a flag line on checkout/invoice payment
-    // events. No tenant provisioning, no metering — see stripe-webhook.js.
-    app.use('/webhooks', stripeWebhookRouter);
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 
