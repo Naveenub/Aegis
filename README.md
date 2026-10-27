@@ -61,18 +61,19 @@ Agent inputs include AST-level repo context (symbol tables, import/call graphs) 
 |---|---|
 | `server.js` | Express API server; wires routes, middleware, webhooks, anomaly detector |
 | `workers/` | `agent-worker.js` (step execution) and `dlq-worker.js` (retry/escalation) |
-| `engine/` | Orchestrator, agents, sandbox, git, queue, locks, memory, metrics, audit log, tenants, quotas |
+| `engine/` | Orchestrator, agents, sandbox, git, queue, locks, memory, metrics, audit log, tenants, quotas. Smaller modules: `lock.js` (Redlock, tenant-scoped), `code-writer.js` (patch application), `lint-runner.js` / `test-runner.js` (run via the sandbox), `job-store.js` (Redis-backed job records), `queue.js` (public queue surface over the adapter) |
 | `engine/adapters/` | Queue backends: `bullmq-adapter`, `sqs-adapter`, `redis-streams-adapter`, plus shared `priority-tiers` |
 | `engine/billing/` | Tiers, allowance checks, signup, Stripe customer/reporter/webhook, pending-signup cleanup |
 | `middleware/` | `auth.js` (API keys, tenant status gate) and `rate-limit.js` (Redis-backed) |
 | `cli/claude.js` | Submit a task and poll to completion |
 | `scripts/` | Billing flush/cleanup, Stripe setup, partner onboarding, DLQ inspection, prompt eval, CI pipeline |
-| `.claude/agents/` | Agent persona prompts (`planner`, `feature-builder`, `debugger`, …) |
+| `.claude/` | `agents/` persona prompts (`planner`, `feature-builder`, `debugger`, …), `settings.json`, and `context/` runtime snapshots (`jobs.json`, `memory.json`, `decisions.log`) |
 | `dashboard/` | React 19 + Vite operator dashboard (separate app) |
+| `App.jsx`, `api/`, `components/`, `pages/` | Root-level dashboard source copies (including a `Billing` page); the maintained app is under `dashboard/src/` |
 | `docs-site/` | Docusaurus documentation site |
 | `monitoring/` | Prometheus alert rules and a dashboard JSON |
 | `k8s/` | Kustomize manifests |
-| `landing/` | Static marketing page |
+| `landing/` | Static pages served by `server.js`: `index.html` (`/`), `signup.html` (`/get-started`), `terms.html` (`/terms`), `privacy.html` (`/privacy`) |
 | `tests/` | Vitest unit tests; `tests/integration/system/` for real-infrastructure tests |
 
 ---
@@ -199,6 +200,7 @@ Auth: `Authorization: Bearer <key>` or `x-api-key: <key>`. Keys resolve in this 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness probe, no auth |
+| GET | `/`, `/get-started`, `/terms`, `/privacy` | Landing, signup, terms, and privacy pages, no auth |
 | GET | `/metrics` | Prometheus text-format export |
 | GET | `/metrics/json` | OTEL-compatible JSON export |
 | GET | `/api/metrics` | Structured metrics (used by dashboards) |
@@ -250,7 +252,7 @@ See [`docs-site/docs/billing.md`](docs-site/docs/billing.md) for details.
 ## Dashboards
 
 - **Built-in** — `GET /dashboard` serves a self-contained HTML page (`engine/dashboard.html`) fed by the `/events` SSE stream. No build step.
-- **React dashboard** (`dashboard/`) — a separate React 19 + Vite app with pages for Overview, Workflows (and workflow detail), Review Queue, DLQ, Traces, Anomalies, and Tenants. Sign in with an API key. It is not served by `server.js`:
+- **React dashboard** (`dashboard/`) — a separate React 19 + Vite app with pages for Login, Overview, Workflows (and workflow detail), Review Queue, DLQ, Traces, Anomalies, and Tenants. Sign in with an API key. It is not served by `server.js`:
 
   ```bash
   cd dashboard
