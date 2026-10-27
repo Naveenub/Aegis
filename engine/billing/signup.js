@@ -20,13 +20,24 @@ import { getTierConfig, DEFAULT_TIER, TIERS } from './tiers.js';
 import { provisionSubscription, cancelSubscription, getBasePrice } from './stripe-customer.js';
 
 /**
- * Paid signup runs tenant code. With AEGIS_SANDBOX_MODE=local (or the legacy AEGIS_SANDBOX_DISABLE=true) that code runs
- * unsandboxed on shared infrastructure, so self-serve signup is refused unless
- * the operator explicitly opts in (demo/trial deploys only).
+ * Paid signup runs tenant code, so self-serve signup is only enabled when an
+ * isolated runner is actually configured: DOCKER_HOST pointing at a remote
+ * daemon that is authenticated (mutual TLS via DOCKER_TLS_VERIFY, or ssh://).
+ * Anything else — no DOCKER_HOST (local mode, CI=true, host Docker), or a
+ * plaintext tcp:// daemon such as the docker-compose dind sidecar — is refused
+ * unless the operator explicitly opts in (demo/trial deploys only).
  */
-export function unsandboxedSignupBlocked() {
-  return (process.env.AEGIS_SANDBOX_MODE === 'local' || process.env.AEGIS_SANDBOX_DISABLE === 'true')
-    && process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP !== 'true';
+export function isolatedRunnerConfigured(env = process.env) {
+  const host = (env.DOCKER_HOST ?? '').trim();
+  if (!host) return false;
+  if (host.startsWith('ssh://')) return true;
+  if (!host.startsWith('tcp://')) return false; // unix:// etc. = same-machine daemon
+  const tls = (env.DOCKER_TLS_VERIFY ?? '').trim();
+  return tls !== '' && tls !== '0' && tls.toLowerCase() !== 'false';
+}
+
+export function unsandboxedSignupBlocked(env = process.env) {
+  return !isolatedRunnerConfigured(env) && env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP !== 'true';
 }
 
 export async function signupTenant(input) {

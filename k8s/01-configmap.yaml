@@ -40,7 +40,11 @@ data:
   RATE_LIMIT_BURST_MAX: "20"
   # sandbox.js talks to the isolated aegis-sandbox Service (06a-sandbox.yaml);
   # DOCKER_HOST being set selects the stream transport automatically.
-  DOCKER_HOST: "tcp://aegis-sandbox:2375"
+  # mTLS only; client certs come from the aegis-sandbox-client-tls Secret
+  # mounted at /etc/docker-client in the worker (06-worker.yaml).
+  DOCKER_HOST: "tcp://aegis-sandbox:2376"
+  DOCKER_TLS_VERIFY: "1"
+  DOCKER_CERT_PATH: "/etc/docker-client"
   # Build from Dockerfile.sandbox — plain node:22-alpine has no eslint/vitest.
   AEGIS_SANDBOX_IMAGE: "your-registry/aegis-sandbox:latest"
   AEGIS_SANDBOX_MEMORY: "512m"

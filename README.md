@@ -333,6 +333,8 @@ This starts `redis` (Redis Stack), `postgres`, `server` (port 3000), `worker`, `
 - **`worker` talks to a rootless Docker-in-Docker sidecar (`dind`), not the host socket.** `sandbox.js` shells out to `docker run` for every lint/test execution; pointing `DOCKER_HOST` at the isolated rootless daemon instead of mounting `/var/run/docker.sock` caps a sandbox compromise at that sidecar's unprivileged UID rather than the host. For a genuinely multi-tenant deployment, the next step up is a dedicated remote Docker host.
 - **`server` and `worker` share a `repo` volume** so `AEGIS_REPO_ROOT`/`AEGIS_WORKTREES` resolve to the same git checkout across both processes.
 
+> **Not for paid multi-tenant use.** This compose stack is for local dev and single-tenant self-hosting: the `dind` sidecar shares a machine and a plaintext internal network with the app, and `AEGIS_SANDBOX_MODE=local` runs generated code on the host. Self-serve signup is refused here by design. For paid multi-tenant use, run tenant code on an isolated runner — a remote Docker host over mutual TLS on gVisor/Firecracker/Kata (Render, VM) or the k8s `aegis-sandbox` microVM runtime class — and set `DOCKER_HOST` + `DOCKER_TLS_VERIFY=1`. Signup only enables when such a runner is configured (or `AEGIS_ALLOW_UNSANDBOXED_SIGNUP=true` for demos).
+
 ### Kubernetes
 
 Manifests under `k8s/` cover the namespace, configmap, Redis Stack, repo PVC, server/worker/dlq-worker deployments, HPA, ingress, and two CronJobs (billing flush and pending-signup cleanup). Apply with `kubectl apply -k k8s/`. Read `k8s/README.md` first — it covers the `ReadWriteMany` storage requirement, the privileged `dind` sidecar, and the single-replica server constraint.

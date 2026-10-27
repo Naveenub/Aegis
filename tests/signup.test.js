@@ -23,7 +23,18 @@ vi.mock('../engine/billing/stripe-customer.js', () => stripe);
 
 let signupTenant;
 
+const RUNNER_KEYS = ['DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'AEGIS_SANDBOX_MODE', 'AEGIS_SANDBOX_DISABLE', 'CI', 'AEGIS_ALLOW_UNSANDBOXED_SIGNUP'];
+const savedRunnerEnv = Object.fromEntries(RUNNER_KEYS.map((k) => [k, process.env[k]]));
+function restoreRunnerEnv() {
+  for (const k of RUNNER_KEYS) { if (savedRunnerEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedRunnerEnv[k]; }
+}
+afterEach(restoreRunnerEnv);
+
 beforeEach(async () => {
+  // Signup requires an authenticated remote runner; give the general tests one.
+  for (const k of RUNNER_KEYS) delete process.env[k];
+  process.env.DOCKER_HOST = 'tcp://runner.example.com:2376';
+  process.env.DOCKER_TLS_VERIFY = '1';
   vi.resetModules();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   for (const f of [...Object.values(reg), setQuota, createKey, recordAuditEvent, ...Object.values(stripe)]) f.mockReset();
@@ -111,36 +122,46 @@ describe('signupTenant provisioning', () => {
   });
 });
 
-describe('unsandboxed guard', () => {
-  const saved = { m: process.env.AEGIS_SANDBOX_MODE, a: process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP, k: process.env.STRIPE_PUBLISHABLE_KEY };
-  afterEach(() => {
-    for (const [k, v] of [['AEGIS_SANDBOX_MODE', saved.m], ['AEGIS_ALLOW_UNSANDBOXED_SIGNUP', saved.a], ['STRIPE_PUBLISHABLE_KEY', saved.k]]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-  });
+describe('isolated runner guard', () => {
+  const clear = () => { for (const k of RUNNER_KEYS) delete process.env[k]; };
+  afterEach(() => { restoreRunnerEnv(); delete process.env.STRIPE_PUBLISHABLE_KEY; });
 
-  it('503s config and signup when sandbox mode is local', async () => {
+  it('503s config and signup when no runner is configured (local mode)', async () => {
+    clear();
     process.env.AEGIS_SANDBOX_MODE = 'local';
-    delete process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP;
     process.env.STRIPE_PUBLISHABLE_KEY = 'pk_test_123';
     const { getSignupConfig, signupTenant } = await import('../engine/billing/signup.js');
     expect((await getSignupConfig()).status).toBe(503);
     expect((await signupTenant({ email: 'a@b.co', tenantId: 'acme' })).status).toBe(503);
+    expect(stripe.provisionSubscription).not.toHaveBeenCalled();
   });
 
-  it('also blocks signup under the legacy AEGIS_SANDBOX_DISABLE flag', async () => {
-    delete process.env.AEGIS_SANDBOX_MODE;
-    process.env.AEGIS_SANDBOX_DISABLE = 'true';
-    delete process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP;
-    try {
-      const { unsandboxedSignupBlocked } = await import('../engine/billing/signup.js');
-      expect(unsandboxedSignupBlocked()).toBe(true);
-    } finally {
-      delete process.env.AEGIS_SANDBOX_DISABLE;
-    }
+  it.each([
+    ['legacy AEGIS_SANDBOX_DISABLE', { AEGIS_SANDBOX_DISABLE: 'true' }],
+    ['CI=true with no DOCKER_HOST', { CI: 'true' }],
+    ['nothing configured', {}],
+    ['same-machine unix socket', { DOCKER_HOST: 'unix:///var/run/docker.sock', DOCKER_TLS_VERIFY: '1' }],
+    ['plaintext tcp daemon (compose dind)', { DOCKER_HOST: 'tcp://dind:2375' }],
+    ['tcp daemon with TLS verify off', { DOCKER_HOST: 'tcp://runner:2376', DOCKER_TLS_VERIFY: '0' }],
+  ])('blocks signup: %s', async (_n, env) => {
+    clear();
+    Object.assign(process.env, env);
+    const { unsandboxedSignupBlocked } = await import('../engine/billing/signup.js');
+    expect(unsandboxedSignupBlocked()).toBe(true);
   });
 
-  it('allows opt-in for demo deploys', async () => {
+  it.each([
+    ['mutual-TLS tcp runner', { DOCKER_HOST: 'tcp://runner:2376', DOCKER_TLS_VERIFY: '1' }],
+    ['ssh runner', { DOCKER_HOST: 'ssh://deploy@runner' }],
+  ])('allows signup: %s', async (_n, env) => {
+    clear();
+    Object.assign(process.env, env);
+    const { unsandboxedSignupBlocked } = await import('../engine/billing/signup.js');
+    expect(unsandboxedSignupBlocked()).toBe(false);
+  });
+
+  it('allows explicit opt-in for demo deploys', async () => {
+    clear();
     process.env.AEGIS_SANDBOX_MODE = 'local';
     process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP = 'true';
     const { unsandboxedSignupBlocked } = await import('../engine/billing/signup.js');

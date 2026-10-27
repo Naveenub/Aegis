@@ -29,6 +29,9 @@ spec:
           volumeMounts:
             - name: repo
               mountPath: /repo
+            - name: sandbox-client-tls
+              mountPath: /etc/docker-client
+              readOnly: true
           resources:
             requests:
               cpu: 200m
@@ -36,6 +39,10 @@ spec:
             limits:
               memory: 1Gi
       volumes:
+        - name: sandbox-client-tls
+          secret:
+            secretName: aegis-sandbox-client-tls # ca.pem cert.pem key.pem
+            defaultMode: 0400
         - name: repo
           persistentVolumeClaim:
             claimName: aegis-repo

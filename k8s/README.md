@@ -46,6 +46,22 @@
    enforces NetworkPolicy. Build `Dockerfile.sandbox`, push it, and set
    `AEGIS_SANDBOX_IMAGE` in `01-configmap.yaml`.
 
+   The Docker API is **mutual TLS only** (port 2376), so isolation does not
+   depend on NetworkPolicy alone. Generate certs and create both Secrets
+   before `kubectl apply -k k8s/`:
+
+   ```sh
+   EXTRA_SANS="aegis-sandbox.aegis.svc,aegis-sandbox.aegis.svc.cluster.local" \
+     scripts/provision-runner.sh certs aegis-sandbox ./runner-certs
+   cd runner-certs
+   kubectl -n aegis create secret generic aegis-sandbox-server-tls \
+     --from-file=ca.pem --from-file=server-cert.pem --from-file=server-key.pem
+   kubectl -n aegis create secret generic aegis-sandbox-client-tls \
+     --from-file=ca.pem --from-file=cert.pem --from-file=key.pem
+   ```
+
+   Keep `ca-key.pem` offline; certs expire in 365 days.
+
 5. **Secrets.** Copy `02-secret.example.yaml` → `02-secret.yaml`, fill in
    real values, uncomment it in `kustomization.yaml`. Never commit
    `02-secret.yaml`.

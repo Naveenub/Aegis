@@ -2,6 +2,7 @@
 # Provision the isolated Docker runner that sandbox.js talks to via DOCKER_HOST.
 #
 #   scripts/provision-runner.sh certs  <runner-hostname> [outdir]   # anywhere; makes CA + server + client certs
+#       EXTRA_SANS="aegis-sandbox.aegis.svc,aegis-sandbox.aegis.svc.cluster.local" adds more DNS names (k8s)
 #   sudo scripts/provision-runner.sh daemon [certdir]               # ON THE RUNNER; exposes dockerd on :2376 (mTLS only)
 #
 # The runner must be disposable and hold no secrets. Firewall 2376 to your
@@ -21,7 +22,9 @@ case "$cmd" in
 
     openssl genrsa -out server-key.pem 4096
     openssl req -new -key server-key.pem -subj "/CN=$host" -out server.csr
-    printf 'subjectAltName = DNS:%s\nextendedKeyUsage = serverAuth\n' "$host" > server-ext.cnf
+    sans="DNS:$host"
+    for n in ${EXTRA_SANS//,/ }; do sans="$sans,DNS:$n"; done
+    printf 'subjectAltName = %s\nextendedKeyUsage = serverAuth\n' "$sans" > server-ext.cnf
     openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem \
       -CAcreateserial -extfile server-ext.cnf -out server-cert.pem
 

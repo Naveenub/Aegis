@@ -2,6 +2,9 @@
 # repo volume and NO service-account token: the worker streams each worktree
 # over the Docker API (sandbox.js "stream" transport) and only stdout comes back.
 #
+# The Docker API is mutual-TLS only (port 2376). Create the two Secrets before
+# applying: see k8s/README.md item 4 (scripts/provision-runner.sh certs).
+#
 # dockerd needs privileged: true, which is only safe inside a microVM guest.
 # runtimeClassName below is REQUIRED — set it to a Kata/Firecracker-style
 # RuntimeClass on your cluster. If it does not exist the pod stays Pending and
@@ -26,18 +29,30 @@ spec:
       containers:
         - name: dockerd
           image: docker:27-dind
-          args: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+          # Mutual TLS: the Docker API is root on this daemon, so it never listens
+          # in plaintext. Only a client holding a cert signed by the CA can connect,
+          # even from inside the cluster or if NetworkPolicy is not enforced.
+          args:
+            - "--host=tcp://0.0.0.0:2376"
+            - "--host=unix:///var/run/docker.sock"
+            - "--tlsverify"
+            - "--tlscacert=/certs/ca.pem"
+            - "--tlscert=/certs/server-cert.pem"
+            - "--tlskey=/certs/server-key.pem"
           env:
             - name: DOCKER_TLS_CERTDIR
-              value: "" # reachable only from aegis-worker (NetworkPolicy below)
+              value: "" # disable the image's auto-generated certs; we mount our own
           securityContext:
             privileged: true # confined to the microVM guest by runtimeClassName
           volumeMounts:
             - name: docker-data
               mountPath: /var/lib/docker
+            - name: server-tls
+              mountPath: /certs
+              readOnly: true
           readinessProbe:
             exec:
-              command: ["docker", "info"]
+              command: ["docker", "info"] # local unix socket, no TLS needed
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
@@ -49,6 +64,10 @@ spec:
       volumes:
         - name: docker-data
           emptyDir: {} # sandbox image re-pulls on pod restart, by design
+        - name: server-tls
+          secret:
+            secretName: aegis-sandbox-server-tls # ca.pem server-cert.pem server-key.pem
+            defaultMode: 0400
 ---
 apiVersion: v1
 kind: Service
@@ -59,8 +78,8 @@ spec:
   selector:
     app: aegis-sandbox
   ports:
-    - port: 2375
-      targetPort: 2375
+    - port: 2376
+      targetPort: 2376
 ---
 # The Docker API is root on this daemon: only the worker may reach it.
 apiVersion: networking.k8s.io/v1
@@ -79,4 +98,4 @@ spec:
             matchLabels:
               app: aegis-worker
       ports:
-        - port: 2375
+        - port: 2376

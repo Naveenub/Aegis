@@ -64,6 +64,10 @@ services:
   # host-root-equivalent access), the worker talks to this isolated rootless
   # daemon instead — a compromised sandbox run is capped at this container's
   # unprivileged UID, not the host.
+  #
+  # DEV / SINGLE-TENANT ONLY: plaintext, same-machine daemon. Self-serve signup
+  # stays disabled on this stack (needs an mTLS/ssh DOCKER_HOST); paid
+  # multi-tenant use needs a remote runner or the k8s microVM sandbox.
   dind:
     image: docker:27-dind-rootless
     restart: unless-stopped
