@@ -1,8 +1,11 @@
 /**
  * engine/repo-store.js — Per-tenant repository binding (metadata only, no secrets)
  *
+ * Secrets (GitLab/Bitbucket OAuth tokens) are NOT stored here — see cred-store.js.
+ *
  * Redis layout:
- *   aegis:tenant:repo:{tenantId}   Hash  provider, installationId, owner, repo,
+ *   aegis:tenant:repo:{tenantId}   Hash  provider (github|gitlab|bitbucket), installationId (github),
+ *                                        accountId + accountLogin (gitlab/bitbucket), owner, repo,
  *                                        defaultBranch, targetBranch, status,
  *                                        cloneStatus, cloneError, connectedAt
  *   aegis:gh-installation:{id}     String tenantId (one installation → one tenant)
@@ -16,6 +19,7 @@
 import IORedis from 'ioredis';
 import { randomBytes } from 'crypto';
 import { assertTenantId } from './tenant.js';
+import { deleteCreds } from './cred-store.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect:          true,
@@ -66,7 +70,25 @@ export async function bindInstallation(tenantId, installationId) {
   await redis.hset(REPO_KEY(tenantId), {
     provider: 'github', installationId: id, status: 'pending', cloneStatus: 'none',
   });
-  await redis.hdel(REPO_KEY(tenantId), 'owner', 'repo', 'defaultBranch', 'cloneError');
+  await redis.hdel(REPO_KEY(tenantId), 'owner', 'repo', 'defaultBranch', 'cloneError', 'accountId', 'accountLogin');
+  await deleteCreds(tenantId); // switching from GitLab/Bitbucket: drop the stored refresh token
+}
+
+/**
+ * Bind an OAuth account (GitLab / Bitbucket) to a tenant. Unlike a GitHub App
+ * installation there is nothing to claim: the credential belongs to whoever
+ * completed the consent screen for this tenant's signed state. Any previous
+ * repo selection is reset; the caller stores the tokens via cred-store.
+ */
+export async function bindProviderAccount(tenantId, provider, { id, login }) {
+  assertTenantId(tenantId);
+  const prev = await redis.hget(REPO_KEY(tenantId), 'installationId');
+  if (prev) await redis.del(INSTALL_KEY(prev));
+  await redis.hset(REPO_KEY(tenantId), {
+    provider, accountId: String(id), accountLogin: String(login ?? ''),
+    status: 'pending', cloneStatus: 'none',
+  });
+  await redis.hdel(REPO_KEY(tenantId), 'installationId', 'owner', 'repo', 'defaultBranch', 'targetBranch', 'cloneError');
 }
 
 export async function selectRepo(tenantId, { owner, repo, defaultBranch, targetBranch }) {
@@ -93,6 +115,7 @@ export async function clearRepo(tenantId) {
   const inst = await redis.hget(REPO_KEY(tenantId), 'installationId');
   if (inst) await redis.del(INSTALL_KEY(inst));
   await redis.del(REPO_KEY(tenantId));
+  await deleteCreds(tenantId);
 }
 
 export async function tenantForInstallation(installationId) {

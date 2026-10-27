@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **GitLab and Bitbucket per-tenant auth** — in multi-repo mode (`AEGIS_REPOS_BASE`) a tenant can now connect a GitLab or Bitbucket Cloud repo, not just GitHub. `POST /tenants/:id/repo/connect` takes `{ "provider": "github" | "gitlab" | "bitbucket" }` (default `github`) and the browser returns to the new `/gitlab/callback` or `/bitbucket/callback`. Tokens come from OAuth 2.0, are stored AES-256-GCM encrypted (`AEGIS_TOKEN_ENCRYPTION_KEY`) and refreshed on demand under a lock (GitLab rotates refresh tokens). A revoked grant is detected at the next refresh and marks the repo `revoked`. Clone, push and PR/MR creation use the tenant's own credential; MR/PR creation now returns the already-open MR/PR instead of failing when the branch was pushed before. GitLab subgroups (`group/sub/project`) are supported. New env: `AEGIS_TOKEN_ENCRYPTION_KEY`, `AEGIS_PUBLIC_URL`, `AEGIS_GITLAB_OAUTH_CLIENT_ID/_SECRET`, `AEGIS_GITLAB_REDIRECT_URI`, `AEGIS_GITLAB_WEB_URL`, `AEGIS_BITBUCKET_OAUTH_CLIENT_ID/_SECRET`, `AEGIS_BITBUCKET_REDIRECT_URI`, `AEGIS_BITBUCKET_WEB_URL`.
 - **Self-serve signup page** — `/get-started` (`landing/signup.html`) calls `POST /signup`, shows the API key once, and confirms the first payment with Stripe.js (Payment Element, including redirect-return handling). New `GET /signup/config` serves the publishable key from `STRIPE_PUBLISHABLE_KEY`. The server now serves the landing page at `/`, and the Starter/Pro pricing buttons link to the signup page instead of a mailto.
 
 ## v2.0.0

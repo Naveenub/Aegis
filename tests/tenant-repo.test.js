@@ -7,6 +7,16 @@ vi.mock('../engine/repo-store.js', () => ({
   patchRepo: vi.fn(async () => {}),
   withRepoLock: vi.fn(async (_t, fn) => fn()),
 }));
+vi.mock('../engine/providers/index.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    getProvider: (name = 'github') => (name === 'github' ? actual.getProvider('github') : {
+      ...actual.getProvider(name),
+      getToken: async () => 'oauth_secret',
+    }),
+  };
+});
 vi.mock('../engine/github-app.js', () => ({
   getInstallationToken: vi.fn(async () => 'ghs_secret'),
   webBase: () => 'https://github.com',
@@ -51,6 +61,30 @@ describe('tenant-repo', () => {
     const { env } = await mod.getRepoAccess('acme');
     expect(env.GIT_CONFIG_VALUE_0).toContain(Buffer.from('x-access-token:ghs_secret').toString('base64'));
     expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+  });
+
+  it('gitlab: authenticates as oauth2 against the GitLab host, allows subgroups', async () => {
+    process.env.AEGIS_REPOS_BASE = '/data/repos';
+    store.cfg = { provider: 'gitlab', status: 'connected', owner: 'grp/sub', repo: 'app', defaultBranch: 'main' };
+    const { env, fullName, provider } = await mod.getRepoAccess('acme');
+    expect(fullName).toBe('grp/sub/app');
+    expect(provider.name).toBe('gitlab');
+    expect(env.GIT_CONFIG_KEY_0).toBe('http.https://gitlab.com/.extraheader');
+    expect(env.GIT_CONFIG_VALUE_0).toContain(Buffer.from('oauth2:oauth_secret').toString('base64'));
+  });
+
+  it('bitbucket: authenticates as x-token-auth against bitbucket.org', async () => {
+    process.env.AEGIS_REPOS_BASE = '/data/repos';
+    store.cfg = { provider: 'bitbucket', status: 'connected', owner: 'ws', repo: 'app', defaultBranch: 'main' };
+    const { env } = await mod.getRepoAccess('acme');
+    expect(env.GIT_CONFIG_KEY_0).toBe('http.https://bitbucket.org/.extraheader');
+    expect(env.GIT_CONFIG_VALUE_0).toContain(Buffer.from('x-token-auth:oauth_secret').toString('base64'));
+  });
+
+  it('subgroup owners are gitlab-only', () => {
+    expect(() => mod.assertRepoName('grp/sub', 'app', 'gitlab')).not.toThrow();
+    expect(() => mod.assertRepoName('grp/sub', 'app', 'github')).toThrow();
+    expect(() => mod.assertRepoName('grp/sub', 'app', 'bitbucket')).toThrow();
   });
 
   it('rejects hostile repo identifiers', () => {

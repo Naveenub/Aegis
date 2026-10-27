@@ -42,6 +42,10 @@
  *   AEGIS_BITBUCKET_API_URL   Override for Bitbucket Server/Data Center
  *                              (default: "https://api.bitbucket.org/2.0")
  *
+ * Per-tenant mode (AEGIS_REPOS_BASE): the provider, repo and token come from the
+ * tenant's own connection (GitHub App, GitLab OAuth or Bitbucket OAuth — see
+ * providers/index.js); the AEGIS_PR_* variables above are ignored.
+ *
  * Exports
  * ───────
  *   pushBranch(branch, options?)  → Promise<void>
@@ -174,13 +178,17 @@ async function _openGitHubPR({ title, body, head, base, repo, token }) {
   return { url: data.html_url, number: data.number };
 }
 
-async function _openGitLabMR({ title, body, head, base, repo, token }) {
-  const url = `${gitlabApiBase()}/projects/${encodeURIComponent(repo)}/merge_requests`;
+// `bearer`: per-tenant OAuth tokens use `Authorization: Bearer`; the legacy
+// single-repo AEGIS_PR_TOKEN is a personal/project access token (PRIVATE-TOKEN).
+async function _openGitLabMR({ title, body, head, base, repo, token, bearer = false }) {
+  const project = `${gitlabApiBase()}/projects/${encodeURIComponent(repo)}`;
+  const url = `${project}/merge_requests`;
+  const auth = bearer ? { Authorization: `Bearer ${token}` } : { 'PRIVATE-TOKEN': token };
 
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      'PRIVATE-TOKEN': token,
+      ...auth,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -191,6 +199,14 @@ async function _openGitLabMR({ title, body, head, base, repo, token }) {
       remove_source_branch: false,
     }),
   });
+
+  if (res.status === 409) {
+    // Same source branch is pushed on every workflow → MR may already be open.
+    const q = new URLSearchParams({ state: 'opened', source_branch: head, target_branch: base });
+    const existing = await fetch(`${url}?${q}`, { headers: auth })
+      .then(r => (r.ok ? r.json() : [])).catch(() => []);
+    if (existing[0]) return { url: existing[0].web_url, number: existing[0].iid };
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -217,6 +233,18 @@ async function _openBitbucketPR({ title, body, head, base, repo, token }) {
       destination: { branch: { name: base } },
     }),
   });
+
+  if (res.status === 400) {
+    // Bitbucket answers a duplicate with 400; look for the already-open PR.
+    const detail = await res.clone().text().catch(() => '');
+    if (/already.*(open )?pull request|pull request.*already/i.test(detail)) {
+      const q = new URLSearchParams({ state: 'OPEN', q: `source.branch.name="${head}"`, pagelen: '1' });
+      const existing = await fetch(`${url}?${q}`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => (r.ok ? r.json() : { values: [] })).catch(() => ({ values: [] }));
+      const pr = existing.values?.[0];
+      if (pr) return { url: pr.links?.html?.href, number: pr.id };
+    }
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
@@ -278,10 +306,10 @@ export async function pushAndOpenPR(workflowId, tenantId, mergeResult) {
   return { pushed: true, pr };
 }
 
-// ─── Per-tenant path (GitHub App installation token) ─────────────────────────
+// ─── Per-tenant path (GitHub App token, or GitLab / Bitbucket OAuth token) ───
 
 async function _pushAndOpenPRForTenant(workflowId, tenantId, mergeResult) {
-  const { cfg: repoCfg, token, fullName } = await getRepoAccess(tenantId);
+  const { cfg: repoCfg, token, fullName, provider } = await getRepoAccess(tenantId);
 
   const branchToPush =
     cfg('AEGIS_GIT_PUSH_BRANCH', '') === '__workflow__'
@@ -294,14 +322,16 @@ async function _pushAndOpenPRForTenant(workflowId, tenantId, mergeResult) {
     ? '\n\n> ℹ️ Conflicts were resolved automatically via `git rebase`.'
     : '';
 
-  const pr = await _openGitHubPR({
+  const params = {
     title: `Aegis: workflow ${workflowId}`,
     body:  `Automated changes produced by Aegis workflow \`${workflowId}\`.${resolvedNote}`,
     head:  branchToPush,
     base:  repoCfg.targetBranch || repoCfg.defaultBranch,
     repo:  fullName,
     token,
-  });
+  };
+  const open = { gitlab: p => _openGitLabMR({ ...p, bearer: true }), bitbucket: _openBitbucketPR }[provider.name] ?? _openGitHubPR;
+  const pr = await open(params);
 
   return { pushed: true, pr };
 }

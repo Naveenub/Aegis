@@ -9,7 +9,10 @@
  * Without AEGIS_REPOS_BASE the legacy single-repo behaviour (AEGIS_REPO_ROOT)
  * is unchanged.
  *
- * Credentials: installation token injected per git process via GIT_CONFIG_*
+ * Providers: github (App installation token), gitlab and bitbucket (OAuth token,
+ * refreshed on demand) — see providers/index.js.
+ *
+ * Credentials: provider token injected per git process via GIT_CONFIG_*
  * env vars (not argv, not .git/config), so nothing is written into the clone
  * or visible to the sandbox mount.
  */
@@ -21,7 +24,7 @@ import { randomBytes } from 'crypto';
 
 import { assertTenantId } from './tenant.js';
 import { getRepoConfig, patchRepo, withRepoLock } from './repo-store.js';
-import { getInstallationToken, webBase } from './github-app.js';
+import { getProvider } from './providers/index.js';
 
 const LEGACY_ROOT = () => path.resolve(process.env.AEGIS_REPO_ROOT ?? process.cwd());
 const REPOS_BASE  = () => (process.env.AEGIS_REPOS_BASE ? path.resolve(process.env.AEGIS_REPOS_BASE) : null);
@@ -48,7 +51,8 @@ export function scanRootFor(tenantId) {
 }
 
 const NAME_RE = /^[A-Za-z0-9_.-]{1,100}$/;
-export function assertRepoName(owner, repo) {
+export function assertRepoName(owner, repo, provider = 'github') {
+  if (provider !== 'github') return getProvider(provider).assertRepoName(owner, repo); // gitlab: owner may be a subgroup path
   for (const v of [owner, repo]) {
     if (!NAME_RE.test(v) || v === '.' || v === '..') throw new Error(`Invalid repo identifier "${v}".`);
   }
@@ -56,13 +60,13 @@ export function assertRepoName(owner, repo) {
 
 // ─── Auth env ─────────────────────────────────────────────────────────────────
 
-function authEnv(token) {
-  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+function authEnv(token, provider) {
+  const basic = Buffer.from(`${provider.gitAuthUser}:${token}`).toString('base64');
   return {
     ...process.env,
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_COUNT: '2',
-    GIT_CONFIG_KEY_0: `http.${webBase()}/.extraheader`,
+    GIT_CONFIG_KEY_0: `http.${provider.webBase()}/.extraheader`,
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
     GIT_CONFIG_KEY_1: 'credential.helper',
     GIT_CONFIG_VALUE_1: '',
@@ -87,7 +91,7 @@ async function runGit(args, { cwd, env, token }) {
 /**
  * Resolve repo access for a tenant. Throws code=TENANT_REPO_NOT_CONNECTED
  * unless the tenant has a connected repo.
- * @returns {Promise<{ root, cfg, token, env, fullName }>}
+ * @returns {Promise<{ root, cfg, token, env, fullName, provider }>}
  */
 export async function getRepoAccess(tenantId) {
   const cfg = await getRepoConfig(tenantId);
@@ -96,9 +100,10 @@ export async function getRepoAccess(tenantId) {
     e.code = 'TENANT_REPO_NOT_CONNECTED';
     throw e;
   }
-  assertRepoName(cfg.owner, cfg.repo);
-  const token = await getInstallationToken(cfg.installationId, cfg.repo);
-  return { root: repoRootFor(tenantId), cfg, token, env: authEnv(token), fullName: `${cfg.owner}/${cfg.repo}` };
+  const provider = getProvider(cfg.provider ?? 'github');
+  assertRepoName(cfg.owner, cfg.repo, provider.name);
+  const token = await provider.getToken(tenantId, cfg);
+  return { root: repoRootFor(tenantId), cfg, token, env: authEnv(token, provider), fullName: `${cfg.owner}/${cfg.repo}`, provider };
 }
 
 // ─── Clone / fetch ────────────────────────────────────────────────────────────
@@ -115,7 +120,7 @@ export async function ensureTenantRepo(tenantId) {
   if (!multiRepoMode()) return { root: repoRootFor(tenantId), baseRef: 'HEAD' };
 
   const access = await getRepoAccess(tenantId);
-  const { root, cfg, env, token } = access;
+  const { root, cfg, env, token, provider } = access;
   const baseRef = `refs/remotes/origin/${cfg.defaultBranch}`;
   const cloned = fs.existsSync(path.join(root, '.git'));
   const interval = Number(process.env.AEGIS_REPO_FETCH_INTERVAL_MS ?? 30_000);
@@ -139,7 +144,7 @@ export async function ensureTenantRepo(tenantId) {
       fs.rmSync(root, { recursive: true, force: true });
       await runGit(
         ['clone', '--single-branch', '--branch', cfg.defaultBranch, '--',
-          `${webBase()}/${cfg.owner}/${cfg.repo}.git`, tmp],
+          `${provider.webBase()}/${cfg.owner}/${cfg.repo}.git`, tmp],
         { env, token },
       );
       await runGit(['config', 'user.name',  process.env.AEGIS_GIT_AUTHOR_NAME  ?? 'Aegis'], { cwd: tmp, env });
