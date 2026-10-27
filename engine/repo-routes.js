@@ -10,6 +10,9 @@
  *   GET    /tenants/:id/repo/available    repos the tenant's credential can see
  *   PUT    /tenants/:id/repo              { fullName, branch?, targetBranch? } select + clone
  *   DELETE /tenants/:id/repo              disconnect + delete clone (+ stored OAuth tokens)
+ *                                         → 200 { status, provider, note? }. For GitHub the App
+ *                                         stays installed on the customer's account — only the
+ *                                         customer can uninstall it (GitHub → Settings → Applications).
  *   POST   /webhooks/github-app           installation lifecycle (githubAppWebhookRouter)
  *
  * GitLab / Bitbucket have no installation-revocation webhook: a revoked grant
@@ -201,7 +204,15 @@ repoRouter.delete('/tenants/:id/repo', requireApiKey, async (req, res) => {
     await clearRepo(req.params.id);
     if (multiRepoMode()) removeTenantRepoFiles(req.params.id);
     audit(req, req.params.id, 'repo.disconnected');
-    res.status(204).end();
+    const out = { status: 'disconnected', provider: c?.provider ?? 'github' };
+    if (c?.installationId) {
+      // Aegis can drop its own binding and tokens, but it cannot uninstall the App:
+      // that is the customer's action on GitHub.
+      out.githubAppInstalled = true;
+      out.note = 'Disconnected from Aegis. The Aegis GitHub App is still installed on your GitHub account; '
+        + 'to remove it, uninstall it in GitHub under Settings → Applications (or your organization\'s installed GitHub Apps).';
+    }
+    res.status(200).json(out);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
