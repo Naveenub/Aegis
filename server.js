@@ -79,6 +79,7 @@ import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
+import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
 import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
@@ -182,6 +183,7 @@ app.post(
       }).catch(err => console.error('[audit] workflow.submitted', err));
       res.status(202).json({ workflowId, status: 'submitted' });
     } catch (err) {
+      if (err.code === 'TENANT_REPO_NOT_CONNECTED') return res.status(409).json({ error: err.message });
       console.error('[POST /task]', err);
       res.status(500).json({ error: err.message });
     }
@@ -1202,6 +1204,7 @@ app.get('/events', requireApiKey, (req, res) => {
     // parses every /webhooks/* body into an object, which would make Stripe's
     // signature check (it needs the raw bytes) fail with 401.
     app.use('/webhooks', stripeWebhookRouter);
+    app.use('/webhooks', githubAppWebhookRouter); // raw body — must precede webhookRouter
 
 // ─── Inbound webhooks (GitHub / GitLab → trigger workflows) ──────────────────
     //
@@ -1211,6 +1214,8 @@ app.get('/events', requireApiKey, (req, res) => {
     // No API-key auth: webhook requests are authenticated via HMAC signature
     // (GitHub) or a shared secret token (GitLab) inside webhookRouter itself.
     app.use('/webhooks', webhookRouter);
+
+app.use(repoRouter);
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 

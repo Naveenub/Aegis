@@ -41,15 +41,17 @@ import { acquireSlot } from './concurrency.js';
 import { recordAuditEvent } from './audit-log.js';
 import { assertTenantId, assertWorkflowId } from './tenant.js';
 import { pushAndOpenPR } from './git-remote.js';
+import { repoRootFor, worktreesBase, ensureTenantRepo, scanRootFor } from './tenant-repo.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const REPO_ROOT      = path.resolve(process.env.AEGIS_REPO_ROOT ?? process.cwd());
-const WORKTREES_BASE = path.resolve(process.env.AEGIS_WORKTREES ?? path.join(REPO_ROOT, '.aegis-worktrees'));
+// Roots are resolved per tenant (tenant-repo.js). Legacy single-repo mode
+// (no AEGIS_REPOS_BASE) still resolves to AEGIS_REPO_ROOT.
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function git(args, cwd = REPO_ROOT) {
+function git(args, cwd) {
+  if (!cwd) throw new Error(`git ${args[0]}: cwd is required`);
   const result = spawnSync('git', args, { cwd, encoding: 'utf-8' });
   if (result.status !== 0) {
     throw new Error(`git ${args[0]} failed: ${(result.stderr ?? '').trim()}`);
@@ -62,7 +64,7 @@ function git(args, cwd = REPO_ROOT) {
  * worktrees directory does not exist yet (first workflow run).
  */
 export function worktreeDir(tenantId) {
-  const dir = path.join(WORKTREES_BASE, tenantId);
+  const dir = path.join(worktreesBase(), tenantId);
   return fs.existsSync(dir) ? dir : null;
 }
 
@@ -78,8 +80,9 @@ export function worktreeDir(tenantId) {
  */
 export async function ensureWorkflowBranch(workflowId, tenantId) {
   assertWorkflowId(workflowId);
+  const { root: REPO_ROOT, baseRef } = await ensureTenantRepo(tenantId);
   const branch   = `aegis/${tenantId}/${workflowId}`;
-  const cwd      = path.join(WORKTREES_BASE, tenantId, workflowId);
+  const cwd      = path.join(worktreesBase(), tenantId, workflowId);
   const lockName = `worktree:${workflowId}`;
 
   const lock = await acquireLock(lockName, tenantId);
@@ -87,7 +90,7 @@ export async function ensureWorkflowBranch(workflowId, tenantId) {
   try {
     if (!fs.existsSync(cwd)) {
       // Create the base worktree directory for the tenant if needed
-      fs.mkdirSync(path.join(WORKTREES_BASE, tenantId), { recursive: true });
+      fs.mkdirSync(path.join(worktreesBase(), tenantId), { recursive: true });
 
       // Create an isolated worktree on a new branch tracking tenant base
       const baseBranch = `aegis-tenant/${tenantId}`;
@@ -96,10 +99,10 @@ export async function ensureWorkflowBranch(workflowId, tenantId) {
       }).status === 0;
 
       if (baseExists) {
-        git(['worktree', 'add', '-b', branch, cwd, baseBranch]);
+        git(['worktree', 'add', '-b', branch, cwd, baseBranch], REPO_ROOT);
       } else {
-        // First workflow for this tenant — branch from HEAD
-        git(['worktree', 'add', '-b', branch, cwd, 'HEAD']);
+        // First workflow for this tenant — branch from the repo's default branch
+        git(['worktree', 'add', '-b', branch, cwd, baseRef], REPO_ROOT);
       }
     }
   } catch (err) {
@@ -218,6 +221,8 @@ export function revertStepCommit(workflowId, stepId, cwd) {
  */
 export async function finaliseWorkflow(workflowId, tenantId) {
   assertWorkflowId(workflowId);
+  const { root: REPO_ROOT, baseRef } = await ensureTenantRepo(tenantId);
+  const WORKTREES_BASE = worktreesBase();
   const mergeStrategy = (process.env.AEGIS_MERGE_STRATEGY ?? 'rebase').trim().toLowerCase();
   const branch     = `aegis/${tenantId}/${workflowId}`;
   const baseBranch = `aegis-tenant/${tenantId}`;
@@ -232,7 +237,7 @@ export async function finaliseWorkflow(workflowId, tenantId) {
     }).status === 0;
 
     if (!baseExists) {
-      git(['branch', baseBranch, 'HEAD']);
+      git(['branch', baseBranch, baseRef], REPO_ROOT);
     }
 
     // ── Base-branch worktree ───────────────────────────────────────────────────────────
@@ -244,7 +249,7 @@ export async function finaliseWorkflow(workflowId, tenantId) {
     const baseWorktreePath = path.join(WORKTREES_BASE, tenantId, '_base');
     if (!fs.existsSync(baseWorktreePath)) {
       fs.mkdirSync(path.join(WORKTREES_BASE, tenantId), { recursive: true });
-      git(['worktree', 'add', '--no-guess-remote', baseWorktreePath, baseBranch]);
+      git(['worktree', 'add', '--no-guess-remote', baseWorktreePath, baseBranch], REPO_ROOT);
     }
 
     // ── Attempt 1: clean --no-ff merge ─────────────────────────────────────────
@@ -299,7 +304,7 @@ export async function finaliseWorkflow(workflowId, tenantId) {
       // Rebase succeeded — update the branch ref so baseWorktreePath can
       // fast-forward to the rebased tip.
       const rebasedHead = git(['rev-parse', 'HEAD'], worktreePath);
-      git(['update-ref', `refs/heads/${branch}`, rebasedHead]);
+      git(['update-ref', `refs/heads/${branch}`, rebasedHead], REPO_ROOT);
 
       try {
         execFileSync(
@@ -326,15 +331,16 @@ export async function finaliseWorkflow(workflowId, tenantId) {
  */
 export async function removeWorkflowWorktree(workflowId, tenantId) {
   assertWorkflowId(workflowId);
-  const worktreePath = path.join(WORKTREES_BASE, tenantId, workflowId);
+  const REPO_ROOT    = repoRootFor(tenantId);
+  const worktreePath = path.join(worktreesBase(), tenantId, workflowId);
   const branch       = `aegis/${tenantId}/${workflowId}`;
 
   try {
-    git(['worktree', 'remove', '--force', worktreePath]);
+    git(['worktree', 'remove', '--force', worktreePath], REPO_ROOT);
   } catch { /* already removed or never created */ }
 
   try {
-    git(['branch', '-D', branch]);
+    git(['branch', '-D', branch], REPO_ROOT);
   } catch { /* branch may already be deleted */ }
 }
 
@@ -469,11 +475,13 @@ export function getWorker(tenantId) {
               ? step.description
               : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}`;
 
+          await ensureTenantRepo(tenant); // multi-repo: clone/refresh before the agent reads it
           const result = await runAgent(
             activeAgent,
             taskDescription,
             agentContext,
-            tenant
+            tenant,
+            scanRootFor(tenant)
           );
 
           if (!result.includes('PATCH:')) {
@@ -506,7 +514,7 @@ export function getWorker(tenantId) {
               throw new Error('System review failed');
             }
 
-            const aiReview = await runAgent('review-guard', patch, { patch, workflowId }, tenant);
+            const aiReview = await runAgent('review-guard', patch, { patch, workflowId }, tenant, cwd);
             if (!aiReview.includes('APPROVED')) {
               await recordFailure(job.id);
               await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);

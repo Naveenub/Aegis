@@ -51,6 +51,7 @@
 
 import { spawnSync } from 'child_process';
 import path from 'path';
+import { multiRepoMode, getRepoAccess, pushFromTenantRepo } from './tenant-repo.js';
 
 const REPO_ROOT = path.resolve(process.env.AEGIS_REPO_ROOT ?? process.cwd());
 
@@ -154,6 +155,16 @@ async function _openGitHubPR({ title, body, head, base, repo, token }) {
     body: JSON.stringify({ title, body, head, base }),
   });
 
+  if (res.status === 422) {
+    // Same head branch is pushed on every workflow → PR may already be open.
+    const owner = repo.split('/')[0];
+    const q = `${githubApiBase()}/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`;
+    const existing = await fetch(q, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+    }).then(r => (r.ok ? r.json() : [])).catch(() => []);
+    if (existing[0]) return { url: existing[0].html_url, number: existing[0].number };
+  }
+
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     throw new Error(`GitHub PR creation failed (HTTP ${res.status}): ${detail}`);
@@ -231,6 +242,8 @@ async function _openBitbucketPR({ title, body, head, base, repo, token }) {
  * @returns {Promise<{ pushed: boolean, pr?: { url: string, number: number } }>}
  */
 export async function pushAndOpenPR(workflowId, tenantId, mergeResult) {
+  if (multiRepoMode()) return _pushAndOpenPRForTenant(workflowId, tenantId, mergeResult);
+
   const remote = cfg('AEGIS_GIT_REMOTE');
   if (!remote) {
     // Remote not configured — local-only mode, nothing to do.
@@ -260,6 +273,34 @@ export async function pushAndOpenPR(workflowId, tenantId, mergeResult) {
     body:  `Automated changes produced by Aegis workflow \`${workflowId}\` for tenant \`${tenantId}\`.${resolvedNote}`,
     head:  branchToPush,
     base:  targetBranch,
+  });
+
+  return { pushed: true, pr };
+}
+
+// ─── Per-tenant path (GitHub App installation token) ─────────────────────────
+
+async function _pushAndOpenPRForTenant(workflowId, tenantId, mergeResult) {
+  const { cfg: repoCfg, token, fullName } = await getRepoAccess(tenantId);
+
+  const branchToPush =
+    cfg('AEGIS_GIT_PUSH_BRANCH', '') === '__workflow__'
+      ? `aegis/${tenantId}/${workflowId}`
+      : `aegis-tenant/${tenantId}`;
+
+  await pushFromTenantRepo(tenantId, branchToPush);
+
+  const resolvedNote = mergeResult.resolvedVia === 'rebase'
+    ? '\n\n> ℹ️ Conflicts were resolved automatically via `git rebase`.'
+    : '';
+
+  const pr = await _openGitHubPR({
+    title: `Aegis: workflow ${workflowId}`,
+    body:  `Automated changes produced by Aegis workflow \`${workflowId}\`.${resolvedNote}`,
+    head:  branchToPush,
+    base:  repoCfg.targetBranch || repoCfg.defaultBranch,
+    repo:  fullName,
+    token,
   });
 
   return { pushed: true, pr };

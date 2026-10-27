@@ -8,6 +8,7 @@ import { assertWorkflowQuota, trackWorkflowStart } from './tenant-quota.js';
 import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 import { scanRepo } from './repo-scanner.js';
 import { worktreeDir } from './git.js';
+import { ensureTenantRepo, multiRepoMode, scanRootFor } from './tenant-repo.js';
 // crypto.randomUUID() is built into Node 14.17+ — no external package needed.
 
 // ─── Planner output validation ────────────────────────────────────────────────
@@ -319,7 +320,10 @@ async function scheduleValidatedPlan(workflowId, tasks, tenantId, priority, opts
   // The tenant base worktree may not exist yet (workflow worktree is created
   // per-workflow in git.js); fall back to process.cwd() so this pass always
   // runs rather than being skipped when there's nothing to scan.
-  const repoRoot = worktreeDir(tenantId) ?? process.cwd();
+  // Multi-repo mode: validate against the tenant's own clone, never Aegis's cwd.
+  const repoRoot = multiRepoMode()
+    ? (await ensureTenantRepo(tenantId)).root
+    : (worktreeDir(tenantId) ?? process.cwd());
   await stripHallucinatedFiles(tasks, repoRoot);
 
   await createWorkflow(workflowId, tasks, {
@@ -364,12 +368,15 @@ export async function runSystem(task, opts = {}) {
   // Ensure this tenant's vector index exists before first use
   await initVectorIndex(tenantId);
 
+  // Multi-repo: fail fast (before planning/billing) if the tenant has no repo.
+  if (multiRepoMode()) await ensureTenantRepo(tenantId);
+
   // 1️⃣ Plan — retry up to MAX_PLAN_ATTEMPTS on parse/schema/graph failure
   let plan;
   let lastError;
 
   for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt++) {
-    const planRaw = await runAgent('planner', task, { workflowId }, tenantId);
+    const planRaw = await runAgent('planner', task, { workflowId }, tenantId, scanRootFor(tenantId));
 
     try {
       plan = parsePlan(planRaw);
