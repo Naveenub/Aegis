@@ -8,18 +8,23 @@
 #   1. Shared filesystem. server (finalise/rewind) and worker (apply/commit)
 #      must see the same git checkout (see k8s/README.md's RWX PVC note) —
 #      Render disks are per-service, not shared across services.
-#   2. Docker-in-Docker. sandbox.js shells out to `docker run`; Render grants
-#      no privileged/nested-Docker access (same restriction on Railway).
+#   2. Docker-in-Docker. Render grants no privileged/nested-Docker access (same
+#      restriction on Railway), so this service has no local daemon.
 #
 # Fix for (1): run all three processes in one service so they share one
-# container's filesystem + attached disk. Fix for (2): AEGIS_SANDBOX_MODE=local
-# — agent-generated code lint/tests run directly on the dyno, not walled off
-# by sandbox.js's container boundary.
+# container's filesystem + attached disk. Fix for (2): sandbox.js talks to a
+# REMOTE Docker daemon (DOCKER_HOST) on an isolated runner host you provision —
+# a dedicated VM, or a host running gVisor/Firecracker/Kata. Tenant code never
+# runs on this service. The worktree is streamed to the runner; nothing is
+# mounted. Fail-closed: if DOCKER_HOST is unset or unreachable, every lint/test
+# step is blocked rather than run locally.
 #
-# Net effect: this is a single-node demo/eval deploy (no self-serve billing), not the isolated,
-# horizontally-scaled topology docker-compose.yml or k8s/ gives you. For a
-# production multi-tenant deployment with real sandbox isolation, self-host
-# with docker-compose (dind sidecar) or k8s/ instead.
+# The runner must be a machine you are happy to treat as disposable and that
+# holds no secrets or credentials, with its Docker API exposed over mutual TLS
+# only. Create the Render Secret Files ca.pem, cert.pem, key.pem (client cert
+# for that daemon); they appear in /etc/secrets, which DOCKER_CERT_PATH below
+# points the docker CLI at. Build Dockerfile.sandbox, push it where the runner
+# can pull it, and set AEGIS_SANDBOX_IMAGE to it.
 
 databases:
   - name: aegis-postgres
@@ -73,13 +78,16 @@ services:
         value: default
       - key: CLAUDE_AUTONOMY
         value: "true"
-      # Unsandboxed: tenant code runs directly on this service. Because of that,
-      # self-serve signup (/signup, /signup/config) is DISABLED while this is
-      # `local` (see engine/billing/signup.js). Do not set
-      # AEGIS_ALLOW_UNSANDBOXED_SIGNUP=true for paying customers — launch paid
-      # on docker-compose (dind) or k8s/ instead.
-      - key: AEGIS_SANDBOX_MODE
-        value: local
+      # Isolated remote runner (see header). Do NOT set AEGIS_SANDBOX_MODE=local
+      # here: that runs tenant code on this service and is for local dev only.
+      - key: DOCKER_HOST
+        sync: false # e.g. tcp://runner.example.com:2376
+      - key: DOCKER_TLS_VERIFY
+        value: "1"
+      - key: DOCKER_CERT_PATH
+        value: /etc/secrets
+      - key: AEGIS_SANDBOX_IMAGE
+        sync: false # image built from Dockerfile.sandbox
       # ── Stripe (set in the Render dashboard; sync: false = never stored in git) ──
       - key: STRIPE_SECRET_KEY
         sync: false

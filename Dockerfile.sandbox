@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+
+# Image for AEGIS_SANDBOX_IMAGE when lint/test runs on a remote or sidecar
+# Docker daemon (sandbox.js "stream" transport — no host paths are mounted, so
+# the tools must live in the image). sandbox.js invokes
+# <projectRoot>/node_modules/.bin/{eslint,vitest}; projectRoot is /app in the
+# main image, so the path here must stay /app.
+#
+#   docker build -f Dockerfile.sandbox -t your-registry/aegis-sandbox:latest .
+FROM node:22-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+# Dev deps are required (eslint, vitest); scripts are skipped so the optional
+# native hnswlib-node build is not attempted.
+RUN npm ci --ignore-scripts

@@ -20,12 +20,12 @@ import { getTierConfig, DEFAULT_TIER, TIERS } from './tiers.js';
 import { provisionSubscription, cancelSubscription, getBasePrice } from './stripe-customer.js';
 
 /**
- * Paid signup runs tenant code. With AEGIS_SANDBOX_MODE=local that code runs
+ * Paid signup runs tenant code. With AEGIS_SANDBOX_MODE=local (or the legacy AEGIS_SANDBOX_DISABLE=true) that code runs
  * unsandboxed on shared infrastructure, so self-serve signup is refused unless
  * the operator explicitly opts in (demo/trial deploys only).
  */
 export function unsandboxedSignupBlocked() {
-  return process.env.AEGIS_SANDBOX_MODE === 'local'
+  return (process.env.AEGIS_SANDBOX_MODE === 'local' || process.env.AEGIS_SANDBOX_DISABLE === 'true')
     && process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP !== 'true';
 }
 

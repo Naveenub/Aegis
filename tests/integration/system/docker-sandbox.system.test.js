@@ -70,6 +70,8 @@ describe('System: Docker sandbox — real container execution', () => {
     // sandbox.js reads env + probes Docker once at import time, so set env
     // before importing and use a fresh module graph per test file run.
     process.env.AEGIS_SANDBOX_TIMEOUT_MS = process.env.AEGIS_SANDBOX_TIMEOUT_MS ?? '20000';
+    // These cases assert bind-mount behaviour; stream is covered in docker-sandbox-stream.system.test.js.
+    process.env.AEGIS_SANDBOX_TRANSPORT = 'bind';
     sandbox = await import('../../../engine/sandbox.js');
   });
 

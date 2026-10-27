@@ -36,11 +36,15 @@
    `storageClassName` to an RWX-capable class (EFS, Filestore, Longhorn,
    NFS) first.
 
-4. **`dind` sidecar runs `privileged: true`.** Vanilla Kubernetes has no
-   equivalent of compose's `/dev/fuse` + `/dev/net/tun` device passthrough
-   for an unprivileged rootless daemon — see the comment in
-   `06-worker.yaml`. Harden with a runtime like sysbox or kata before
-   running untrusted tenant code through this in production.
+4. **Isolated sandbox runner (`06a-sandbox.yaml`).** Tenant lint/test code
+   runs on a dedicated `aegis-sandbox` Deployment, not beside the worker. Its
+   dockerd needs `privileged: true`, which is only acceptable inside a
+   microVM, so the pod sets `runtimeClassName` — you MUST point it at a
+   Kata/Firecracker-style RuntimeClass that exists on your cluster (if the
+   class is missing the pod stays Pending and runs fail closed). Do not
+   remove it. The NetworkPolicy there only restricts access if your CNI
+   enforces NetworkPolicy. Build `Dockerfile.sandbox`, push it, and set
+   `AEGIS_SANDBOX_IMAGE` in `01-configmap.yaml`.
 
 5. **Secrets.** Copy `02-secret.example.yaml` → `02-secret.yaml`, fill in
    real values, uncomment it in `kustomization.yaml`. Never commit

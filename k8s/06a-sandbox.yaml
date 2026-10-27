@@ -1,0 +1,82 @@
+# Isolated runner for tenant lint/test code. Deliberately holds NO secrets, NO
+# repo volume and NO service-account token: the worker streams each worktree
+# over the Docker API (sandbox.js "stream" transport) and only stdout comes back.
+#
+# dockerd needs privileged: true, which is only safe inside a microVM guest.
+# runtimeClassName below is REQUIRED — set it to a Kata/Firecracker-style
+# RuntimeClass on your cluster. If it does not exist the pod stays Pending and
+# sandboxed steps fail closed. Never run this Deployment on the default runtime.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis-sandbox
+  namespace: aegis
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aegis-sandbox
+  template:
+    metadata:
+      labels:
+        app: aegis-sandbox
+    spec:
+      runtimeClassName: kata # CHANGE to your microVM RuntimeClass
+      automountServiceAccountToken: false
+      containers:
+        - name: dockerd
+          image: docker:27-dind
+          args: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: "" # reachable only from aegis-worker (NetworkPolicy below)
+          securityContext:
+            privileged: true # confined to the microVM guest by runtimeClassName
+          volumeMounts:
+            - name: docker-data
+              mountPath: /var/lib/docker
+          readinessProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: docker-data
+          emptyDir: {} # sandbox image re-pulls on pod restart, by design
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aegis-sandbox
+  namespace: aegis
+spec:
+  selector:
+    app: aegis-sandbox
+  ports:
+    - port: 2375
+      targetPort: 2375
+---
+# The Docker API is root on this daemon: only the worker may reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aegis-sandbox-ingress
+  namespace: aegis
+spec:
+  podSelector:
+    matchLabels:
+      app: aegis-sandbox
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: aegis-worker
+      ports:
+        - port: 2375

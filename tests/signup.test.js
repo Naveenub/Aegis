@@ -128,6 +128,18 @@ describe('unsandboxed guard', () => {
     expect((await signupTenant({ email: 'a@b.co', tenantId: 'acme' })).status).toBe(503);
   });
 
+  it('also blocks signup under the legacy AEGIS_SANDBOX_DISABLE flag', async () => {
+    delete process.env.AEGIS_SANDBOX_MODE;
+    process.env.AEGIS_SANDBOX_DISABLE = 'true';
+    delete process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP;
+    try {
+      const { unsandboxedSignupBlocked } = await import('../engine/billing/signup.js');
+      expect(unsandboxedSignupBlocked()).toBe(true);
+    } finally {
+      delete process.env.AEGIS_SANDBOX_DISABLE;
+    }
+  });
+
   it('allows opt-in for demo deploys', async () => {
     process.env.AEGIS_SANDBOX_MODE = 'local';
     process.env.AEGIS_ALLOW_UNSANDBOXED_SIGNUP = 'true';

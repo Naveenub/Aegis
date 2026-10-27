@@ -9,6 +9,7 @@ resources:
   - 04-repo-pvc.yaml
   - 05-server.yaml
   - 06-worker.yaml
+  - 06a-sandbox.yaml
   - 07-dlq-worker.yaml
   - 08-hpa.yaml
   - 09-ingress.yaml

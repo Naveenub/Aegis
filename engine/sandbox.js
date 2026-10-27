@@ -43,7 +43,17 @@ import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
  *   AEGIS_SANDBOX_IMAGE       Docker image to use (default: node:22-alpine)
  *   AEGIS_SANDBOX_MEMORY      Memory limit (default: 512m)
  *   AEGIS_SANDBOX_CPUS        CPU limit (default: 1)
+ *   AEGIS_SANDBOX_PIDS        Max processes per container (default: 256)
  *   AEGIS_SANDBOX_TIMEOUT_MS  Wall-clock timeout ms (default: 60000)
+ *   AEGIS_SANDBOX_TRANSPORT   'stream' | 'bind'. Default: 'stream' when DOCKER_HOST
+ *                             is set, else 'bind'. 'bind' mounts host paths and only
+ *                             works when the daemon shares this host's filesystem.
+ *                             'stream' tars the worktree to the container's stdin, so
+ *                             it works against a remote or sidecar daemon (the
+ *                             isolated-runner topology). With 'stream' the image must
+ *                             carry eslint/vitest at <projectRoot>/node_modules
+ *                             (see Dockerfile.sandbox).
+ *   AEGIS_SANDBOX_WORKTREE_SIZE  tmpfs size for the streamed worktree (default: 256m)
  *
  * Security properties of each sandboxed run:
  *   - Network is completely disabled (--network none).
@@ -69,21 +79,36 @@ const UNSANDBOXED_OK = DISABLE_EXPLICITLY || LOCAL_MODE || IN_CI;
 const IMAGE      = process.env.AEGIS_SANDBOX_IMAGE        ?? 'node:22-alpine';
 const MEMORY     = process.env.AEGIS_SANDBOX_MEMORY       ?? '512m';
 const CPUS       = process.env.AEGIS_SANDBOX_CPUS         ?? '1';
+const PIDS_LIMIT = process.env.AEGIS_SANDBOX_PIDS         ?? '256';
 const TIMEOUT_MS = parseInt(process.env.AEGIS_SANDBOX_TIMEOUT_MS ?? '60000');
 const TMPFS_SIZE = '67108864'; // 64 MB
+
+// Any value other than 'bind' means 'stream' — the transport that never trusts a
+// shared filesystem is the safe default for an unrecognised setting.
+const TRANSPORT = (process.env.AEGIS_SANDBOX_TRANSPORT
+  ?? (process.env.DOCKER_HOST ? 'stream' : 'bind')) === 'bind' ? 'bind' : 'stream';
+const WORKTREE_SIZE     = process.env.AEGIS_SANDBOX_WORKTREE_SIZE ?? '256m';
+const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 
 // ─── Docker availability probe ────────────────────────────────────────────────
 
 let _dockerAvailable = null;
+let _probedAt = 0;
+const PROBE_RETRY_MS = 30000;
 
+// A positive probe is cached for the process lifetime. A negative one is retried
+// after PROBE_RETRY_MS so a remote runner that was down at boot recovers without
+// a restart (the failed probe costs at most 5s, at most once per interval).
 function isDockerAvailable() {
-  if (_dockerAvailable !== null) return _dockerAvailable;
+  if (_dockerAvailable === true) return true;
+  if (_dockerAvailable === false && Date.now() - _probedAt < PROBE_RETRY_MS) return false;
   try {
     execFileSync('docker', ['info'], { stdio: 'pipe', timeout: 5000 });
     _dockerAvailable = true;
   } catch {
     _dockerAvailable = false;
   }
+  _probedAt = Date.now();
   return _dockerAvailable;
 }
 
@@ -143,7 +168,7 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId) {
   const startedAt = Date.now();
 
   const result = dockerAvailable
-    ? runDocker(cmd, cwd, projectRoot)
+    ? (TRANSPORT === 'stream' ? runDockerStream(cmd, cwd) : runDocker(cmd, cwd, projectRoot))
     : UNSANDBOXED_OK
       ? runDirect(cmd, cwd)
       : {
@@ -222,18 +247,7 @@ function runDocker(cmd, cwd, projectRoot) {
     'run',
     '--rm',
 
-    // ── Isolation ──────────────────────────────────────────────────────────
-    '--network', 'none',
-    '--read-only',
-    '--tmpfs', `/tmp:size=${TMPFS_SIZE},mode=1777`,
-    '--security-opt', 'no-new-privileges',
-    '--cap-drop', 'ALL',
-    '--user', '65534:65534',
-
-    // ── Resource limits ────────────────────────────────────────────────────
-    '--memory', MEMORY,
-    '--memory-swap', MEMORY,
-    '--cpus', CPUS,
+    ...isolationArgs(),
 
     // ── Bind mounts ────────────────────────────────────────────────────────
     '--volume', `${absWorktree}:${absWorktree}:rw`,
@@ -247,10 +261,32 @@ function runDocker(cmd, cwd, projectRoot) {
     'sh', '-c', cmd,
   ];
 
+  return execDocker(dockerArgs);
+}
+
+// Isolation + resource flags shared by both transports so the security posture
+// cannot drift between them.
+function isolationArgs() {
+  return [
+    '--network', 'none',
+    '--read-only',
+    '--tmpfs', `/tmp:size=${TMPFS_SIZE},mode=1777`,
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'ALL',
+    '--user', '65534:65534',
+    '--memory', MEMORY,
+    '--memory-swap', MEMORY,
+    '--cpus', CPUS,
+    '--pids-limit', PIDS_LIMIT,
+  ];
+}
+
+function execDocker(dockerArgs, input) {
   try {
     const output = execFileSync('docker', dockerArgs, {
       stdio: 'pipe',
       timeout: TIMEOUT_MS,
+      ...(input ? { input } : {}),
     });
     return { success: true, output: output.toString() || 'OK' };
   } catch (err) {
@@ -271,6 +307,47 @@ function runDocker(cmd, cwd, projectRoot) {
   }
 }
 
+// ─── Docker execution over a stream (remote / sidecar daemon) ────────────────
+// No host path is mounted. The worktree is tarred to the container's stdin and
+// unpacked into a size-capped tmpfs at the same absolute path (commands carry
+// absolute paths). Changes made inside the container are discarded — lint and
+// test runs only need their stdout/exit code.
+
+function runDockerStream(cmd, cwd) {
+  const absWorktree = path.resolve(cwd);
+
+  if (!fs.existsSync(absWorktree)) {
+    return { success: false, output: `Sandbox error: worktree not found: ${absWorktree}` };
+  }
+
+  let archive;
+  try {
+    // .git is excluded: a clone's .git/config can embed remote URLs with
+    // credentials, and tenant code has no use for history.
+    archive = execFileSync(
+      'tar',
+      ['-C', absWorktree, '--exclude=./.git', '-cf', '-', '.'],
+      { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: MAX_ARCHIVE_BYTES }
+    );
+  } catch (err) {
+    return { success: false, output: `Sandbox error: could not archive worktree: ${err.message}` };
+  }
+
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '-i',
+    ...isolationArgs(),
+    '--tmpfs', `${absWorktree}:size=${WORKTREE_SIZE},mode=0755,uid=65534,gid=65534`,
+    '--workdir', absWorktree,
+    IMAGE,
+    // cmd and path are positional args ($1, $2), never interpolated into the script.
+    'sh', '-c', 'tar -xmf - -C "$1" && cd "$1" && exec sh -c "$2"', 'sh', absWorktree, cmd,
+  ];
+
+  return execDocker(dockerArgs, archive);
+}
+
 // ─── Direct (unsandboxed) fallback ────────────────────────────────────────────
 // Only reachable when UNSANDBOXED_OK is true (Rules 2).
 
@@ -280,8 +357,14 @@ function runDirect(cmd, cwd) {
       stdio: 'pipe',
       cwd,
       timeout: TIMEOUT_MS,
+      // Allowlist, not ...process.env: tenant code must not see STRIPE_SECRET_KEY,
+      // ANTHROPIC_API_KEY, DATABASE_URL, signing keys, etc.
       env: {
-        ...process.env,
+        ...Object.fromEntries(
+          ['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'SHELL', 'CI']
+            .filter((k) => process.env[k] !== undefined)
+            .map((k) => [k, process.env[k]])
+        ),
         NODE_OPTIONS: '--max-old-space-size=512',
       },
     });

@@ -19,7 +19,8 @@ FROM base AS runtime
 
 # git is a hard dependency: git.js shells out to it for worktree/branch/commit
 # management on every workflow step.
-RUN apk add --no-cache git
+# docker-cli: sandbox.js shells out to `docker run` against DOCKER_HOST.
+RUN apk add --no-cache git docker-cli
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .

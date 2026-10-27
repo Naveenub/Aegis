@@ -38,11 +38,11 @@ data:
   RATE_LIMIT_MAX: "60"
   RATE_LIMIT_BURST_MS: "5000"
   RATE_LIMIT_BURST_MAX: "20"
-  # sandbox.js talks to the rootless dind sidecar over the pod's loopback —
-  # see 06-worker.yaml for why this must stay a same-pod sidecar, not a
-  # separate Service, unlike redis.
-  DOCKER_HOST: "tcp://localhost:2375"
-  AEGIS_SANDBOX_IMAGE: "node:22-alpine"
+  # sandbox.js talks to the isolated aegis-sandbox Service (06a-sandbox.yaml);
+  # DOCKER_HOST being set selects the stream transport automatically.
+  DOCKER_HOST: "tcp://aegis-sandbox:2375"
+  # Build from Dockerfile.sandbox — plain node:22-alpine has no eslint/vitest.
+  AEGIS_SANDBOX_IMAGE: "your-registry/aegis-sandbox:latest"
   AEGIS_SANDBOX_MEMORY: "512m"
   AEGIS_SANDBOX_CPUS: "1"
   AEGIS_SANDBOX_TIMEOUT_MS: "60000"
