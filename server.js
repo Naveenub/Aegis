@@ -70,11 +70,15 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId, setSpendConfig } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
 import { createPortalSession } from './engine/billing/stripe-customer.js';
+import { getSpendStatus, addCredits } from './engine/billing/spend-guard.js';
+import { setByokKey, deleteByokKey, hasByok } from './engine/billing/byok.js';
+import { createCreditCheckout } from './engine/billing/credits.js';
+import { timingSafeEqual } from 'crypto';
 import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
@@ -989,6 +993,83 @@ app.get('/tenants/:id/billing', allowInactiveTenant, requireApiKey, async (req, 
     res.json({ tenantId: req.params.id, tier: usage[0]?.tier ?? DEFAULT_TIER, usage });
   } catch (err) {
     console.error('[GET /tenants/:id/billing]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Spend control & BYOK ─────────────────────────────────────────────────────
+
+/** Operator-only gate (cap overrides, manual credit grants). Fails closed. */
+function requireAdmin(req, res, next) {
+  const expected = (process.env.AEGIS_ADMIN_KEY ?? '').trim();
+  const given = String(req.headers['x-admin-key'] ?? '');
+  const a = Buffer.from(given), b = Buffer.from(expected);
+  if (!expected || a.length !== b.length || !timingSafeEqual(a, b)) {
+    return res.status(403).json({ error: 'Admin key required.' });
+  }
+  next();
+}
+
+/** GET /tenants/:id/spend — cap/credit state for this month. Reachable while suspended. */
+app.get('/tenants/:id/spend', allowInactiveTenant, requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try {
+    res.json({ ...(await getSpendStatus(req.params.id)), byok: await hasByok(req.params.id) });
+  } catch (err) {
+    console.error('[GET /tenants/:id/spend]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** PUT /tenants/:id/spend (admin) — body { mode?: 'capped'|'prepaid', capUsd?: number } */
+app.put('/tenants/:id/spend', requireAdmin, async (req, res) => {
+  try {
+    await setSpendConfig(req.params.id, { mode: req.body?.mode, capUsd: req.body?.capUsd });
+    res.json(await getSpendStatus(req.params.id));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** POST /tenants/:id/credits (admin) — manual grant. Body { usd, ref } (ref = idempotency key). */
+app.post('/tenants/:id/credits', requireAdmin, async (req, res) => {
+  try {
+    const { usd, ref } = req.body ?? {};
+    res.json(await addCredits(req.params.id, usd, `manual:${ref}`));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** POST /tenants/:id/credits/checkout — tenant buys credits. Body { usd }. Reachable while suspended. */
+app.post('/tenants/:id/credits/checkout', allowInactiveTenant, requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try {
+    res.json(await createCreditCheckout(req.params.id, Number(req.body?.usd)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** PUT /tenants/:id/byok — enterprise: store own Anthropic key. Body { apiKey }. Never echoed back. */
+app.put('/tenants/:id/byok', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try {
+    await setByokKey(req.params.id, req.body?.apiKey);
+    res.json({ byok: true });
+  } catch (err) {
+    const status = err.code === 'BYOK_NOT_ENTITLED' ? 403 : err.code === 'BYOK_INVALID_KEY' ? 400 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/** DELETE /tenants/:id/byok — revert to the platform key (platform spend cap applies again). */
+app.delete('/tenants/:id/byok', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try {
+    await deleteByokKey(req.params.id);
+    res.json({ byok: false });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

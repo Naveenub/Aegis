@@ -16,7 +16,10 @@ vi.mock('stripe', () => ({
 
 const getTenantMock = vi.fn();
 const setStatusMock = vi.fn();
-vi.mock('../engine/tenant-registry.js', () => ({ getTenant: getTenantMock, setStatus: setStatusMock }));
+const markFirstPaidMock = vi.fn();
+const addCreditsMock = vi.fn();
+vi.mock('../engine/tenant-registry.js', () => ({ getTenant: getTenantMock, setStatus: setStatusMock, markFirstPaid: markFirstPaidMock }));
+vi.mock('../engine/billing/spend-guard.js', () => ({ addCredits: addCreditsMock }));
 
 let server, base;
 
@@ -27,6 +30,8 @@ beforeEach(async () => {
   constructEventMock.mockReset();
   getTenantMock.mockReset().mockResolvedValue({ tenantId: 'acme' });
   setStatusMock.mockReset().mockResolvedValue(undefined);
+  markFirstPaidMock.mockReset().mockResolvedValue(undefined);
+  addCreditsMock.mockReset().mockResolvedValue({ applied: true });
   vi.spyOn(console, 'log').mockImplementation(() => {});
   const { stripeWebhookRouter } = await import('../engine/billing/stripe-webhook.js');
   const app = express();
@@ -112,5 +117,42 @@ describe('stripe webhook', () => {
     );
     expect((await post()).status).toBe(200);
     expect(setStatusMock).not.toHaveBeenCalled();
+  });
+
+  it('invoice.paid with amount_paid > 0 stamps first payment; $0 invoice does not', async () => {
+    constructEventMock.mockReturnValue(event('invoice.paid', { metadata: { tenantId: 'acme' }, amount_paid: 4900 }));
+    await post();
+    expect(markFirstPaidMock).toHaveBeenCalledWith('acme');
+    markFirstPaidMock.mockClear();
+    constructEventMock.mockReturnValue(event('invoice.paid', { metadata: { tenantId: 'acme' }, amount_paid: 0 }));
+    await post();
+    expect(markFirstPaidMock).not.toHaveBeenCalled();
+  });
+
+  it('credit_topup checkout adds credits for the amount paid, keyed on event id', async () => {
+    constructEventMock.mockReturnValue(event('checkout.session.completed', {
+      metadata: { tenantId: 'acme', kind: 'credit_topup' }, payment_status: 'paid', currency: 'usd', amount_total: 5000,
+    }));
+    expect((await post()).status).toBe(200);
+    expect(addCreditsMock).toHaveBeenCalledWith('acme', 50, 'evt_1');
+  });
+
+  it('unpaid or non-topup checkout grants nothing', async () => {
+    constructEventMock.mockReturnValue(event('checkout.session.completed', {
+      metadata: { tenantId: 'acme', kind: 'credit_topup' }, payment_status: 'unpaid', currency: 'usd', amount_total: 5000,
+    }));
+    await post();
+    constructEventMock.mockReturnValue(event('checkout.session.completed', { metadata: { tenantId: 'acme' }, payment_status: 'paid', currency: 'usd', amount_total: 5000 }));
+    await post();
+    expect(addCreditsMock).not.toHaveBeenCalled();
+  });
+
+  it('top-up failure returns 500 so Stripe retries', async () => {
+    addCreditsMock.mockRejectedValue(new Error('redis down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    constructEventMock.mockReturnValue(event('checkout.session.completed', {
+      metadata: { tenantId: 'acme', kind: 'credit_topup' }, payment_status: 'paid', currency: 'usd', amount_total: 5000,
+    }));
+    expect((await post()).status).toBe(500);
   });
 });

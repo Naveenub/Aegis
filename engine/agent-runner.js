@@ -6,6 +6,8 @@ import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 import { analyzeRepo, formatRepoContext } from './repo-scanner.js';
 import { recordAgentCost } from './metrics.js';
 import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
+import { reserveSpend, settleSpend, releaseSpend, assertTenantActive } from './billing/spend-guard.js';
+import { getByokClient } from './billing/byok.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -17,7 +19,9 @@ dotenv.config();
 // which exits with a clear message before this module is ever imported in CI.
 let _client = null;
 function getClient() {
-  if (!_client) _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // maxRetries: 0 — the SDK's hidden retries would bill outside any reservation.
+  // Step-level retries (git.js) go through runAgent again and reserve again.
+  if (!_client) _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0, timeout: 300_000 });
   return _client;
 }
 
@@ -216,12 +220,46 @@ export async function runAgent(
   // (or set AEGIS_COST_INPUT_PER_MTOK / AEGIS_COST_OUTPUT_PER_MTOK) so cost and
   // the stripe-setup margin guard stay accurate.
   const model = process.env.AEGIS_MODEL || 'claude-sonnet-4-20250514';
-  const response = await getClient().messages.create({
-    model,
-    max_tokens: 8192,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  const maxTokens = 8192;
+
+  // Enterprise BYOK: tenant's own key, billed by Anthropic. No platform cap, no
+  // token metering, and NO fallback to the platform key if it fails.
+  const byokClient = await getByokClient(tenantId);
+  const inputChars = systemPrompt.length + userMessage.length;
+
+  // Platform key: reserve worst-case cost first (throws SpendGuardError at the
+  // cap / zero credits / inactive tenant). BYOK still honours account status.
+  let reservation = null;
+  if (byokClient) {
+    await assertTenantActive(tenantId);
+  } else {
+    reservation = await reserveSpend({ tenantId, model, inputChars, maxOutputTokens: maxTokens });
+  }
+
+  let response;
+  try {
+    response = await (byokClient ?? getClient()).messages.create({
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    });
+  } catch (err) {
+    if (reservation) {
+      await releaseSpend(reservation, err, { inputChars })
+        .catch((e) => console.error('[agent-runner] spend release failed:', e.message));
+    }
+    throw err;
+  }
+
+  if (reservation) {
+    // A failed settle is safe: the reservation expires and is counted as spent.
+    await settleSpend(reservation, {
+      model: response.model ?? model,
+      inputTokens:  response.usage?.input_tokens  ?? 0,
+      outputTokens: response.usage?.output_tokens ?? 0,
+    }).catch((e) => console.error('[agent-runner] spend settle failed:', e.message));
+  }
 
   // Cost tracking is best-effort — a Redis hiccup must never fail the agent call.
   try {
@@ -247,10 +285,10 @@ export async function runAgent(
   const tokenMeta = { agent, workflowId: context.workflowId, model: response.model ?? model };
   const tokensIn  = response.usage?.input_tokens ?? 0;
   const tokensOut = response.usage?.output_tokens ?? 0;
-  if (tokensIn > 0) {
+  if (!byokClient && tokensIn > 0) {
     recordUsageEvent({ tenantId, eventType: EVENT_TYPES.TOKENS_IN, quantity: tokensIn, metadata: tokenMeta });
   }
-  if (tokensOut > 0) {
+  if (!byokClient && tokensOut > 0) {
     recordUsageEvent({ tenantId, eventType: EVENT_TYPES.TOKENS_OUT, quantity: tokensOut, metadata: tokenMeta });
   }
 

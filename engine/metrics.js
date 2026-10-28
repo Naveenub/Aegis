@@ -296,6 +296,12 @@ const PRICING_USD_PER_MTOK = {
   'claude-sonnet-4-20250514': DEFAULT_PRICING_USD_PER_MTOK,
 };
 
+/** USD cost of a call. Shared by recordAgentCost() and billing/spend-guard.js. */
+export function computeCostUsd(model, inputTokens = 0, outputTokens = 0) {
+  const pricing = PRICING_USD_PER_MTOK[model] ?? DEFAULT_PRICING_USD_PER_MTOK;
+  return (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
+}
+
 // ─── Key helpers ──────────────────────────────────────────────────────────────
 
 const K = {
@@ -583,10 +589,7 @@ export async function recordAgentCost({
   inputTokens = 0,
   outputTokens = 0,
 }) {
-  const pricing = PRICING_USD_PER_MTOK[model] ?? DEFAULT_PRICING_USD_PER_MTOK;
-  const costUsd =
-    (inputTokens  / 1_000_000) * pricing.input +
-    (outputTokens / 1_000_000) * pricing.output;
+  const costUsd = computeCostUsd(model, inputTokens, outputTokens);
 
   try {
     const pipeline = redis.pipeline();

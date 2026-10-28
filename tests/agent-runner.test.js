@@ -41,6 +41,14 @@ vi.mock('../engine/usage-recorder.js', () => ({
   recordUsageEvent: mockRecordUsage,
 }));
 
+vi.mock('../engine/billing/spend-guard.js', () => ({
+  reserveSpend:       vi.fn(async () => ({ id: 'r1' })),
+  settleSpend:        vi.fn(async () => {}),
+  releaseSpend:       vi.fn(async () => {}),
+  assertTenantActive: vi.fn(async () => {}),
+}));
+vi.mock('../engine/billing/byok.js', () => ({ getByokClient: vi.fn(async () => null) }));
+
 // ─── Mock vector-memory ───────────────────────────────────────────────────────
 
 vi.mock('../engine/vector-memory.js', () => ({

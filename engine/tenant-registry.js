@@ -184,6 +184,50 @@ export async function getTier(tenantId) {
 }
 
 /**
+ * Stamp the first successfully PAID invoice (amount > 0). Until set, a tenant
+ * with a Stripe customer is held to the unverified spend cap (spend-guard.js).
+ * Idempotent — never overwrites.
+ */
+export async function markFirstPaid(tenantId) {
+  assertTenantId(tenantId);
+  await redis.hsetnx(TENANT_META_KEY(tenantId), 'firstPaidAt', String(Date.now()));
+}
+
+/** @returns {Promise<number|null>} ms epoch of first paid invoice */
+export async function getFirstPaid(tenantId) {
+  assertTenantId(tenantId);
+  const v = await redis.hget(TENANT_META_KEY(tenantId), 'firstPaidAt');
+  return v ? Number(v) : null;
+}
+
+/**
+ * Per-tenant spend policy overrides. mode: 'capped' (monthly hard cap, billed
+ * in arrears) | 'prepaid' (credit balance, no arrears). capUsd overrides the tier cap.
+ * @param {string} tenantId
+ * @param {{ mode?: 'capped'|'prepaid', capUsd?: number }} cfg
+ */
+export async function setSpendConfig(tenantId, { mode, capUsd } = {}) {
+  assertTenantId(tenantId);
+  const fields = {};
+  if (mode !== undefined) {
+    if (mode !== 'capped' && mode !== 'prepaid') throw new Error(`Invalid spend mode: "${mode}"`);
+    fields.spendMode = mode;
+  }
+  if (capUsd !== undefined) {
+    if (typeof capUsd !== 'number' || !Number.isFinite(capUsd) || capUsd < 0) throw new Error(`Invalid capUsd: ${capUsd}`);
+    fields.spendCapUsd = String(capUsd);
+  }
+  if (Object.keys(fields).length) await redis.hset(TENANT_META_KEY(tenantId), fields);
+}
+
+/** @returns {Promise<{ mode: 'capped'|'prepaid'|null, capUsd: number|null }>} null = use default */
+export async function getSpendConfig(tenantId) {
+  assertTenantId(tenantId);
+  const [mode, cap] = await redis.hmget(TENANT_META_KEY(tenantId), 'spendMode', 'spendCapUsd');
+  return { mode: mode ?? null, capUsd: cap != null ? Number(cap) : null };
+}
+
+/**
  * Seed the registry from the AEGIS_TENANTS env var (and the default tenant)
  * at process start.  Called once during server / worker bootstrap.
  *

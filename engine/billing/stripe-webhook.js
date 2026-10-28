@@ -7,7 +7,9 @@
  *   customer.subscription.deleted    → tenant status 'suspended'
  *   customer.subscription.updated    → active/trialing → 'active';
  *                                      past_due/unpaid/canceled → 'suspended'
- *   checkout.session.completed       → log only (manual Payment Link flow)
+ *   checkout.session.completed       → metadata.kind=credit_topup: add prepaid credits;
+ *                                      otherwise log only (manual Payment Link flow)
+ *   invoice.paid (amount_paid > 0)   → also stamps firstPaidAt (lifts unverified spend cap)
  * The tenant is resolved from metadata.tenantId (set on the subscription by
  * stripe-customer.js). Events with no resolvable, registered tenant are
  * logged and acknowledged without changing anything, so manual design-partner
@@ -32,7 +34,8 @@
 
 import express from 'express';
 import Stripe from 'stripe';
-import { getTenant, setStatus } from '../tenant-registry.js';
+import { getTenant, setStatus, markFirstPaid } from '../tenant-registry.js';
+import { addCredits } from './spend-guard.js';
 
 let _client = null;
 function getClient() {
@@ -103,11 +106,34 @@ stripeWebhookRouter.post('/stripe', async (req, res) => {
       try {
         if (await getTenant(tenantId)) {
           await setStatus(tenantId, status);
+          // First real payment lifts the unverified spend cap (spend-guard.js).
+          // amount_paid > 0 so a $0 trial invoice does not count.
+          if (event.type === 'invoice.paid' && event.data.object.amount_paid > 0) {
+            await markFirstPaid(tenantId);
+          }
           console.log(`[stripe-webhook] tenant=${tenantId} status=${status}`);
         }
       } catch (err) {
         console.error('[stripe-webhook] status update failed', err);
         return res.status(500).json({ error: 'Status update failed; retry.' });
+      }
+    }
+  }
+
+  // Prepaid credit top-up (engine/billing/credits.js Checkout session).
+  // Credits granted = amount actually paid; idempotent on the Stripe event id.
+  if (event.type === 'checkout.session.completed') {
+    const s = event.data.object;
+    if (s.metadata?.kind === 'credit_topup' && s.payment_status === 'paid' && s.currency === 'usd') {
+      const tenantId = resolveTenantId(s);
+      try {
+        if (tenantId && (await getTenant(tenantId)) && s.amount_total > 0) {
+          await addCredits(tenantId, s.amount_total / 100, event.id);
+          console.log(`[stripe-webhook] credit top-up tenant=${tenantId} usd=${s.amount_total / 100}`);
+        }
+      } catch (err) {
+        console.error('[stripe-webhook] credit top-up failed', err);
+        return res.status(500).json({ error: 'Credit top-up failed; retry.' });
       }
     }
   }
