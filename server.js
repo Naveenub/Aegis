@@ -39,7 +39,11 @@
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   GET    /                                   Marketing landing page (HTML)
  *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
- *   GET    /terms, /privacy                    Legal pages (HTML)
+ *   GET    /terms, /privacy, /dpa, /security   Legal & compliance pages (HTML; DPA/security marked DRAFT)
+ *   GET    /subprocessors, /subprocessors.json Subprocessor list (HTML / JSON)
+ *   GET    /tenants/:id/retention              Effective data-retention policy
+ *   PUT    /tenants/:id/retention              Set retention days / zeroRetention
+ *   POST   /tenants/:id/data-deletion          Delete a tenant's finished content
  *   GET    /signup/config                      Public signup config (Stripe publishable key)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)

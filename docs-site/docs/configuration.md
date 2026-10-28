@@ -21,3 +21,13 @@ DLQ_MAX_RETRIES=2
 ```
 
 Vector memory reranking, concurrency limits per priority tier, DLQ backoff, anomaly thresholds, and webhook secrets are all separately tunable — see `.env.example`.
+
+## Data retention
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AEGIS_RETENTION_JOBS_DAYS` | `90` | Platform default retention for job results (1–365). |
+| `AEGIS_RETENTION_WORKFLOWS_DAYS` | `90` | Platform default retention for finished workflows (1–365). |
+| `AEGIS_MEMORY_TTL_DAYS` | `30` | Platform default for vector memory. |
+
+Tenants override these with `PUT /tenants/:id/retention` (`jobsDays`, `workflowsDays`, `memoryDays`, `zeroRetention`). Purging is done by the daily `npm run retention:sweep` job (k8s CronJob `12-retention-sweep-cronjob.yaml`, Render cron `aegis-retention-sweep`); nothing is purged unless it is deployed. See [Compliance](./compliance.md).
