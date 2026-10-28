@@ -212,7 +212,10 @@ export async function runAgent(
     .join('\n\n');
 
   // ── 5. Call the API ──────────────────────────────────────────────────────
-  const model = 'claude-sonnet-4-20250514';
+  // Override with AEGIS_MODEL. Add the model to PRICING_USD_PER_MTOK in metrics.js
+  // (or set AEGIS_COST_INPUT_PER_MTOK / AEGIS_COST_OUTPUT_PER_MTOK) so cost and
+  // the stripe-setup margin guard stay accurate.
+  const model = process.env.AEGIS_MODEL || 'claude-sonnet-4-20250514';
   const response = await getClient().messages.create({
     model,
     max_tokens: 8192,
