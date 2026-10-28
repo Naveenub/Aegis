@@ -335,12 +335,19 @@ describe('runAgent() — tier routing', () => {
     expect(mockCreate.mock.calls[0][0].model).toBe('claude-sonnet-4-20250514');
   });
 
-  it('AEGIS_MODEL overrides the build tier only', async () => {
-    process.env.AEGIS_MODEL = 'custom-build';
+  it('legacy AEGIS_MODEL pins every tier', async () => {
+    process.env.AEGIS_MODEL = 'custom-pin';
     await runAgent('debugger', 'task', {}, 'default');
     await runAgent('planner', 'task', {}, 'default');
-    expect(mockCreate.mock.calls[0][0].model).toBe('custom-build');
-    expect(mockCreate.mock.calls[1][0].model).toBe('claude-haiku-4-5-20251001');
+    expect(mockCreate.mock.calls.map(([c]) => c.model)).toEqual(['custom-pin', 'custom-pin']);
+  });
+
+  it('tier vars override AEGIS_MODEL per tier', async () => {
+    process.env.AEGIS_MODEL = 'custom-pin';
+    process.env.AEGIS_MODEL_CHEAP = 'custom-cheap';
+    await runAgent('debugger', 'task', {}, 'default');
+    await runAgent('planner', 'task', {}, 'default');
+    expect(mockCreate.mock.calls.map(([c]) => c.model)).toEqual(['custom-pin', 'custom-cheap']);
   });
 });
 
@@ -354,6 +361,24 @@ describe('runAgent() — cost-cap fallback', () => {
       'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001',
     ]);
     expect(mockCreate.mock.calls[0][0].model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('flags fallback calls in token usage metadata', async () => {
+    mockReserve.mockRejectedValueOnce(capErr('SPEND_CAP_REACHED'));
+    mockCreate.mockResolvedValue({ ...fakeResponse('ok'), usage: { input_tokens: 10, output_tokens: 5 } });
+    mockRecordUsage.mockClear();
+    await runAgent('debugger', 'task', {}, 'default');
+    const tokenCalls = mockRecordUsage.mock.calls.map(([e]) => e).filter((e) => e.eventType.startsWith('tokens_'));
+    expect(tokenCalls.length).toBe(2);
+    expect(tokenCalls.every((e) => e.metadata.capFallback === true)).toBe(true);
+  });
+
+  it('AEGIS_CAP_FALLBACK=0 refuses instead of downgrading', async () => {
+    process.env.AEGIS_CAP_FALLBACK = '0';
+    mockReserve.mockRejectedValueOnce(capErr('SPEND_CAP_REACHED'));
+    await expect(runAgent('debugger', 'task', {}, 'default')).rejects.toMatchObject({ code: 'SPEND_CAP_REACHED' });
+    expect(mockReserve).toHaveBeenCalledTimes(1);
+    delete process.env.AEGIS_CAP_FALLBACK;
   });
 
   it('propagates when the cheap model is also refused', async () => {

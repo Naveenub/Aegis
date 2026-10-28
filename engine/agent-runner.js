@@ -35,9 +35,12 @@ const PATCH_AGENTS = new Set([
 
 // Tier routing: planner and review-guard are short, structured, cheap calls;
 // everything else (patch agents, test-writer) is the build tier.
-// AEGIS_MODEL stays as the build-tier override for backwards compatibility.
+// AEGIS_MODEL (legacy) pins BOTH tiers, so existing deployments are unchanged;
+// AEGIS_MODEL_BUILD / AEGIS_MODEL_CHEAP override one tier. Pinned to one model,
+// there is nothing cheaper to fall back to, so the cap fallback is a no-op.
 const CHEAP_AGENTS = new Set(['planner', 'review-guard']);
-const cheapModel = () => process.env.AEGIS_MODEL_CHEAP || 'claude-haiku-4-5-20251001';
+const cheapModel = () =>
+  process.env.AEGIS_MODEL_CHEAP || process.env.AEGIS_MODEL || 'claude-haiku-4-5-20251001';
 const buildModel = () =>
   process.env.AEGIS_MODEL_BUILD || process.env.AEGIS_MODEL || 'claude-sonnet-4-20250514';
 const modelFor = (agent) => (CHEAP_AGENTS.has(agent) ? cheapModel() : buildModel());
@@ -45,6 +48,8 @@ const modelFor = (agent) => (CHEAP_AGENTS.has(agent) ? cheapModel() : buildModel
 // Spend-guard codes where a cheaper model may still fit under the cap.
 // TENANT_INACTIVE / GUARD_UNAVAILABLE must NOT fall back — a cheaper call is still refused.
 const CAP_CODES = new Set(['SPEND_CAP_REACHED', 'CREDITS_EXHAUSTED']);
+// AEGIS_CAP_FALLBACK=0 turns the downgrade off: cap hit → call refused, never a weaker patch.
+const capFallbackEnabled = () => process.env.AEGIS_CAP_FALLBACK !== '0';
 
 // How many bytes of each file to inline (keeps prompt manageable)
 const FILE_INLINE_LIMIT = 8_000;
@@ -233,6 +238,7 @@ export async function runAgent(
   // new model to PRICING_USD_PER_MTOK in metrics.js (unlisted models are priced at
   // the Sonnet default, which over-reserves) so cost and the margin guard stay accurate.
   let model = modelFor(agent);
+  let fellBack = false;
   const maxTokens = 8192;
 
   // Enterprise BYOK: tenant's own key, billed by Anthropic. No platform cap, no
@@ -253,9 +259,10 @@ export async function runAgent(
       // Cost-cap fallback: worst-case reserve is priced per model, so the cheap
       // model can fit where the build model cannot. Still capped; a second
       // refusal propagates as-is.
-      if (!CAP_CODES.has(err?.code) || model === cheapModel()) throw err;
+      if (!capFallbackEnabled() || !CAP_CODES.has(err?.code) || model === cheapModel()) throw err;
       console.warn(`[agent-runner] ${err.code} for "${tenantId}" on ${model}; falling back to ${cheapModel()}`);
       model = cheapModel();
+      fellBack = true;
       reservation = await reserve(model);
     }
   }
@@ -306,7 +313,10 @@ export async function runAgent(
   });
   // Input and output are separate meters: output costs 5x input, so a summed
   // meter lets output-heavy tenants run at negative margin.
-  const tokenMeta = { agent, workflowId: context.workflowId, model: response.model ?? model };
+  const tokenMeta = {
+    agent, workflowId: context.workflowId, model: response.model ?? model,
+    ...(fellBack && { capFallback: true }),
+  };
   const tokensIn  = response.usage?.input_tokens ?? 0;
   const tokensOut = response.usage?.output_tokens ?? 0;
   if (!byokClient && tokensIn > 0) {
