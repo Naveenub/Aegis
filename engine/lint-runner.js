@@ -1,9 +1,9 @@
 import path from 'path';
 import {
   detectToolchains,
-  commandContext,
+  prepareToolchain,
   runToolchainCommand,
-  NO_TOOLCHAIN_NOTICE,
+  noToolchainResult,
 } from './toolchains.js';
 
 /**
@@ -18,10 +18,11 @@ import {
  *   java    → mvn test-compile / gradle classes testClasses
  *
  * Every run has no network access, a read-only rootfs (worktree mounted rw),
- * a memory/CPU cap and a wall-clock timeout. Scoping is preserved: when
+ * a memory/CPU cap and a wall-clock timeout; dependencies come from a cache
+ * built beforehand (engine/deps-cache.js). Scoping is preserved: when
  * `files` is given only those files are linted, and a toolchain with nothing
- * in scope is skipped. A worktree with no supported language passes with a
- * notice, the same way a worktree with no tests does.
+ * in scope is skipped. A worktree with no supported language fails, so an
+ * unverified patch isn't committed (AEGIS_SANDBOX_ALLOW_UNSUPPORTED=true skips).
  *
  * @param {string}   cwd     - Absolute path to the tenant worktree directory.
  * @param {string[]} [files] - Relative paths (within cwd) of files to lint.
@@ -33,7 +34,7 @@ export function runLint(cwd, files = [], tenantId) {
 
   const toolchains = detectToolchains(cwd);
   if (toolchains.length === 0) {
-    return { success: true, output: NO_TOOLCHAIN_NOTICE };
+    return noToolchainResult('lint');
   }
 
   const sections = [];
@@ -41,10 +42,18 @@ export function runLint(cwd, files = [], tenantId) {
   let ran = 0;
 
   for (const tc of toolchains) {
-    const cmd = tc.lintCommand(commandContext(tc, { cwd, files, projectRoot }));
-    if (cmd == null) continue; // nothing in scope for this language
+    if (tc.lintCommand({ cwd, files, projectRoot, deps: null }) == null) continue; // nothing in scope
 
-    const result = runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId });
+    // Dependencies are installed (with network) in a separate step and mounted
+    // read-only into the lint run — see engine/deps-cache.js.
+    const prep = prepareToolchain(tc, { cwd, projectRoot, tenantId });
+    const result = prep.error
+      ? { success: false, output: prep.error }
+      : runToolchainCommand(
+          tc,
+          tc.lintCommand({ cwd, files, projectRoot, deps: prep.deps }),
+          { cwd, projectRoot, tenantId, deps: prep.deps },
+        );
     ran += 1;
     sections.push({ tc, result });
     if (!result.success) success = false;

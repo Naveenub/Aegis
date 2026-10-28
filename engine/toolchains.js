@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { runInSandbox } from './sandbox.js';
+import { ensureDeps, autoDepsEnabled } from './deps-cache.js';
 
 /**
  * engine/toolchains.js
@@ -18,16 +20,19 @@ import { runInSandbox } from './sandbox.js';
  *
  * Supported: node, python, go, java (Maven or Gradle).
  *
- * The sandbox runs with `--network none`, so nothing can be downloaded at
- * run time. Third-party dependencies therefore have to come from the worktree
- * itself (Go `vendor/`), or from a pre-populated read-only cache mounted at
- * the same path inside the container:
+ * The sandbox runs with `--network none`, so nothing can be downloaded while
+ * linting or testing. Dependencies are instead installed ahead of time by
+ * engine/deps-cache.js — once per set of manifests, in a separate network-enabled
+ * container working on a copy of the repo — and mounted read-only into the runs.
+ * Each toolchain's `prepare` block says what to hash and how to install:
  *
- *   AEGIS_SANDBOX_PYTHON_DEPS   dir made with `pip install --target <dir> ...`
- *   AEGIS_SANDBOX_GO_DEPS       a GOMODCACHE (`go mod download` with GOMODCACHE=<dir>)
- *   AEGIS_SANDBOX_JAVA_DEPS     a Maven local repo, or a Gradle read-only dep
- *                               cache (`modules-2`'s parent). REQUIRED for Java:
- *                               even compiling needs the Maven/Gradle plugins.
+ *   python  pytest + ruff + the repo's requirements*.txt / pyproject deps (pip --target)
+ *   go      `go mod download` into a module cache (skipped when vendor/ is committed)
+ *   java    Maven `dependency:go-offline`, or a Gradle resolve-all into a read-only cache
+ *
+ * To supply a cache yourself (or when AEGIS_SANDBOX_AUTO_DEPS=off), point one of
+ * AEGIS_SANDBOX_PYTHON_DEPS / _GO_DEPS / _JAVA_DEPS at a host directory; it wins
+ * over the automatic cache.
  *
  * Image overrides: AEGIS_SANDBOX_IMAGE (node, unchanged), AEGIS_SANDBOX_IMAGE_PYTHON,
  * AEGIS_SANDBOX_IMAGE_GO, AEGIS_SANDBOX_IMAGE_MAVEN, AEGIS_SANDBOX_IMAGE_GRADLE.
@@ -115,17 +120,54 @@ for t in sys.argv[1:]:
         check(t)
 sys.exit(bad)`;
 
+// Dependency install for Python, run with network access (see engine/deps-cache.js).
+// pytest and ruff always go in; then the repo's own requirements.
+const PY_PREP = `set -e
+PIP="python3 -m pip install --no-input --upgrade --target $AEGIS_DEPS"
+$PIP pytest ruff
+python3 - <<'PY'
+import os
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+reqs = []
+if tomllib and os.path.exists('pyproject.toml'):
+    with open('pyproject.toml', 'rb') as fh:
+        d = tomllib.load(fh)
+    p = d.get('project', {})
+    reqs += p.get('dependencies', [])
+    opt = p.get('optional-dependencies', {})
+    for k in ('test', 'tests', 'testing', 'dev'):
+        reqs += opt.get(k, [])
+    for k in ('test', 'tests', 'dev'):
+        reqs += d.get('dependency-groups', {}).get(k, [])
+reqs = [r for r in reqs if isinstance(r, str)]
+with open('/tmp/aegis-req.txt', 'w') as out:
+    out.write('\\n'.join(reqs) + ('\\n' if reqs else ''))
+PY
+if [ -s /tmp/aegis-req.txt ]; then $PIP -r /tmp/aegis-req.txt; fi
+for f in requirements.txt requirements-dev.txt requirements-test.txt requirements_dev.txt requirements_test.txt; do
+  if [ -f "$f" ]; then $PIP -r "$f"; fi
+done`;
+
 const PYTHON = {
   id: 'python',
   label: 'Python',
-  // pytest/ruff are used when the image has them (see sandbox/python.Dockerfile);
-  // the stock image falls back to unittest + a syntax check.
+  // pytest and ruff come from the dependency cache (see `prepare`), so the stock
+  // image is enough; without a cache it falls back to unittest + a syntax check.
   image: () => process.env.AEGIS_SANDBOX_IMAGE_PYTHON ?? 'python:3.12-alpine',
   hostNodeModules: false,
   depsEnvKey: 'AEGIS_SANDBOX_PYTHON_DEPS',
   sourceRe: /\.py$/,
   testFileRe: /(?:^|[\\/])(?:test_[^\\/]*|[^\\/]*_test)\.py$/,
   baseName: (file) => stripExt(file, /\.py$/).replace(/^test_/, '').replace(/_test$/, ''),
+  prepare: {
+    version: 1,
+    manifestRe: /(^|\/)(requirements[\w.-]*\.txt|pyproject\.toml|setup\.py|setup\.cfg|Pipfile\.lock)$/,
+    command: PY_PREP,
+    env: () => ({ HOME: '/tmp', PIP_CACHE_DIR: '/tmp/pip-cache', PIP_DISABLE_PIP_VERSION_CHECK: '1' }),
+  },
   detect: (cwd) => has(cwd, 'pyproject.toml', 'setup.py', 'setup.cfg', 'requirements.txt',
                        'Pipfile', 'tox.ini', 'pytest.ini'),
   env: ({ cwd, deps }) => ({
@@ -141,8 +183,11 @@ const PYTHON = {
       if (targets.length === 0) return null;
     }
     const t = targets.map(q).join(' ');
+    // ruff only when the repo configures it, so a repo that uses flake8/black
+    // isn't suddenly held to ruff's default rules.
+    const ruffConfigured = "{ [ -f ruff.toml ] || [ -f .ruff.toml ] || grep -qs '^\\[tool\\.ruff' pyproject.toml; }";
     return [
-      `if command -v ruff >/dev/null 2>&1; then ruff check ${t}; else`,
+      `if ${ruffConfigured} && python3 -m ruff --version >/dev/null 2>&1; then python3 -m ruff check ${t}; else`,
       `python3 - ${t} <<'PY'`,
       PY_SYNTAX_CHECK,
       'PY',
@@ -176,6 +221,24 @@ const GO = {
   sourceRe: /\.go$/,
   testFileRe: /_test\.go$/,
   baseName: (file) => stripExt(file, /\.go$/).replace(/_test$/, ''),
+  prepare: {
+    version: 1,
+    manifestRe: /(^|\/)go\.(mod|sum)$/,
+    // A committed vendor/ already carries the dependencies; so does a module with no requires.
+    needed: (cwd, manifests) => !has(cwd, 'vendor/modules.txt') &&
+      manifests.some(f => path.basename(f) === 'go.mod' && /^\s*require\b/m.test(fs.readFileSync(f, 'utf-8'))),
+    command: 'go mod download',
+    env: ({ cache }) => ({
+      HOME: '/tmp',
+      GOCACHE: '/tmp/go-build',
+      GOPATH: '/tmp/go',
+      GOMODCACHE: cache,
+      GOPROXY: process.env.AEGIS_SANDBOX_GOPROXY ?? 'https://proxy.golang.org',
+      GOTOOLCHAIN: 'local',
+      GOFLAGS: '-buildvcs=false',
+      CGO_ENABLED: '0',
+    }),
+  },
   detect: (cwd) => has(cwd, 'go.mod'),
   env: ({ deps }) => ({
     HOME: '/tmp',
@@ -224,9 +287,10 @@ const JAVA_COMMON = {
   requiresDeps: true,
   requiresDepsMessage:
     'Java builds need an offline dependency cache because the sandbox has no network ' +
-    '(Maven/Gradle cannot even fetch their own plugins). Set AEGIS_SANDBOX_JAVA_DEPS to a ' +
-    'host directory populated ahead of time — a Maven local repository, or for Gradle the ' +
-    'directory containing modules-2 — and Aegis mounts it read-only into the container.',
+    '(Maven/Gradle cannot even fetch their own plugins). It is built automatically unless ' +
+    'AEGIS_SANDBOX_AUTO_DEPS=off; in that case set AEGIS_SANDBOX_JAVA_DEPS to a host directory ' +
+    'populated ahead of time — a Maven local repository, or for Gradle the directory ' +
+    'containing modules-2 — and Aegis mounts it read-only into the container.',
   memory: '1g',
   timeoutMs: 180000,
   tmpfsBytes: 268435456,
@@ -237,10 +301,35 @@ const JAVA_COMMON = {
 
 const javaClass = (f) => path.basename(f).replace(/\.java$/, '');
 
+const MVN_PREP = `set -e
+mvn -B -ntp -Dmaven.repo.local="$AEGIS_DEPS" dependency:go-offline
+mvn -B -ntp -Dmaven.repo.local="$AEGIS_DEPS" -Dtest=__aegis_none__ -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false test || true`;
+
+// Resolves every resolvable configuration of every project (build scripts, plugins,
+// compile and test runtime classpaths) so the offline runs find them.
+const GRADLE_PREP = `set -e
+cat > /tmp/aegis-resolve.gradle <<'G'
+allprojects {
+  tasks.register('aegisResolveAll') {
+    doLast {
+      configurations.matching { it.canBeResolved }.each { c -> try { c.resolve() } catch (ignored) { } }
+    }
+  }
+}
+G
+gradle --no-daemon -q --init-script /tmp/aegis-resolve.gradle aegisResolveAll`;
+
 const MAVEN = {
   ...JAVA_COMMON,
   id: 'java-maven',
   label: 'Java (Maven)',
+  gitIgnore: ['target/'],
+  prepare: {
+    version: 1,
+    manifestRe: /(^|\/)pom\.xml$/,
+    command: MVN_PREP,
+    env: () => ({ HOME: '/tmp' }),
+  },
   image: () => process.env.AEGIS_SANDBOX_IMAGE_MAVEN ?? 'maven:3.9-eclipse-temurin-21',
   detect: (cwd) => has(cwd, 'pom.xml'),
   env: () => ({ HOME: '/tmp' }),
@@ -265,6 +354,15 @@ const GRADLE = {
   ...JAVA_COMMON,
   id: 'java-gradle',
   label: 'Java (Gradle)',
+  gitIgnore: ['build/', '.gradle/'],
+  prepare: {
+    version: 1,
+    manifestRe: /(^|\/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties|libs\.versions\.toml)$/,
+    command: GRADLE_PREP,
+    env: ({ cache }) => ({ HOME: '/tmp', GRADLE_USER_HOME: cache }),
+    // GRADLE_RO_DEP_CACHE wants the directory that contains modules-2
+    depsPath: (cache) => path.join(cache, 'caches'),
+  },
   image: () => process.env.AEGIS_SANDBOX_IMAGE_GRADLE ?? 'gradle:8-jdk21',
   detect: (cwd) => has(cwd, 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'),
   env: ({ deps }) => ({
@@ -307,28 +405,90 @@ export function detectToolchains(cwd) {
   return found;
 }
 
-/** Output used when a worktree has no supported language at its root. */
-export const NO_TOOLCHAIN_NOTICE =
-  '[toolchain] No supported language detected at the worktree root ' +
-  '(looked for package.json, pyproject.toml/setup.py/requirements.txt, go.mod, pom.xml, ' +
-  'build.gradle) — lint/tests skipped.';
+/**
+ * Result for a worktree with no supported language. Fails by default so a patch
+ * that could not be verified is never committed as if it had passed; set
+ * AEGIS_SANDBOX_ALLOW_UNSUPPORTED=true to skip instead.
+ *
+ * @param {string} kind  'lint' | 'tests'
+ * @returns {{ success: boolean, output: string }}
+ */
+export function noToolchainResult(kind) {
+  const base =
+    '[toolchain] No supported language detected at the worktree root ' +
+    '(looked for package.json, pyproject.toml/setup.py/requirements.txt, go.mod, pom.xml, build.gradle)';
+  const allow = /^(1|true|yes|on)$/i.test(process.env.AEGIS_SANDBOX_ALLOW_UNSUPPORTED ?? '');
+  return allow
+    ? { success: true, output: `${base} — ${kind} skipped (AEGIS_SANDBOX_ALLOW_UNSUPPORTED is set).` }
+    : {
+        success: false,
+        output: `${base}, so ${kind} could not run and the change is unverified. ` +
+                'Set AEGIS_SANDBOX_ALLOW_UNSUPPORTED=true to skip instead of failing.',
+      };
+}
+
+/**
+ * prepareToolchain(tc, ctx)
+ *
+ * Resolve the dependency directory for a toolchain: an operator-supplied
+ * AEGIS_SANDBOX_*_DEPS wins, then the automatic cache (building it on first use),
+ * else none. Call once per toolchain per lint/test run.
+ *
+ * @param {object} tc
+ * @param {{ cwd: string, projectRoot: string, tenantId?: string }} ctx
+ * @returns {{ deps: string|null, error?: string }}
+ */
+export function prepareToolchain(tc, ctx) {
+  let deps = depsDir(tc.depsEnvKey);
+
+  if (!deps && tc.prepare && autoDepsEnabled()) {
+    const r = ensureDeps(tc, ctx);
+    if (r.error) return { deps: null, error: r.error };
+    deps = r.dir;
+  }
+
+  if (tc.requiresDeps && !deps) {
+    return { deps: null, error: `[toolchain:${tc.id}] ${tc.requiresDepsMessage}` };
+  }
+  return { deps };
+}
+
+// Build output must not be swept into agent commits (`git add -A`), so keep it
+// out of the repo's untracked set. Best effort; tracked files are unaffected.
+const _excluded = new Set();
+function excludeFromGit(cwd, patterns = []) {
+  for (const pattern of patterns) {
+    const key = `${path.resolve(cwd)}\0${pattern}`;
+    if (_excluded.has(key)) continue;
+    _excluded.add(key);
+    try {
+      const rel = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd, stdio: 'pipe' })
+        .toString().trim();
+      const file = path.resolve(cwd, rel);
+      const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
+      if (!current.split('\n').includes(pattern)) {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.appendFileSync(file, `${current && !current.endsWith('\n') ? '\n' : ''}${pattern}\n`);
+      }
+    } catch {
+      // not a git checkout, or git unavailable — nothing to do
+    }
+  }
+}
 
 /**
  * runToolchainCommand(tc, cmd, ctx)
  *
- * Run one lint/test command for a toolchain through the sandbox with the right
- * image, mounts, env and limits.
+ * Run one lint/test command for a toolchain through the sandbox (no network)
+ * with the right image, mounts, env and limits.
  *
  * @param {object} tc
  * @param {string} cmd
- * @param {{ cwd: string, projectRoot: string, tenantId?: string }} ctx
+ * @param {{ cwd: string, projectRoot: string, tenantId?: string, deps?: string|null }} ctx
  * @returns {{ success: boolean, output: string }}
  */
-export function runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId }) {
-  const deps = depsDir(tc.depsEnvKey);
-  if (tc.requiresDeps && !deps) {
-    return { success: false, output: `[toolchain:${tc.id}] ${tc.requiresDepsMessage}` };
-  }
+export function runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId, deps = null }) {
+  excludeFromGit(cwd, tc.gitIgnore);
   return runInSandbox(cmd, cwd, projectRoot, tenantId, {
     toolchain: tc.id,
     image: tc.image(),
@@ -339,12 +499,4 @@ export function runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId }) {
     timeoutMs: tc.timeoutMs,
     tmpfsBytes: tc.tmpfsBytes,
   });
-}
-
-/**
- * Context handed to lintCommand/testCommand: the deps dir is needed by the Maven
- * command line, so resolve it in one place.
- */
-export function commandContext(tc, base) {
-  return { ...base, deps: depsDir(tc.depsEnvKey) };
 }

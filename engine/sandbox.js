@@ -161,12 +161,18 @@ if (DISABLE_EXPLICITLY) {
  * @param {number}  [opts.timeoutMs]       Toolchain default timeout (env var wins)
  * @param {number}  [opts.tmpfsBytes]      /tmp size in bytes (default 64 MB)
  * @param {string}  [opts.toolchain]       Label recorded in usage metadata
+ * @param {boolean} [opts.network]         Allow network access (default false). Used
+ *                                         only by the dependency-install step in
+ *                                         engine/deps-cache.js, never by lint/test.
+ * @param {string[]} [opts.rwMounts]       Extra host dirs mounted read-write at the same path
+ * @param {number}  [opts.exactTimeoutMs]  Timeout used as-is, ignoring AEGIS_SANDBOX_TIMEOUT_MS
  * @returns {{ success: boolean, output: string }}
  */
 export function runInSandbox(cmd, cwd, projectRoot, tenantId, opts = {}) {
   const dockerAvailable = isDockerAvailable();
   const startedAt = Date.now();
-  const timeoutMs = TIMEOUT_SET ? TIMEOUT_MS : (opts.timeoutMs ?? TIMEOUT_MS);
+  const timeoutMs = opts.exactTimeoutMs
+    ?? (TIMEOUT_SET ? TIMEOUT_MS : (opts.timeoutMs ?? TIMEOUT_MS));
 
   const result = dockerAvailable
     ? runDocker(cmd, cwd, projectRoot, opts, timeoutMs)
@@ -252,6 +258,7 @@ function runDocker(cmd, cwd, projectRoot, opts = {}, timeoutMs = TIMEOUT_MS) {
   const needsNodeModules = opts.hostNodeModules ?? true;
   const absNodeModules = path.resolve(projectRoot, 'node_modules');
   const absDeps = opts.deps ? path.resolve(opts.deps) : null;
+  const rwMounts = (opts.rwMounts ?? []).map(m => path.resolve(m));
   const image = opts.image ?? IMAGE;
   const memory = MEMORY_SET ? MEMORY : (opts.memory ?? MEMORY);
   const tmpfsSize = String(opts.tmpfsBytes ?? TMPFS_SIZE);
@@ -290,7 +297,7 @@ function runDocker(cmd, cwd, projectRoot, opts = {}, timeoutMs = TIMEOUT_MS) {
     '--rm',
 
     // ── Isolation ──────────────────────────────────────────────────────────
-    '--network', 'none',
+    '--network', opts.network ? 'bridge' : 'none',
     '--read-only',
     '--tmpfs', `/tmp:size=${tmpfsSize},mode=1777`,
     '--security-opt', 'no-new-privileges',
@@ -306,6 +313,7 @@ function runDocker(cmd, cwd, projectRoot, opts = {}, timeoutMs = TIMEOUT_MS) {
     '--volume', `${absWorktree}:${absWorktree}:rw`,
     ...(needsNodeModules ? ['--volume', `${absNodeModules}:${absNodeModules}:ro`] : []),
     ...(absDeps ? ['--volume', `${absDeps}:${absDeps}:ro`] : []),
+    ...rwMounts.flatMap(m => ['--volume', `${m}:${m}:rw`]),
 
     // ── Environment ────────────────────────────────────────────────────────
     ...envArgs,

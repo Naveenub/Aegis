@@ -2,9 +2,9 @@ import path from 'path';
 import { scanRepoSync } from './repo-scanner.js';
 import {
   detectToolchains,
-  commandContext,
+  prepareToolchain,
   runToolchainCommand,
-  NO_TOOLCHAIN_NOTICE,
+  noToolchainResult,
 } from './toolchains.js';
 
 // ─── Test-file discovery ──────────────────────────────────────────────────────
@@ -43,9 +43,14 @@ function findTestFiles(allFiles, tc) {
  * @returns {{ success: boolean, output: string }}
  */
 function runToolchainTests(tc, cwd, projectRoot, files, allFiles, tenantId) {
+  // Dependencies are installed once (with network, in a separate step) and
+  // mounted read-only into every test run below — see engine/deps-cache.js.
+  let prep = null;
   const run = (targets, scoped) => {
-    const cmd = tc.testCommand(commandContext(tc, { cwd, projectRoot, targets, scoped }));
-    return runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId });
+    prep ??= prepareToolchain(tc, { cwd, projectRoot, tenantId });
+    if (prep.error) return { success: false, output: prep.error };
+    const cmd = tc.testCommand({ cwd, projectRoot, targets, scoped, deps: prep.deps });
+    return runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId, deps: prep.deps });
   };
 
   const allTests = findTestFiles(allFiles, tc);
@@ -146,7 +151,7 @@ export function runTests(cwd, files = [], tenantId) {
 
   const toolchains = detectToolchains(cwd);
   if (toolchains.length === 0) {
-    return { success: true, output: NO_TOOLCHAIN_NOTICE };
+    return noToolchainResult('tests');
   }
 
   const allFiles = scanRepoSync(cwd);

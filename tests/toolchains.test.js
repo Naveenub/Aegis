@@ -102,7 +102,10 @@ describe('go toolchain', () => {
 });
 
 describe('java toolchains', () => {
-  it('require an offline dependency cache', () => {
+  it('build the dependency cache automatically but still need one to run', () => {
+    expect(TOOLCHAINS['java-maven'].prepare.command).toContain('dependency:go-offline');
+    expect(TOOLCHAINS['java-gradle'].prepare.command).toContain('aegisResolveAll');
+    expect(TOOLCHAINS['java-maven'].gitIgnore).toEqual(['target/']);
     expect(TOOLCHAINS['java-maven'].requiresDeps).toBe(true);
     expect(TOOLCHAINS['java-gradle'].requiresDeps).toBe(true);
   });
