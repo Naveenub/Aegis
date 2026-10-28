@@ -228,6 +228,46 @@ export async function getSpendConfig(tenantId) {
 }
 
 /**
+ * Per-tenant data-retention overrides (see engine/retention-policy.js for the
+ * defaults, bounds and validation — this just persists what it is given).
+ * A null value clears that override so the platform default applies again.
+ *
+ * @param {string} tenantId
+ * @param {{ jobsDays?: number|null, workflowsDays?: number|null,
+ *           memoryDays?: number|null, zeroRetention?: boolean }} updates
+ */
+export async function setRetentionConfig(tenantId, updates = {}) {
+  assertTenantId(tenantId);
+  const FIELD = { jobsDays: 'retentionJobsDays', workflowsDays: 'retentionWorkflowsDays', memoryDays: 'retentionMemoryDays' };
+  const set = {};
+  const del = [];
+  for (const [k, field] of Object.entries(FIELD)) {
+    if (updates[k] === undefined) continue;
+    if (updates[k] === null) del.push(field); else set[field] = String(updates[k]);
+  }
+  if (updates.zeroRetention !== undefined) {
+    if (updates.zeroRetention) set.zeroRetention = '1'; else del.push('zeroRetention');
+  }
+  if (Object.keys(set).length) await redis.hset(TENANT_META_KEY(tenantId), set);
+  if (del.length) await redis.hdel(TENANT_META_KEY(tenantId), ...del);
+}
+
+/**
+ * Raw per-tenant retention overrides. null = no override (use platform default).
+ * @param {string} tenantId
+ * @returns {Promise<{ jobsDays: number|null, workflowsDays: number|null, memoryDays: number|null, zeroRetention: boolean }>}
+ */
+export async function getRetentionConfig(tenantId) {
+  assertTenantId(tenantId);
+  const [j, w, m, z] = await redis.hmget(
+    TENANT_META_KEY(tenantId),
+    'retentionJobsDays', 'retentionWorkflowsDays', 'retentionMemoryDays', 'zeroRetention',
+  );
+  const num = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+  return { jobsDays: num(j), workflowsDays: num(w), memoryDays: num(m), zeroRetention: z === '1' };
+}
+
+/**
  * Seed the registry from the AEGIS_TENANTS env var (and the default tenant)
  * at process start.  Called once during server / worker bootstrap.
  *

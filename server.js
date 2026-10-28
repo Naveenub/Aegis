@@ -70,7 +70,7 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId, setSpendConfig } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId, setSpendConfig, setRetentionConfig } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
@@ -87,6 +87,8 @@ import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
 import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
+import { getEffectivePolicy, parseRetentionUpdate, invalidatePolicy, defaultRetention, RETENTION_BOUNDS } from './engine/retention-policy.js';
+import { runRetentionSweep, purgeTenantContent } from './engine/retention.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import { signupTenant, getSignupConfig, logRunnerStartupStatus } from './engine/billing/signup.js';
@@ -126,6 +128,32 @@ const landingHtml = readLanding('index.html');
 const signupHtml  = readLanding('signup.html');
 const termsHtml   = readLanding('terms.html');
 const privacyHtml = readLanding('privacy.html');
+const dpaHtml     = readLanding('dpa.html');
+const securityHtml = readLanding('security.html');
+
+// Subprocessor list: one JSON file feeds both the HTML page and /subprocessors.json.
+const subprocessorData = (() => {
+  try {
+    return JSON.parse(readFileSync(join(__dirname, 'compliance', 'subprocessors.json'), 'utf-8'));
+  } catch (err) {
+    console.warn('[compliance] Could not read compliance/subprocessors.json:', err.message);
+    return null;
+  }
+})();
+const escHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const subprocessorsHtml = (() => {
+  const page = readLanding('subprocessors.html');
+  if (!page || !subprocessorData) return null;
+  const rows = subprocessorData.subprocessors.map((s) =>
+    `<tr><td><strong>${escHtml(s.name)}</strong><br><span class="tag">${s.use === 'optional' ? 'optional' : 'always'}</span></td>` +
+    `<td>${escHtml(s.purpose)}<br><em>Data:</em> ${escHtml(s.data)}<br><em>Provider retention:</em> ${escHtml(s.providerRetention)}</td>` +
+    `<td>${escHtml(s.location)}</td><td>${escHtml(s.usedWhen)}</td></tr>`).join('\n');
+  return page
+    .replace('{{SUBPROCESSOR_ROWS}}', () => rows)
+    .replace('{{SUBPROCESSORS_UPDATED}}', () => escHtml(subprocessorData.lastUpdated))
+    .replaceAll('{{SUBPROCESSORS_NOTICE}}', String(Number(subprocessorData.noticePeriodDays) || 30))
+    .replace('{{CUSTOMER_DIRECTED}}', () => escHtml(subprocessorData.customerDirectedIntegrations.items.join(', ')));
+})();
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app  = express();
@@ -886,6 +914,16 @@ app.get('/', (_req, res, next) => (landingHtml ? res.type('html').send(landingHt
 app.get('/get-started', (_req, res, next) => (signupHtml ? res.type('html').send(signupHtml) : next()));
 app.get('/terms', (_req, res, next) => (termsHtml ? res.type('html').send(termsHtml) : next()));
 app.get('/privacy', (_req, res, next) => (privacyHtml ? res.type('html').send(privacyHtml) : next()));
+app.get('/dpa', (_req, res, next) => (dpaHtml ? res.type('html').send(dpaHtml) : next()));
+app.get('/security', (_req, res, next) => (securityHtml ? res.type('html').send(securityHtml) : next()));
+app.get('/subprocessors', (_req, res, next) => (subprocessorsHtml ? res.type('html').send(subprocessorsHtml) : next()));
+app.get('/subprocessors.json', (_req, res) => {
+  if (!subprocessorData) return res.status(503).json({ error: 'Subprocessor list unavailable.' });
+  // operatorConfirm is an internal launch-checklist marker, not customer-facing.
+  const pub = { ...subprocessorData, subprocessors: subprocessorData.subprocessors.map(({ operatorConfirm: _o, ...s }) => s) };
+  delete pub._comment;
+  res.set('Cache-Control', 'public, max-age=3600').json(pub);
+});
 
 /**
  * POST /billing/portal
@@ -1070,6 +1108,96 @@ app.delete('/tenants/:id/byok', requireApiKey, async (req, res) => {
     await deleteByokKey(req.params.id);
     res.json({ byok: false });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Data retention, zero-retention mode, content deletion ───────────────────
+
+/**
+ * GET /tenants/:id/retention
+ * Effective retention policy: per-tenant overrides merged over platform
+ * defaults, plus the allowed range. The audit log is not configurable.
+ */
+app.get('/tenants/:id/retention', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try {
+    const p = await getEffectivePolicy(req.params.id);
+    res.json({
+      jobsDays: p.jobsDays, workflowsDays: p.workflowsDays, memoryDays: p.memoryDays,
+      zeroRetention: p.zeroRetention,
+      overrides: p.overrides,
+      defaults: defaultRetention(),
+      bounds: RETENTION_BOUNDS,
+      auditLog: 'retained for the life of the account; metadata only; not configurable',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /tenants/:id/retention
+ * Body: { jobsDays?, workflowsDays?, memoryDays?: int 1-365 | null (reset),
+ *         zeroRetention?: boolean }
+ * Enabling zeroRetention immediately purges existing vector memory and scrubs
+ * finished workflows for the tenant.
+ */
+app.put('/tenants/:id/retention', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  const { updates, error } = parseRetentionUpdate(req.body);
+  if (error) return res.status(400).json({ error });
+  try {
+    await setRetentionConfig(req.params.id, updates);
+    invalidatePolicy(req.params.id);
+    recordAuditEvent(req.params.id, {
+      actorId: req.resolvedKeyId ?? 'env-key',
+      action: 'retention.updated',
+      resourceType: 'tenant',
+      resourceId: req.params.id,
+      detail: updates,
+    }).catch((err) => console.error('[audit] retention.updated', err));
+
+    let sweep = null;
+    if (updates.zeroRetention === true) {
+      sweep = (await runRetentionSweep({ tenantIds: [req.params.id] })).tenants[req.params.id];
+    }
+    const p = await getEffectivePolicy(req.params.id);
+    res.json({
+      jobsDays: p.jobsDays, workflowsDays: p.workflowsDays, memoryDays: p.memoryDays,
+      zeroRetention: p.zeroRetention, overrides: p.overrides, ...(sweep ? { purged: sweep } : {}),
+    });
+  } catch (err) {
+    console.error('[PUT /tenants/:id/retention]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /tenants/:id/data-deletion
+ * Body: { confirm: "<tenantId>" }
+ * Deletes ALL finished-workflow, job and vector-memory content for the tenant.
+ * Running/paused workflows are skipped (cancel them first) and reported in
+ * skippedActive. The audit log, billing records and API keys are kept —
+ * closing the account is a separate request.
+ */
+app.post('/tenants/:id/data-deletion', requireApiKey, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  if (req.body?.confirm !== req.params.id) {
+    return res.status(400).json({ error: 'Body must include { "confirm": "<tenantId>" } to confirm deletion.' });
+  }
+  try {
+    const result = await purgeTenantContent(req.params.id);
+    await recordAuditEvent(req.params.id, {
+      actorId: req.resolvedKeyId ?? 'env-key',
+      action: 'data.deleted',
+      resourceType: 'tenant',
+      resourceId: req.params.id,
+      detail: result,
+    }).catch((err) => console.error('[audit] data.deleted', err));
+    res.json({ deleted: result });
+  } catch (err) {
+    console.error('[POST /tenants/:id/data-deletion]', err);
     res.status(500).json({ error: err.message });
   }
 });

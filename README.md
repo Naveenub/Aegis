@@ -220,6 +220,8 @@ Auth: `Authorization: Bearer <key>` or `x-api-key: <key>`. Keys resolve in this 
 | GET/POST/DELETE | `/tenants/:id/keys[/:keyId]` | Per-tenant API key management (key is returned once on creation) |
 | GET | `/tenants/:id/audit-log` | Query the compliance audit trail |
 | GET | `/tenants/:id/audit-log/export` | Export the audit trail (JSON or CSV) |
+| GET / PUT | `/tenants/:id/retention` | Data-retention policy and zero-retention mode ([docs](docs-site/docs/compliance.md)) |
+| POST | `/tenants/:id/data-deletion` | Delete the tenant's workflow, job and memory content |
 
 **Inbound webhooks** (authenticated by signature, not API key)
 

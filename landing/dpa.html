@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Data Processing Addendum — AEGIS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0E14; --surface:#12161F; --surface-2:#161B26; --border:#232937;
+    --text:#E4E7EC; --muted:#8890A0; --muted-2:#5C6274;
+    --amber:#F5A623; --green:#34D399; --red:#F87171; --blue:#5B8DEF;
+    --mono:'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans:'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased;}
+  a{color:inherit;}
+  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px;}
+  header{border-bottom:1px solid var(--border);}
+  .nav-inner{max-width:1120px;margin:0 auto;padding:16px 28px;display:flex;align-items:center;justify-content:space-between;}
+  .brand{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.02em;text-decoration:none;}
+  .brand-dot{width:9px;height:9px;border-radius:2px;background:var(--green);box-shadow:0 0 8px var(--green);}
+  .back{font-size:14px;color:var(--muted);text-decoration:none;}
+  .back:hover{color:var(--text);}
+  main{max-width:520px;margin:0 auto;padding:56px 28px 80px;}
+  h1{font-family:var(--mono);font-size:28px;margin:0 0 10px;letter-spacing:-.01em;}
+  .lede{color:var(--muted);margin:0 0 32px;}
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px 24px;margin-bottom:20px;}
+  label{display:block;font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;margin:0 0 6px;}
+  .field{margin-bottom:20px;}
+  .hint{font-size:12.5px;color:var(--muted-2);margin:6px 0 0;}
+  input,select{
+    width:100%;background:#0D1017;color:var(--text);border:1px solid var(--border);border-radius:7px;
+    padding:11px 13px;font-family:var(--sans);font-size:15px;
+  }
+  input:focus,select:focus{border-color:var(--muted-2);}
+  .btn{
+    font-family:var(--mono);font-size:14px;font-weight:700;width:100%;
+    padding:13px 22px;border-radius:7px;cursor:pointer;
+    background:var(--green);color:#08110D;border:1px solid var(--green);
+    transition:background .15s, opacity .15s;
+  }
+  .btn:hover:not(:disabled){background:#4ee5ac;}
+  .btn:disabled{opacity:.55;cursor:not-allowed;}
+  .btn-ghost{background:transparent;color:var(--text);border-color:var(--border);font-weight:500;width:auto;padding:8px 14px;font-size:13px;}
+  .btn-ghost:hover:not(:disabled){background:var(--surface-2);border-color:var(--muted-2);}
+  .msg{font-size:14px;border-radius:7px;padding:11px 13px;margin:0 0 18px;border:1px solid var(--border);}
+  .msg.error{color:var(--red);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.07);}
+  .msg.warn{color:var(--amber);border-color:rgba(245,166,35,.4);background:rgba(245,166,35,.07);}
+  .msg.ok{color:var(--green);border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.07);}
+  .keybox{display:flex;gap:10px;align-items:center;background:#0D1017;border:1px solid var(--border);border-radius:7px;padding:10px 12px;}
+  .keybox code{flex:1;font-family:var(--mono);font-size:13px;word-break:break-all;color:var(--amber);}
+  .steps{display:flex;gap:8px;font-family:var(--mono);font-size:12px;color:var(--muted-2);margin:0 0 24px;}
+  .steps span{padding:4px 10px;border:1px solid var(--border);border-radius:20px;}
+  .steps .on{color:var(--green);border-color:rgba(52,211,153,.5);}
+  .hidden{display:none !important;}
+  #payment-element{margin-bottom:20px;}
+  pre{background:#0D1017;border:1px solid var(--border);border-radius:7px;padding:14px;font-family:var(--mono);font-size:12.5px;overflow-x:auto;margin:12px 0 0;}
+
+  main{max-width:760px;}
+  h2{font-family:var(--mono);font-size:17px;margin:32px 0 8px;}
+  p,li{color:var(--muted);font-size:15px;}
+  main a{color:var(--blue);}
+
+  table{width:100%;border-collapse:collapse;margin:12px 0 4px;font-size:14px;}
+  th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--border);color:var(--muted);}
+  th{font-family:var(--mono);font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--text);font-weight:500;}
+  td strong{color:var(--text);font-weight:600;}
+  .tablewrap{overflow-x:auto;}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 7px;border:1px solid var(--border);border-radius:20px;color:var(--muted);}
+  .legal-nav{font-size:13px;color:var(--muted-2);margin-top:40px;padding-top:20px;border-top:1px solid var(--border);}
+  .legal-nav a{margin-right:14px;}
+  ol.clauses>li{margin:0 0 10px;}
+</style>
+</head>
+<body>
+<header>
+  <div class="nav-inner">
+    <a href="/" class="brand"><span class="brand-dot"></span>AEGIS</a>
+    <a href="/" class="back">← Home</a>
+  </div>
+</header>
+<main>
+<h1>Data Processing Addendum</h1>
+<p class="lede">Last updated: October 28, 2026. DRAFT — have counsel review before launch. This DPA forms part of the agreement between AEGIS (“Processor”) and the customer (“Controller”) for the AEGIS service. To receive a countersigned copy, email <a href="mailto:{{CONTACT_EMAIL}}">{{CONTACT_EMAIL}}</a>.</p>
+
+<h2>1. Scope and definitions</h2>
+<p>“Customer Personal Data” means personal data contained in Customer Content (task prompts, repository contents, agent outputs) that Processor processes on Controller’s behalf. “Data Protection Law” means the GDPR, the UK GDPR, the Swiss FADP and other applicable data-protection law. Terms not defined here have their meaning in Data Protection Law. This DPA applies only to Customer Personal Data; account and billing data is governed by the <a href="/privacy">Privacy Policy</a>, where AEGIS is controller.</p>
+
+<h2>2. Roles</h2>
+<p>Controller is the controller (or processor on behalf of its own customers) and Processor is the processor (or subprocessor) of Customer Personal Data.</p>
+
+<h2>3. Details of processing</h2>
+<p>Subject matter, duration, nature, purpose, data categories and data subjects are set out in Annex I.</p>
+
+<h2>4. Instructions</h2>
+<p>Processor will process Customer Personal Data only on Controller’s documented instructions: the agreement, this DPA, Controller’s use of the service and API (including retention and zero-retention settings), and any further written instructions Processor accepts. Processor will tell Controller if it believes an instruction infringes Data Protection Law.</p>
+
+<h2>5. Confidentiality</h2>
+<p>Processor ensures that personnel authorised to process Customer Personal Data are bound by confidentiality obligations.</p>
+
+<h2>6. Security</h2>
+<p>Processor implements and maintains the technical and organisational measures in Annex II, and may update them provided the overall level of protection is not reduced.</p>
+
+<h2>7. Subprocessors</h2>
+<ol class="clauses">
+<li>Controller gives general authorisation for the subprocessors on the <a href="/subprocessors">subprocessor list</a>.</li>
+<li>Processor will notify Controller by email at least 30 days before adding or replacing a subprocessor. Controller may object on reasonable data-protection grounds within that period; the parties will work in good faith to resolve it, and if they cannot, Controller may terminate the affected service and receive a pro-rata refund of prepaid fees.</li>
+<li>Processor imposes data-protection obligations on each subprocessor no less protective than this DPA and remains liable for their performance.</li>
+</ol>
+
+<h2>8. Data subject requests and deletion</h2>
+<p>Processor will, taking into account the nature of the processing, assist Controller to respond to requests from data subjects. Controller can delete workspace content itself with <code>POST /tenants/:id/data-deletion</code>, export the audit trail with <code>GET /tenants/:id/audit-log/export</code>, and configure retention with <code>PUT /tenants/:id/retention</code>. If Processor receives a request directly from a data subject concerning Customer Personal Data, it will refer the data subject to Controller and not respond except as legally required.</p>
+
+<h2>9. Personal data breach</h2>
+<p>Processor will notify Controller without undue delay, and within 72 hours, after becoming aware of a personal data breach affecting Customer Personal Data, with the information reasonably available to help Controller meet its own notification duties, and will take reasonable steps to contain and remediate it.</p>
+
+<h2>10. Return and deletion</h2>
+<p>On termination, Processor will delete Customer Personal Data from its production systems within 30 days of Controller’s request or of account closure, unless law requires longer retention. Records outside Customer Content (audit trail metadata, billing records) are kept as described in the Privacy Policy. Backups held by hosting providers are overwritten on their normal schedule.</p>
+
+<h2>11. Assistance and audits</h2>
+<p>Processor will provide information reasonably necessary to demonstrate compliance with this DPA and Article 28 GDPR, including independent audit reports when available, and reasonable assistance with data-protection impact assessments and prior consultations. Where this is not sufficient, Controller may audit Processor on reasonable notice, no more than once a year, subject to confidentiality and to avoiding disruption to other customers.</p>
+
+<h2>12. International transfers</h2>
+<p>Customer Personal Data may be processed in the United States and other locations where Processor and its subprocessors operate. For transfers from the EEA, the Standard Contractual Clauses (Commission Decision 2021/914) are incorporated: Module Two (controller to processor) or Module Three (processor to processor) as applicable, with Annex I and II of this DPA as their annexes, the optional docking clause omitted, Option 2 (general authorisation) in clause 9, Irish law and courts in clauses 17 and 18. For transfers from the UK, the UK International Data Transfer Addendum applies; for Switzerland, the SCCs apply with references to the GDPR read as references to the FADP.</p>
+
+<h2>13. Liability and precedence</h2>
+<p>Each party’s liability under this DPA is subject to the limitations in the agreement. If this DPA conflicts with the agreement on the processing of Customer Personal Data, this DPA prevails; if it conflicts with the SCCs, the SCCs prevail.</p>
+
+<h2>Annex I — Description of processing</h2>
+<div class="tablewrap"><table>
+<tbody>
+<tr><th>Subject matter</th><td>Running AI-agent workflows that read, modify and test the Controller’s code and return results.</td></tr>
+<tr><th>Duration</th><td>The term of the agreement, plus the retention period configured by Controller (defaults on the <a href="/privacy">Privacy Policy</a>).</td></tr>
+<tr><th>Nature and purpose</th><td>Storage, transmission to LLM providers, execution in isolated sandboxes, retrieval and deletion, solely to provide the service.</td></tr>
+<tr><th>Data subjects</th><td>Controller’s personnel and any individuals whose data appears in Controller’s repositories, prompts or outputs.</td></tr>
+<tr><th>Categories of personal data</th><td>Names, email addresses and similar identifiers that appear in code, commits, comments, prompts and outputs. Controller should not submit special-category data.</td></tr>
+<tr><th>Frequency</th><td>Continuous, as Controller submits tasks.</td></tr>
+<tr><th>Competent supervisory authority</th><td>As determined under SCC clause 13 for the Controller’s establishment.</td></tr>
+</tbody></table></div>
+
+<h2>Annex II — Technical and organisational measures</h2>
+<ul>
+<li><strong>Access control.</strong> Per-workspace API keys, stored only as SHA-256 hashes; every request is checked against the workspace it belongs to; keys can be revoked at any time.</li>
+<li><strong>Tenant isolation.</strong> All workflow, job, memory and audit data is keyed by workspace identifier and accessed only through workspace-scoped functions.</li>
+<li><strong>Encryption.</strong> Git-provider tokens and customer-supplied model keys are encrypted at rest with AES-256-GCM. Traffic is encrypted in transit with TLS terminated at the ingress or hosting provider; the hosting provider encrypts data at rest.</li>
+<li><strong>Execution isolation.</strong> Agent-generated code runs in containerised sandboxes; remote sandbox failures fail closed rather than falling back to the host.</li>
+<li><strong>Audit logging.</strong> Security-relevant actions (submissions, approvals, key changes, retention changes, deletions) are written to a tamper-evident, HMAC-signed hash chain that customers can export and verify.</li>
+<li><strong>Retention and deletion.</strong> Configurable retention enforced by a daily job; zero-retention mode; on-demand content deletion.</li>
+<li><strong>Abuse and availability controls.</strong> Rate limiting, per-workspace quotas and spend caps, monitoring and alerting.</li>
+<li><strong>Human oversight.</strong> Optional approval gate that holds generated patches for review before they are applied.</li>
+<li><strong>Subprocessor management.</strong> Published list, 30-day change notice, contractual flow-down.</li>
+<li><strong>Organisational.</strong> Confidentiality obligations for personnel; least-privilege access to production; incident response with 72-hour customer notification. A SOC 2 programme is in progress (<a href="/security">status</a>).</li>
+</ul>
+
+<p class="legal-nav"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/dpa">DPA</a><a href="/subprocessors">Subprocessors</a><a href="/security">Security</a></p>
+</main>
+</body>
+</html>

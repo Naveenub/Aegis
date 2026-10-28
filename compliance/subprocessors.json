@@ -1,0 +1,69 @@
+{
+  "_comment": "Single source of truth for the subprocessor list. Rendered at /subprocessors and served as JSON at /subprocessors.json. Update lastUpdated and give customers 30 days' notice (DPA section 6) BEFORE adding or replacing an entry. Fields marked operatorConfirm must be verified against your real contracts/deployment before launch.",
+  "lastUpdated": "2026-10-28",
+  "noticePeriodDays": 30,
+  "subprocessors": [
+    {
+      "id": "anthropic",
+      "name": "Anthropic, PBC",
+      "purpose": "LLM inference: generates plans, code patches and reviews for each workflow step.",
+      "data": "Task prompts, relevant repository file contents and excerpts, prior error/test output, agent outputs.",
+      "location": "United States",
+      "use": "always",
+      "usedWhen": "Every workflow step, unless the tenant brings its own Anthropic key (enterprise BYOK), in which case Anthropic acts under the tenant's own agreement.",
+      "providerRetention": "Governed by Aegis's commercial agreement with Anthropic. Aegis zero-retention mode controls what Aegis stores, not what Anthropic retains.",
+      "operatorConfirm": ["providerRetention"],
+      "url": "https://www.anthropic.com/legal"
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI, L.L.C.",
+      "purpose": "Text embeddings (text-embedding-3-small) for vector memory, so agents can recall similar past fixes.",
+      "data": "Step descriptions and search queries derived from tasks. Not sent for tenants in zero-retention mode.",
+      "location": "United States",
+      "use": "optional",
+      "usedWhen": "Only when vector memory is enabled (OPENAI_API_KEY configured) and the tenant is not in zero-retention mode.",
+      "providerRetention": "Governed by Aegis's API agreement with OpenAI.",
+      "operatorConfirm": ["providerRetention"],
+      "url": "https://openai.com/policies"
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe, Inc.",
+      "purpose": "Payment processing, subscriptions and metered-usage billing.",
+      "data": "Account email, billing contact, payment details (entered directly with Stripe, never stored by Aegis), usage counts (runs, steps, tokens, sandbox minutes). No task or code content.",
+      "location": "United States and other Stripe regions",
+      "use": "always",
+      "usedWhen": "Self-serve and invoiced billing.",
+      "providerRetention": "Per Stripe's financial-record retention obligations.",
+      "url": "https://stripe.com/legal"
+    },
+    {
+      "id": "hosting",
+      "name": "Render Services, Inc.",
+      "purpose": "Application hosting, Redis (workflow, job, trace and memory state) and Postgres (usage log).",
+      "data": "All content processed by the service, at rest, encrypted by the hosting provider.",
+      "location": "Region selected at deployment (not pinned in the default render.yaml).",
+      "use": "always",
+      "usedWhen": "Hosted Aegis service. Self-hosted customers run their own infrastructure and this entry does not apply.",
+      "providerRetention": "Data is deleted from Aegis stores per the retention policy; provider backups follow the provider's schedule.",
+      "operatorConfirm": ["location", "providerRetention"],
+      "url": "https://render.com/privacy"
+    },
+    {
+      "id": "aws-sqs",
+      "name": "Amazon Web Services, Inc. (SQS)",
+      "purpose": "Optional job-queue backend.",
+      "data": "Queued step payloads (step description and ids) in transit between server and workers.",
+      "location": "AWS region configured by AWS_REGION",
+      "use": "optional",
+      "usedWhen": "Only when QUEUE_BACKEND=sqs. The default queue backend is Redis.",
+      "providerRetention": "Messages are deleted on processing; SQS maximum retention applies to undelivered messages.",
+      "url": "https://aws.amazon.com/compliance/"
+    }
+  ],
+  "customerDirectedIntegrations": {
+    "_comment": "Not subprocessors: the customer connects their own account and directs Aegis to read/write their repositories.",
+    "items": ["GitHub", "GitLab", "Bitbucket"]
+  }
+}

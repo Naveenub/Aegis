@@ -40,6 +40,7 @@
     "billing:flush": "node scripts/billing-flush.js",
     "billing:migrate-tokens": "node scripts/migrate-token-split.js",
     "billing:cleanup": "node scripts/cleanup-pending.js",
+    "retention:sweep": "node scripts/retention-sweep.js",
     "onboard": "node scripts/onboard-design-partner.js",
     "check": "npm run lint && npm run test:coverage",
     "test:coverage": "vitest run --coverage",

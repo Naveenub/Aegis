@@ -64,6 +64,16 @@
   h2{font-family:var(--mono);font-size:17px;margin:32px 0 8px;}
   p,li{color:var(--muted);font-size:15px;}
   main a{color:var(--blue);}
+
+  table{width:100%;border-collapse:collapse;margin:12px 0 4px;font-size:14px;}
+  th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--border);color:var(--muted);}
+  th{font-family:var(--mono);font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--text);font-weight:500;}
+  td strong{color:var(--text);font-weight:600;}
+  .tablewrap{overflow-x:auto;}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 7px;border:1px solid var(--border);border-radius:20px;color:var(--muted);}
+  .legal-nav{font-size:13px;color:var(--muted-2);margin-top:40px;padding-top:20px;border-top:1px solid var(--border);}
+  .legal-nav a{margin-right:14px;}
+  ol.clauses>li{margin:0 0 10px;}
 </style>
 </head>
 <body>
@@ -75,26 +85,49 @@
 </header>
 <main>
 <h1>Privacy Policy</h1>
-<p class="lede">Last updated: October 26, 2026. DRAFT — have counsel review before launch.</p>
+<p class="lede">Last updated: October 28, 2026. DRAFT — have counsel review before launch.</p>
+
+<h2>Who is responsible for your data</h2>
+<p>For account and billing data, AEGIS is the controller. For the task prompts, repository contents and outputs you submit to run workflows (“Customer Content”), AEGIS is your processor and acts only on your instructions, as set out in our <a href="/dpa">Data Processing Addendum</a>.</p>
 
 <h2>What we collect</h2>
 <p>Account data (work email, workspace ID), the API key hash, billing identifiers from Stripe, and usage counts (workflow runs, agent steps, tokens, sandbox minutes). We do not store card numbers; Stripe handles payment details.</p>
 
 <h2>Content you submit</h2>
-<p>Task prompts, repository contents and agent outputs are processed to run your workflows. To generate plans and code, relevant content is sent to our AI model provider (Anthropic) and, if vector memory is enabled, to our embeddings provider. Execution logs and an audit trail are retained for your workspace.</p>
+<p>Task prompts, repository contents and agent outputs are processed to run your workflows. To generate plans and code, relevant content is sent to our AI model provider (Anthropic) and, if vector memory is enabled for your workspace, step descriptions and search queries are sent to our embeddings provider (OpenAI). Execution state, logs and a compliance audit trail are retained for your workspace as described below. The audit trail records who did what and when; for task submissions it includes the first 500 characters of the task text unless zero-retention mode is on.</p>
 
 <h2>How we use it</h2>
-<p>To operate and secure the service, meter and bill usage, prevent abuse, and communicate with you about your account. We do not sell personal data.</p>
+<p>To operate and secure the service, meter and bill usage, prevent abuse, and communicate with you about your account. We do not sell personal data and we do not use Customer Content to train models.</p>
 
-<h2>Processors</h2>
-<p>Stripe (payments), Anthropic (AI models), and our hosting and database providers act as processors on our behalf.</p>
+<h2>Subprocessors</h2>
+<p>We use the third parties listed on our <a href="/subprocessors">subprocessor page</a> (also available as <a href="/subprocessors.json">JSON</a>), including Anthropic, OpenAI (optional, for vector memory), Stripe and our hosting provider. We give customers 30 days’ notice before adding or replacing one.</p>
 
 <h2>Retention and deletion</h2>
-<p>We keep workspace data while your account is active. Unpaid signups are deleted automatically after 48 hours. To request access or deletion of your data, contact us below.</p>
+<p>You control how long Customer Content is kept. The table shows the defaults and the range you can set per workspace through the API (<code>PUT /tenants/:id/retention</code>). A daily job enforces the policy.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Data</th><th>Default</th><th>You can set</th></tr></thead>
+<tbody>
+<tr><td><strong>Job records</strong> (status, timing; no task text)</td><td>90 days</td><td>1–365 days</td></tr>
+<tr><td><strong>Workflow records, traces, review items</strong> (task descriptions, patches, test output) — deleted once finished and older than the limit</td><td>90 days after completion</td><td>1–365 days</td></tr>
+<tr><td><strong>Vector memory</strong> (past tasks and patches used to help future runs)</td><td>30 days</td><td>1–365 days, or off entirely with zero-retention mode</td></tr>
+<tr><td><strong>Audit log</strong> (actor, action, resource IDs; tamper-evident)</td><td>Life of the account</td><td>Not configurable — pruning would break its integrity chain</td></tr>
+<tr><td><strong>Account and billing records</strong></td><td>Life of the account, then as tax and accounting law require</td><td>—</td></tr>
+<tr><td><strong>Unpaid signups</strong></td><td>Deleted after 48 hours</td><td>—</td></tr>
+</tbody></table></div>
+<p>Backups held by our hosting provider age out on the provider’s schedule. Your own Git repositories are yours; we do not delete commits we pushed there on your behalf.</p>
+<p><strong>Zero-retention mode.</strong> When enabled for a workspace, we do not keep Customer Content after a workflow ends: vector memory is turned off (so nothing is sent to the embeddings provider) and existing memory is purged, job and audit entries drop free-text content, and task descriptions, patches, test output and review records are removed when the workflow finishes. While a workflow is running its content is held so it can execute and retry. Zero-retention mode controls what <em>we</em> store; what our AI provider retains is governed by our agreement with that provider, listed on the subprocessor page.</p>
+<p><strong>Your rights.</strong> You can request access, correction, export or deletion of your data. Workspace content can be deleted on request through the API (<code>POST /tenants/:id/data-deletion</code>) or by contacting us; the audit trail export is available at <code>GET /tenants/:id/audit-log/export</code>. Depending on where you live, you may also have rights to object to or restrict processing and to lodge a complaint with your data-protection authority.</p>
+
+<h2>International transfers</h2>
+<p>Our providers are primarily in the United States. Where personal data is transferred from the EEA, UK or Switzerland, the <a href="/dpa">DPA</a> incorporates the Standard Contractual Clauses.</p>
+
+<h2>Security and certifications</h2>
+<p>See our <a href="/security">security page</a> for the controls in place today and our SOC 2 status. We are not yet SOC 2 certified.</p>
 
 <h2>Contact</h2>
 <p><a href="mailto:{{CONTACT_EMAIL}}">{{CONTACT_EMAIL}}</a></p>
 
+<p class="legal-nav"><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/dpa">DPA</a><a href="/subprocessors">Subprocessors</a><a href="/security">Security</a></p>
 </main>
 </body>
 </html>

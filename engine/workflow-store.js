@@ -2,6 +2,7 @@ import IORedis from 'ioredis';
 import { clearSlots } from './concurrency.js';
 
 import { trackWorkflowEnd } from './tenant-quota.js';
+import { scrubIfZeroRetention } from './workflow-purge.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect:          true,
@@ -223,6 +224,9 @@ export async function failWorkflow(workflowId, reason) {
     await trackWorkflowEnd(meta.tenantId).catch(() => {});
   }
 
+  // Zero-retention tenants: strip customer content now that the workflow is done.
+  await scrubIfZeroRetention(workflowId, meta.tenantId);
+
   publishWorkflowEvent(workflowId, 'failed');
 }
 
@@ -250,6 +254,9 @@ export async function completeWorkflow(workflowId) {
   if (meta.tenantId) {
     await trackWorkflowEnd(meta.tenantId).catch(() => {});
   }
+
+  // Zero-retention tenants: strip customer content now that the workflow is done.
+  await scrubIfZeroRetention(workflowId, meta.tenantId);
 
   publishWorkflowEvent(workflowId, 'completed');
 }
@@ -317,6 +324,9 @@ export async function cancelWorkflow(workflowId, reason = 'user request', tenant
   if (meta.tenantId) {
     await trackWorkflowEnd(meta.tenantId).catch(() => {});
   }
+
+  // Zero-retention tenants: strip customer content now that the workflow is done.
+  await scrubIfZeroRetention(workflowId, meta.tenantId);
 
   publishWorkflowEvent(workflowId, 'cancelled');
 

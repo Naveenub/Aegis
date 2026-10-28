@@ -1,3 +1,4 @@
+import { getPolicyOrDefault, isZeroRetention } from './retention-policy.js';
 import IORedis    from 'ioredis';
 import path       from 'path';
 
@@ -48,8 +49,7 @@ const VECTOR_DIM = 1536;
 /** Directory where per-tenant HNSW index files are persisted. */
 const HNSW_INDEX_DIR = process.env.AEGIS_HNSW_DIR ?? '.aegis-hnsw';
 
-const MEMORY_TTL_MS = parseInt(process.env.AEGIS_MEMORY_TTL_DAYS ?? '30') * 24 * 60 * 60 * 1000;
-const REDIS_EXPIRE_S = Math.ceil(MEMORY_TTL_MS / 1000 * 1.1);
+// Memory retention is per-tenant (retention-policy.js; platform default AEGIS_MEMORY_TTL_DAYS).
 const EVICTION_INTERVAL_MS =
   parseFloat(process.env.AEGIS_EVICTION_INTERVAL_HOURS ?? '1') * 60 * 60 * 1000;
 const OVERFETCH_FACTOR = Math.max(1, parseInt(process.env.AEGIS_MEMORY_OVERFETCH ?? '3'));
@@ -680,6 +680,13 @@ export async function logVectorCapabilityWarnings() {
 export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
 
+  // Zero-retention: persist nothing, and do not send the text to the
+  // embeddings provider either.
+  if (await isZeroRetention(tenantId)) return;
+
+  const memoryMs = (await getPolicyOrDefault(tenantId)).memoryDays * 24 * 60 * 60 * 1000;
+  const expireS  = Math.ceil(memoryMs / 1000 * 1.1);
+
   const vector = await embed(text);
   if (!vector) {
     // Silently dropping a write means the memory system accepts calls but stores
@@ -711,11 +718,11 @@ export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
     docLen:   String(docLen),
     vector:   Buffer.from(new Float32Array(vector).buffer),
   });
-  pipeline.expire(id, REDIS_EXPIRE_S);
+  pipeline.expire(id, expireS);
   pipeline.zadd(ageIndexKey(tenantId), storedAt, id);
   pipeline.expireat(
     ageIndexKey(tenantId),
-    Math.ceil((storedAt + REDIS_EXPIRE_S * 1000) / 1000)
+    Math.ceil((storedAt + expireS * 1000) / 1000)
   );
 
   await pipeline.exec();
@@ -733,10 +740,18 @@ export async function storeMemory(text, patch, tenantId = DEFAULT_TENANT) {
 
 // ─── Eviction ─────────────────────────────────────────────────────────────────
 
-export async function evictExpiredMemory(tenantId = DEFAULT_TENANT) {
+/**
+ * Evict entries older than the tenant's memory-retention policy (or an
+ * explicit ttlMs; pass 0 to purge everything).
+ */
+export async function evictExpiredMemory(tenantId = DEFAULT_TENANT, ttlMs) {
   assertTenantId(tenantId);
 
-  const cutoff = Date.now() - MEMORY_TTL_MS;
+  if (ttlMs === undefined) {
+    const policy = await getPolicyOrDefault(tenantId);
+    ttlMs = policy.zeroRetention ? 0 : policy.memoryDays * 24 * 60 * 60 * 1000;
+  }
+  const cutoff = Date.now() - ttlMs;
   const ageKey = ageIndexKey(tenantId);
 
   const expired = await redis.zrangebyscore(ageKey, '-inf', cutoff);
@@ -826,6 +841,10 @@ async function _rerank(candidates, queryTerms, tenantId, topK) {
 
 export async function searchMemory(query, topK = 3, tenantId = DEFAULT_TENANT) {
   assertTenantId(tenantId);
+
+  // Zero-retention: no memory is kept, so there is nothing to search and the
+  // query text is not sent to the embeddings provider.
+  if (await isZeroRetention(tenantId)) return [];
 
   const queryVec = await embed(query);
   if (!queryVec) return [];

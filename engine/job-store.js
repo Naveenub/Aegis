@@ -28,6 +28,10 @@
 import IORedis from 'ioredis';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 import { assertJobQuota, trackJobQueued, trackJobDone } from './tenant-quota.js';
+import { isZeroRetention, REDACTED } from './retention-policy.js';
+
+// Result strings that are fixed status phrases, not derived from customer content.
+const SAFE_RESULTS = new Set(['success', 'No patch generated', 'AI review rejected', 'skipped (already applied)']);
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect:          true,
@@ -106,6 +110,12 @@ export async function updateJob(jobId, updates, tenantId = DEFAULT_TENANT) {
     fields[k] = v == null ? '' : String(v);
   }
   fields.updatedAt = Date.now().toString();
+
+  // Zero-retention: `result` can carry test output / error text derived from
+  // the customer's code. Keep only fixed status phrases.
+  if (fields.result && !SAFE_RESULTS.has(fields.result) && await isZeroRetention(tenantId)) {
+    fields.result = REDACTED;
+  }
 
   await redis.hset(jobKey(tenantId, jobId), fields);
 

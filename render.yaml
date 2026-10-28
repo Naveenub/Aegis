@@ -166,3 +166,19 @@ services:
           property: connectionString
       - key: STRIPE_SECRET_KEY
         sync: false
+
+  # Enforces per-tenant data-retention policy (engine/retention.js).
+  - type: cron
+    name: aegis-retention-sweep
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: >-
+      sh -c "export REDIS_URL=redis://$REDIS_HOSTPORT; npm run retention:sweep"
+    plan: starter
+    schedule: "30 3 * * *" # daily 03:30 UTC
+    envVars:
+      - key: REDIS_HOSTPORT
+        fromService:
+          name: aegis-redis
+          type: pserv
+          property: hostport
