@@ -294,6 +294,7 @@ const DEFAULT_PRICING_USD_PER_MTOK = {
 
 const PRICING_USD_PER_MTOK = {
   'claude-sonnet-4-20250514': DEFAULT_PRICING_USD_PER_MTOK,
+  'claude-haiku-4-5-20251001': { input: 1, output: 5 },
 };
 
 /** USD cost of a call. Shared by recordAgentCost() and billing/spend-guard.js. */

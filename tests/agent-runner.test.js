@@ -41,8 +41,10 @@ vi.mock('../engine/usage-recorder.js', () => ({
   recordUsageEvent: mockRecordUsage,
 }));
 
+const mockReserve = vi.hoisted(() => vi.fn());
+
 vi.mock('../engine/billing/spend-guard.js', () => ({
-  reserveSpend:       vi.fn(async () => ({ id: 'r1' })),
+  reserveSpend:       mockReserve,
   settleSpend:        vi.fn(async () => {}),
   releaseSpend:       vi.fn(async () => {}),
   assertTenantActive: vi.fn(async () => {}),
@@ -112,6 +114,10 @@ beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = 'sk-test-dummy';
 
   vi.clearAllMocks();
+  mockReserve.mockReset().mockResolvedValue({ id: 'r1' });
+  delete process.env.AEGIS_MODEL;
+  delete process.env.AEGIS_MODEL_BUILD;
+  delete process.env.AEGIS_MODEL_CHEAP;
   // Default: API returns a generic text response
   mockCreate.mockResolvedValue(fakeResponse('Some response text'));
 });
@@ -311,5 +317,60 @@ describe('runAgent() — tenant validation', () => {
     // Use null instead — it is not a string, so assertTenantId() rejects it, which
     // is the intent of this test (ensure non-string tenant values are rejected).
     await expect(runAgent('planner', 'task', {}, null)).rejects.toThrow();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tier routing + cost-cap fallback
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('runAgent() — tier routing', () => {
+  it.each(['planner', 'review-guard'])('routes %s to the cheap model', async (agent) => {
+    await runAgent(agent, 'task', {}, 'default');
+    expect(mockCreate.mock.calls[0][0].model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it.each(['feature-builder', 'debugger', 'test-writer'])('routes %s to the build model', async (agent) => {
+    await runAgent(agent, 'task', {}, 'default');
+    expect(mockCreate.mock.calls[0][0].model).toBe('claude-sonnet-4-20250514');
+  });
+
+  it('AEGIS_MODEL overrides the build tier only', async () => {
+    process.env.AEGIS_MODEL = 'custom-build';
+    await runAgent('debugger', 'task', {}, 'default');
+    await runAgent('planner', 'task', {}, 'default');
+    expect(mockCreate.mock.calls[0][0].model).toBe('custom-build');
+    expect(mockCreate.mock.calls[1][0].model).toBe('claude-haiku-4-5-20251001');
+  });
+});
+
+describe('runAgent() — cost-cap fallback', () => {
+  const capErr = (code) => Object.assign(new Error('cap'), { name: 'SpendGuardError', code });
+
+  it('re-reserves on the cheap model when the build model hits the cap', async () => {
+    mockReserve.mockRejectedValueOnce(capErr('SPEND_CAP_REACHED'));
+    await runAgent('debugger', 'task', {}, 'default');
+    expect(mockReserve.mock.calls.map(([a]) => a.model)).toEqual([
+      'claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001',
+    ]);
+    expect(mockCreate.mock.calls[0][0].model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('propagates when the cheap model is also refused', async () => {
+    mockReserve.mockRejectedValue(capErr('CREDITS_EXHAUSTED'));
+    await expect(runAgent('debugger', 'task', {}, 'default')).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' });
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(['TENANT_INACTIVE', 'GUARD_UNAVAILABLE'])('does not fall back on %s', async (code) => {
+    mockReserve.mockRejectedValueOnce(capErr(code));
+    await expect(runAgent('debugger', 'task', {}, 'default')).rejects.toMatchObject({ code });
+    expect(mockReserve).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a cheap-tier agent that hit the cap', async () => {
+    mockReserve.mockRejectedValueOnce(capErr('SPEND_CAP_REACHED'));
+    await expect(runAgent('planner', 'task', {}, 'default')).rejects.toMatchObject({ code: 'SPEND_CAP_REACHED' });
+    expect(mockReserve).toHaveBeenCalledTimes(1);
   });
 });

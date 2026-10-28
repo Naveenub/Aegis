@@ -33,6 +33,19 @@ const PATCH_AGENTS = new Set([
   'security-editor',
 ]);
 
+// Tier routing: planner and review-guard are short, structured, cheap calls;
+// everything else (patch agents, test-writer) is the build tier.
+// AEGIS_MODEL stays as the build-tier override for backwards compatibility.
+const CHEAP_AGENTS = new Set(['planner', 'review-guard']);
+const cheapModel = () => process.env.AEGIS_MODEL_CHEAP || 'claude-haiku-4-5-20251001';
+const buildModel = () =>
+  process.env.AEGIS_MODEL_BUILD || process.env.AEGIS_MODEL || 'claude-sonnet-4-20250514';
+const modelFor = (agent) => (CHEAP_AGENTS.has(agent) ? cheapModel() : buildModel());
+
+// Spend-guard codes where a cheaper model may still fit under the cap.
+// TENANT_INACTIVE / GUARD_UNAVAILABLE must NOT fall back — a cheaper call is still refused.
+const CAP_CODES = new Set(['SPEND_CAP_REACHED', 'CREDITS_EXHAUSTED']);
+
 // How many bytes of each file to inline (keeps prompt manageable)
 const FILE_INLINE_LIMIT = 8_000;
 
@@ -216,10 +229,10 @@ export async function runAgent(
     .join('\n\n');
 
   // ── 5. Call the API ──────────────────────────────────────────────────────
-  // Override with AEGIS_MODEL. Add the model to PRICING_USD_PER_MTOK in metrics.js
-  // (or set AEGIS_COST_INPUT_PER_MTOK / AEGIS_COST_OUTPUT_PER_MTOK) so cost and
-  // the stripe-setup margin guard stay accurate.
-  const model = process.env.AEGIS_MODEL || 'claude-sonnet-4-20250514';
+  // Override with AEGIS_MODEL_BUILD (alias AEGIS_MODEL) / AEGIS_MODEL_CHEAP. Add any
+  // new model to PRICING_USD_PER_MTOK in metrics.js (unlisted models are priced at
+  // the Sonnet default, which over-reserves) so cost and the margin guard stay accurate.
+  let model = modelFor(agent);
   const maxTokens = 8192;
 
   // Enterprise BYOK: tenant's own key, billed by Anthropic. No platform cap, no
@@ -233,7 +246,18 @@ export async function runAgent(
   if (byokClient) {
     await assertTenantActive(tenantId);
   } else {
-    reservation = await reserveSpend({ tenantId, model, inputChars, maxOutputTokens: maxTokens });
+    const reserve = (m) => reserveSpend({ tenantId, model: m, inputChars, maxOutputTokens: maxTokens });
+    try {
+      reservation = await reserve(model);
+    } catch (err) {
+      // Cost-cap fallback: worst-case reserve is priced per model, so the cheap
+      // model can fit where the build model cannot. Still capped; a second
+      // refusal propagates as-is.
+      if (!CAP_CODES.has(err?.code) || model === cheapModel()) throw err;
+      console.warn(`[agent-runner] ${err.code} for "${tenantId}" on ${model}; falling back to ${cheapModel()}`);
+      model = cheapModel();
+      reservation = await reserve(model);
+    }
   }
 
   let response;
