@@ -28,6 +28,19 @@ const BLOCKED_PATTERNS = [
   /^config\.json$/,          // docker/kube config
 ];
 
+// Control-plane paths a prompt-injected patch could abuse to gain execution or
+// weaken the gate (CI workflows, git hooks, agent personas). Matched against the
+// path relative to the worktree root, case-insensitively.
+const PROTECTED_PATHS = [
+  /^\.git(\/|$)/,
+  /^\.github(\/|$)/,
+  /^\.claude(\/|$)/,
+  /^\.circleci(\/|$)/,
+  /^\.gitlab-ci\.ya?ml$/,
+  /^jenkinsfile$/,
+  /^\.gitattributes$/,
+];
+
 /**
  * Validate that a resolved absolute path is safe to write.
  * @param {string} resolved  - Absolute path that will be written.
@@ -38,6 +51,13 @@ export function validateTargetPath(resolved, root = PROJECT_ROOT) {
   // 1. Must stay inside the allowed root (path traversal guard).
   if (!resolved.startsWith(root + path.sep)) {
     return `Path traversal blocked: ${resolved}`;
+  }
+
+  // 1b. Control-plane paths (CI, git internals, agent personas) are off limits.
+  const relPath = path.relative(root, resolved).split(path.sep).join('/').toLowerCase();
+  const protectedHit = PROTECTED_PATHS.find(re => re.test(relPath));
+  if (protectedHit) {
+    return `Protected path blocked: ${relPath}`;
   }
 
   // 2. Basename must not match any blocked name (exact or containing).

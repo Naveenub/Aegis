@@ -8,6 +8,8 @@ import { recordAgentCost } from './metrics.js';
 import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 import { reserveSpend, settleSpend, releaseSpend, assertTenantActive } from './billing/spend-guard.js';
 import { getByokClient } from './billing/byok.js';
+import { fenceUntrusted, UNTRUSTED_CONTENT_POLICY } from './prompt-guard.js';
+import { logger } from './logger.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -87,7 +89,7 @@ function readFileSafe(filePath) {
  *                                   Defaults to process.cwd().
  * @returns {Promise<{ repoMap: string, inlined: string }>}
  */
-async function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
+async function buildRepoContext(relevantFiles = [], cwd = process.cwd(), onFinding) {
   // Use analyzeRepo (AST-level) instead of the old scanRepo (filename-only).
   // This gives agents the symbol table, import graph, call graph, and
   // dependency map — not just a flat list of filenames.
@@ -100,7 +102,9 @@ async function buildRepoContext(relevantFiles = [], cwd = process.cwd()) {
       const abs = path.isAbsolute(f) ? f : path.join(cwd, f);
       const content = readFileSafe(abs);
       if (!content) return null;
-      return `### ${path.relative(cwd, abs)}\n\`\`\`\n${content}\n\`\`\``;
+      const rel = path.relative(cwd, abs);
+      // No heading line: file names are repo-controlled; the fence carries a sanitised label.
+      return fenceUntrusted(`file:${rel}`, content, { onFinding });
     })
     .filter(Boolean)
     .join('\n\n');
@@ -146,7 +150,11 @@ export async function runAgent(
   // Previously buildRepoContext was called twice (once for .repoMap, once for
   // .inlined), triggering two full synchronous directory walks per runAgent
   // call. Now we do one async walk and destructure both fields from it.
-  const { repoMap, inlined } = await buildRepoContext(context.files ?? [], cwd);
+  // Findings are advisory (the content is still fenced); log them so operators
+  // can see repos that carry injection attempts.
+  const onFinding = (f) =>
+    logger.warn({ tenantId, agent, ...f }, 'possible prompt injection in untrusted content');
+  const { repoMap, inlined } = await buildRepoContext(context.files ?? [], cwd, onFinding);
 
   // ── 3. Build system prompt ───────────────────────────────────────────────
   const systemPrompt = [
@@ -191,10 +199,7 @@ export async function runAgent(
       ? 'Output the complete test file content only. Include all imports.'
       : 'Be concise. Use markdown only for code blocks.',
     '',
-    '## Repository layout',
-    '```',
-    repoMap,
-    '```',
+    UNTRUSTED_CONTENT_POLICY,
   ].join('\n');
 
   // ── 4. Build user message ────────────────────────────────────────────────
@@ -205,7 +210,7 @@ export async function runAgent(
           '## Relevant past fixes (verify before reusing)',
           ...memory.map(
             (m, i) =>
-              `### Past fix ${i + 1}\n${m.text}\n\nPatch applied:\n\`\`\`json\n${m.patch}\n\`\`\``
+              `### Past fix ${i + 1}\n${fenceUntrusted(`memory:${i + 1}`, `${m.text}\n\nPatch applied:\n${m.patch}`, { onFinding })}`
           ),
         ].join('\n\n')
       : '';
@@ -215,16 +220,21 @@ export async function runAgent(
     : '';
 
   const errorSection = context.error
-    ? `## Previous error output\n\`\`\`\n${context.error}\n\`\`\``
+    ? `## Previous error output\n${fenceUntrusted('command-output', context.error, { onFinding })}`
     : '';
 
   const previousPatchSection = context.patch
-    ? `## Previous patch attempt\n\`\`\`json\n${context.patch}\n\`\`\``
+    ? `## Previous patch attempt\n${fenceUntrusted('previous-patch', context.patch, { onFinding })}`
     : '';
+
+  // Repo layout (file/symbol names are repo-controlled) lives here, fenced, so the
+  // system prompt stays operator-authored only.
+  const layoutSection = `## Repository layout\n${fenceUntrusted('repo-layout', repoMap, { onFinding })}`;
 
   const userMessage = [
     '## Task',
     task.trim(),
+    layoutSection,
     errorSection,
     previousPatchSection,
     inlinedSection,
