@@ -31,6 +31,11 @@ import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
  *              → throw at call-time so the step fails safely rather than
  *                running unsandboxed code on the host silently.
  *
+ * Languages: the image, mounts, env and limits for a run come from the caller
+ * (see engine/toolchains.js — node, python, go, java). A run only needs the
+ * host's node_modules when its toolchain says so (ESLint/Vitest are Aegis's own
+ * binaries); Python/Go/Java runs do not.
+ *
  * Migration: set AEGIS_SANDBOX_MODE=local in your .env (preferred) or
  * AEGIS_SANDBOX_DISABLE=true (legacy) for local dev without Docker.
  * CI pipelines are detected automatically via the CI environment variable.
@@ -40,25 +45,17 @@ import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
  *   AEGIS_SANDBOX_DISABLE     'true' legacy alias for AEGIS_SANDBOX_MODE=local
  *   CI                        'true' auto-set by most CI platforms — enables
  *                             unsandboxed fallback automatically in pipelines
- *   AEGIS_SANDBOX_IMAGE       Docker image to use (default: node:22-alpine)
- *   AEGIS_SANDBOX_MEMORY      Memory limit (default: 512m)
+ *   AEGIS_SANDBOX_IMAGE       Docker image for the node toolchain (default: node:22-alpine)
+ *                             (other languages: AEGIS_SANDBOX_IMAGE_PYTHON / _GO / _MAVEN / _GRADLE)
+ *   AEGIS_SANDBOX_MEMORY      Memory limit (default: 512m; Go/Java default to 1g unless set)
  *   AEGIS_SANDBOX_CPUS        CPU limit (default: 1)
- *   AEGIS_SANDBOX_PIDS        Max processes per container (default: 256)
- *   AEGIS_SANDBOX_TIMEOUT_MS  Wall-clock timeout ms (default: 60000)
- *   AEGIS_SANDBOX_TRANSPORT   'stream' | 'bind'. Default: 'stream' when DOCKER_HOST
- *                             is set, else 'bind'. 'bind' mounts host paths and only
- *                             works when the daemon shares this host's filesystem.
- *                             'stream' tars the worktree to the container's stdin, so
- *                             it works against a remote or sidecar daemon (the
- *                             isolated-runner topology). With 'stream' the image must
- *                             carry eslint/vitest at <projectRoot>/node_modules
- *                             (see Dockerfile.sandbox).
- *   AEGIS_SANDBOX_WORKTREE_SIZE  tmpfs size for the streamed worktree (default: 256m)
+ *   AEGIS_SANDBOX_TIMEOUT_MS  Wall-clock timeout ms (default: 60000; Java defaults to 180000 unless set)
  *
  * Security properties of each sandboxed run:
  *   - Network is completely disabled (--network none).
  *   - The rootfs is read-only; only the worktree is bind-mounted rw.
- *   - node_modules from the host is bind-mounted read-only — no writes.
+ *   - node_modules from the host is bind-mounted read-only for toolchains that
+ *     need it (node); an optional dependency cache is mounted read-only too.
  *   - Max 512 MB RAM, 1 CPU, 60-second wall-clock timeout.
  *   - All Linux capabilities dropped; no new privileges.
  *   - Runs as nobody (uid 65534), not root.
@@ -67,13 +64,9 @@ import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-// DOCKER_HOST set = an isolated remote runner is configured. If it is down we
-// block; the local/CI opt-ins below are void so tenant code can never fall back
-// to running on this host.
-const REMOTE_RUNNER      = Boolean(process.env.DOCKER_HOST);
-const DISABLE_EXPLICITLY = !REMOTE_RUNNER && process.env.AEGIS_SANDBOX_DISABLE === 'true';
-const LOCAL_MODE         = !REMOTE_RUNNER && process.env.AEGIS_SANDBOX_MODE === 'local';
-const IN_CI              = !REMOTE_RUNNER && process.env.CI === 'true';
+const DISABLE_EXPLICITLY = process.env.AEGIS_SANDBOX_DISABLE === 'true';
+const LOCAL_MODE         = process.env.AEGIS_SANDBOX_MODE === 'local';
+const IN_CI              = process.env.CI === 'true';
 
 // Any of these signals that the operator has consciously accepted unsandboxed
 // execution — or that we are in a standard CI environment where Docker is
@@ -83,36 +76,27 @@ const UNSANDBOXED_OK = DISABLE_EXPLICITLY || LOCAL_MODE || IN_CI;
 const IMAGE      = process.env.AEGIS_SANDBOX_IMAGE        ?? 'node:22-alpine';
 const MEMORY     = process.env.AEGIS_SANDBOX_MEMORY       ?? '512m';
 const CPUS       = process.env.AEGIS_SANDBOX_CPUS         ?? '1';
-const PIDS_LIMIT = process.env.AEGIS_SANDBOX_PIDS         ?? '256';
 const TIMEOUT_MS = parseInt(process.env.AEGIS_SANDBOX_TIMEOUT_MS ?? '60000');
 const TMPFS_SIZE = '67108864'; // 64 MB
 
-// Any value other than 'bind' means 'stream' — the transport that never trusts a
-// shared filesystem is the safe default for an unrecognised setting.
-const TRANSPORT = (process.env.AEGIS_SANDBOX_TRANSPORT
-  ?? (process.env.DOCKER_HOST ? 'stream' : 'bind')) === 'bind' ? 'bind' : 'stream';
-const WORKTREE_SIZE     = process.env.AEGIS_SANDBOX_WORKTREE_SIZE ?? '256m';
-const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+// An explicitly set env var always beats a toolchain's own default (Go/Java need
+// more memory and time than a lint run of JS), so an operator can still cap them.
+const MEMORY_SET  = process.env.AEGIS_SANDBOX_MEMORY !== undefined;
+const TIMEOUT_SET = process.env.AEGIS_SANDBOX_TIMEOUT_MS !== undefined;
+const PULL_TIMEOUT_MS = 600000; // first use of a language image downloads it
 
 // ─── Docker availability probe ────────────────────────────────────────────────
 
 let _dockerAvailable = null;
-let _probedAt = 0;
-const PROBE_RETRY_MS = 30000;
 
-// A positive probe is cached for the process lifetime. A negative one is retried
-// after PROBE_RETRY_MS so a remote runner that was down at boot recovers without
-// a restart (the failed probe costs at most 5s, at most once per interval).
 function isDockerAvailable() {
-  if (_dockerAvailable === true) return true;
-  if (_dockerAvailable === false && Date.now() - _probedAt < PROBE_RETRY_MS) return false;
+  if (_dockerAvailable !== null) return _dockerAvailable;
   try {
     execFileSync('docker', ['info'], { stdio: 'pipe', timeout: 5000 });
     _dockerAvailable = true;
   } catch {
     _dockerAvailable = false;
   }
-  _probedAt = Date.now();
   return _dockerAvailable;
 }
 
@@ -165,24 +149,30 @@ if (DISABLE_EXPLICITLY) {
  * @param {string} [tenantId]  - Tenant to attribute sandbox-minutes usage to.
  *                               Optional so existing callers (tests, direct
  *                               script invocations) keep working unmetered.
+ * @param {object} [opts]      - Per-run toolchain settings (all optional; the
+ *                               defaults reproduce the original node behaviour):
+ * @param {string}  [opts.image]           Docker image (default AEGIS_SANDBOX_IMAGE)
+ * @param {boolean} [opts.hostNodeModules] Mount <projectRoot>/node_modules ro and
+ *                                         fail if it is missing (default true)
+ * @param {string}  [opts.deps]            Host dir mounted read-only at the same path
+ * @param {Object<string,string>} [opts.env] Environment for the command (container
+ *                                         env, or merged over process.env when direct)
+ * @param {string}  [opts.memory]          Toolchain default memory (env var wins)
+ * @param {number}  [opts.timeoutMs]       Toolchain default timeout (env var wins)
+ * @param {number}  [opts.tmpfsBytes]      /tmp size in bytes (default 64 MB)
+ * @param {string}  [opts.toolchain]       Label recorded in usage metadata
  * @returns {{ success: boolean, output: string }}
  */
-export function runInSandbox(cmd, cwd, projectRoot, tenantId) {
+export function runInSandbox(cmd, cwd, projectRoot, tenantId, opts = {}) {
   const dockerAvailable = isDockerAvailable();
   const startedAt = Date.now();
+  const timeoutMs = TIMEOUT_SET ? TIMEOUT_MS : (opts.timeoutMs ?? TIMEOUT_MS);
 
   const result = dockerAvailable
-    ? (TRANSPORT === 'stream' ? runDockerStream(cmd, cwd) : runDocker(cmd, cwd, projectRoot))
+    ? runDocker(cmd, cwd, projectRoot, opts, timeoutMs)
     : UNSANDBOXED_OK
-      ? runDirect(cmd, cwd)
-      : REMOTE_RUNNER
-        ? {
-            success: false,
-            output:
-              '[sandbox] Execution blocked: DOCKER_HOST is set but the remote runner is ' +
-              'unreachable. Not falling back to host execution; check the runner and its TLS certs.',
-          }
-        : {
+      ? runDirect(cmd, cwd, opts, timeoutMs)
+      : {
           success: false,
           output:
             '[sandbox] Execution blocked: Docker is not available and no unsandboxed ' +
@@ -205,7 +195,10 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId) {
       tenantId,
       eventType: EVENT_TYPES.SANDBOX_MINUTES,
       quantity: minutes,
-      metadata: { mode: dockerAvailable ? 'docker' : 'direct' },
+      metadata: {
+        mode: dockerAvailable ? 'docker' : 'direct',
+        ...(opts.toolchain ? { toolchain: opts.toolchain } : {}),
+      },
     });
   }
 
@@ -231,16 +224,50 @@ function ensureWorktreeWritable(absWorktree) {
   }
 }
 
-function runDocker(cmd, cwd, projectRoot) {
-  const absWorktree    = path.resolve(cwd);
+// Make sure the image is local before `docker run`, so a first-time pull of a
+// large language image (golang, maven) is not charged against the run timeout.
+const _imagesReady = new Set();
+
+function ensureImage(image) {
+  if (_imagesReady.has(image)) return null;
+  try {
+    execFileSync('docker', ['image', 'inspect', image], { stdio: 'pipe', timeout: 10000 });
+    _imagesReady.add(image);
+    return null;
+  } catch {
+    // not present locally — pull below
+  }
+  try {
+    execFileSync('docker', ['pull', image], { stdio: 'pipe', timeout: PULL_TIMEOUT_MS });
+    _imagesReady.add(image);
+    return null;
+  } catch (err) {
+    const detail = err.stderr?.toString().trim() || err.message;
+    return `Sandbox error: image ${image} is not available locally and could not be pulled: ${detail}`;
+  }
+}
+
+function runDocker(cmd, cwd, projectRoot, opts = {}, timeoutMs = TIMEOUT_MS) {
+  const absWorktree = path.resolve(cwd);
+  const needsNodeModules = opts.hostNodeModules ?? true;
   const absNodeModules = path.resolve(projectRoot, 'node_modules');
+  const absDeps = opts.deps ? path.resolve(opts.deps) : null;
+  const image = opts.image ?? IMAGE;
+  const memory = MEMORY_SET ? MEMORY : (opts.memory ?? MEMORY);
+  const tmpfsSize = String(opts.tmpfsBytes ?? TMPFS_SIZE);
 
   if (!fs.existsSync(absWorktree)) {
     return { success: false, output: `Sandbox error: worktree not found: ${absWorktree}` };
   }
-  if (!fs.existsSync(absNodeModules)) {
+  if (needsNodeModules && !fs.existsSync(absNodeModules)) {
     return { success: false, output: `Sandbox error: node_modules not found: ${absNodeModules}` };
   }
+  if (absDeps && !fs.existsSync(absDeps)) {
+    return { success: false, output: `Sandbox error: dependency cache not found: ${absDeps}` };
+  }
+
+  const pullError = ensureImage(image);
+  if (pullError) return { success: false, output: pullError };
 
   // The container runs as uid 65534 ("nobody"), but the worktree is created
   // on the host by whatever user owns the Aegis process (the CI runner user,
@@ -254,50 +281,47 @@ function runDocker(cmd, cwd, projectRoot) {
   // or long-lived directory.
   ensureWorktreeWritable(absWorktree);
 
+  const envArgs = Object.entries(opts.env ?? {})
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+
   const dockerArgs = [
     'run',
     '--rm',
 
-    ...isolationArgs(),
+    // ── Isolation ──────────────────────────────────────────────────────────
+    '--network', 'none',
+    '--read-only',
+    '--tmpfs', `/tmp:size=${tmpfsSize},mode=1777`,
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'ALL',
+    '--user', '65534:65534',
+
+    // ── Resource limits ────────────────────────────────────────────────────
+    '--memory', memory,
+    '--memory-swap', memory,
+    '--cpus', CPUS,
 
     // ── Bind mounts ────────────────────────────────────────────────────────
     '--volume', `${absWorktree}:${absWorktree}:rw`,
-    '--volume', `${absNodeModules}:${absNodeModules}:ro`,
+    ...(needsNodeModules ? ['--volume', `${absNodeModules}:${absNodeModules}:ro`] : []),
+    ...(absDeps ? ['--volume', `${absDeps}:${absDeps}:ro`] : []),
+
+    // ── Environment ────────────────────────────────────────────────────────
+    ...envArgs,
 
     // ── Working directory ──────────────────────────────────────────────────
     '--workdir', absWorktree,
 
     // ── Image + command ────────────────────────────────────────────────────
-    IMAGE,
+    image,
     'sh', '-c', cmd,
   ];
 
-  return execDocker(dockerArgs);
-}
-
-// Isolation + resource flags shared by both transports so the security posture
-// cannot drift between them.
-function isolationArgs() {
-  return [
-    '--network', 'none',
-    '--read-only',
-    '--tmpfs', `/tmp:size=${TMPFS_SIZE},mode=1777`,
-    '--security-opt', 'no-new-privileges',
-    '--cap-drop', 'ALL',
-    '--user', '65534:65534',
-    '--memory', MEMORY,
-    '--memory-swap', MEMORY,
-    '--cpus', CPUS,
-    '--pids-limit', PIDS_LIMIT,
-  ];
-}
-
-function execDocker(dockerArgs, input) {
   try {
     const output = execFileSync('docker', dockerArgs, {
       stdio: 'pipe',
-      timeout: TIMEOUT_MS,
-      ...(input ? { input } : {}),
+      timeout: timeoutMs,
     });
     return { success: true, output: output.toString() || 'OK' };
   } catch (err) {
@@ -312,70 +336,24 @@ function execDocker(dockerArgs, input) {
       raw.toLowerCase().includes('timeout') ||
       raw.toLowerCase().includes('timedout');
     const msg = timedOut
-      ? `Sandbox timeout after ${TIMEOUT_MS}ms:\n${raw}`
+      ? `Sandbox timeout after ${timeoutMs}ms:\n${raw}`
       : raw;
     return { success: false, output: msg };
   }
 }
 
-// ─── Docker execution over a stream (remote / sidecar daemon) ────────────────
-// No host path is mounted. The worktree is tarred to the container's stdin and
-// unpacked into a size-capped tmpfs at the same absolute path (commands carry
-// absolute paths). Changes made inside the container are discarded — lint and
-// test runs only need their stdout/exit code.
-
-function runDockerStream(cmd, cwd) {
-  const absWorktree = path.resolve(cwd);
-
-  if (!fs.existsSync(absWorktree)) {
-    return { success: false, output: `Sandbox error: worktree not found: ${absWorktree}` };
-  }
-
-  let archive;
-  try {
-    // .git is excluded: a clone's .git/config can embed remote URLs with
-    // credentials, and tenant code has no use for history.
-    archive = execFileSync(
-      'tar',
-      ['-C', absWorktree, '--exclude=./.git', '-cf', '-', '.'],
-      { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: MAX_ARCHIVE_BYTES }
-    );
-  } catch (err) {
-    return { success: false, output: `Sandbox error: could not archive worktree: ${err.message}` };
-  }
-
-  const dockerArgs = [
-    'run',
-    '--rm',
-    '-i',
-    ...isolationArgs(),
-    '--tmpfs', `${absWorktree}:size=${WORKTREE_SIZE},mode=0755,uid=65534,gid=65534`,
-    '--workdir', absWorktree,
-    IMAGE,
-    // cmd and path are positional args ($1, $2), never interpolated into the script.
-    'sh', '-c', 'tar -xmf - -C "$1" && cd "$1" && exec sh -c "$2"', 'sh', absWorktree, cmd,
-  ];
-
-  return execDocker(dockerArgs, archive);
-}
-
 // ─── Direct (unsandboxed) fallback ────────────────────────────────────────────
 // Only reachable when UNSANDBOXED_OK is true (Rules 2).
 
-function runDirect(cmd, cwd) {
+function runDirect(cmd, cwd, opts = {}, timeoutMs = TIMEOUT_MS) {
   try {
     const output = execSync(cmd, {
       stdio: 'pipe',
       cwd,
-      timeout: TIMEOUT_MS,
-      // Allowlist, not ...process.env: tenant code must not see STRIPE_SECRET_KEY,
-      // ANTHROPIC_API_KEY, DATABASE_URL, signing keys, etc.
+      timeout: timeoutMs,
       env: {
-        ...Object.fromEntries(
-          ['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'SHELL', 'CI']
-            .filter((k) => process.env[k] !== undefined)
-            .map((k) => [k, process.env[k]])
-        ),
+        ...process.env,
+        ...(opts.env ?? {}),
         NODE_OPTIONS: '--max-old-space-size=512',
       },
     });

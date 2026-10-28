@@ -1,59 +1,35 @@
 import path from 'path';
 import { scanRepoSync } from './repo-scanner.js';
-import { runInSandbox } from './sandbox.js';
+import {
+  detectToolchains,
+  commandContext,
+  runToolchainCommand,
+  NO_TOOLCHAIN_NOTICE,
+} from './toolchains.js';
 
 // ─── Test-file discovery ──────────────────────────────────────────────────────
 
-// Patterns that identify test files (matches vitest defaults + common conventions)
-const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
-
 /**
- * Return all test files found under `root`, repo-relative.
- * Excludes node_modules and .git (handled by scanRepoSync).
+ * Return all test files found under `root` for one toolchain, absolute paths.
+ * Excludes node_modules, .git, vendor, virtualenvs etc. (handled by scanRepoSync).
  *
  * Uses scanRepoSync because runTests() is called from runInSandbox() via
  * child_process.execSync — a synchronous context where async I/O is not
  * available. This is the only legitimate caller of the sync scanner;
  * all other callers must use the async scanRepo().
  *
- * @param {string} root  - Absolute path to scan (tenant worktree)
- * @returns {string[]}   - Absolute paths to test files
+ * @param {string[]} allFiles - Result of scanRepoSync(root)
+ * @param {object}   tc       - Toolchain (see engine/toolchains.js)
+ * @returns {string[]}
  */
-function findTestFiles(root) {
-  return scanRepoSync(root).filter(f => TEST_FILE_RE.test(f));
+function findTestFiles(allFiles, tc) {
+  return allFiles.filter(f => tc.testFileRe.test(f));
 }
 
-// ─── Core runner ──────────────────────────────────────────────────────────────
+// ─── Per-toolchain runner ─────────────────────────────────────────────────────
 
 /**
- * Build and execute a vitest command inside the sandbox.
- *
- * @param {string}   cwd         - Worktree root (vitest --root)
- * @param {string}   projectRoot - Host project root (for binary + node_modules)
- * @param {string[]} targets     - Absolute file paths to pass as positional args.
- *                                 Empty = run the full discovered suite.
- * @returns {{ success: boolean, output: string }}
- */
-function vitestRun(cwd, projectRoot, targets = [], tenantId) {
-  const vitest = path.join(projectRoot, 'node_modules', '.bin', 'vitest');
-
-  const cmd = [
-    vitest,
-    'run',
-    '--root', cwd,
-    '--reporter=verbose',
-    ...targets,
-  ].join(' ');
-
-  return runInSandbox(cmd, cwd, projectRoot, tenantId);
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * runTests(cwd, files?)
- *
- * Runs Vitest inside a Docker sandbox in two passes:
+ * Two passes for one language:
  *
  *   Pass 1 — scoped (fast-fail)
  *     Runs only the test files for the patched source file(s).
@@ -64,59 +40,43 @@ function vitestRun(cwd, projectRoot, targets = [], tenantId) {
  *     file was patched.  This catches regressions where an agent's change
  *     breaks a module it didn't declare in `files` — the original bug.
  *
- * Both passes must succeed for the overall result to be { success: true }.
- * Outputs from both passes are concatenated so the caller (agent-worker) has
- * the full picture when deciding to roll back or retry.
- *
- * Security change: test execution runs inside a Docker sandbox (see
- * engine/sandbox.js) — no network, read-only rootfs, 512 MB / 1 CPU cap,
- * 60-second timeout.
- *
- * @param {string}   cwd     - Absolute path to the tenant worktree directory.
- * @param {string[]} [files] - Source files that were patched (vitest resolves
- *                             related test files via its coverage/relation map).
- *                             If empty, only the full-suite pass runs.
- * @param {string}   [tenantId] - Tenant to attribute sandbox-minutes usage to.
  * @returns {{ success: boolean, output: string }}
  */
-export function runTests(cwd, files = [], tenantId) {
-  const projectRoot = path.resolve(import.meta.dirname, '..');
+function runToolchainTests(tc, cwd, projectRoot, files, allFiles, tenantId) {
+  const run = (targets, scoped) => {
+    const cmd = tc.testCommand(commandContext(tc, { cwd, projectRoot, targets, scoped }));
+    return runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId });
+  };
+
+  const allTests = findTestFiles(allFiles, tc);
 
   // ── Pass 1: scoped run ────────────────────────────────────────────────────
-  // Resolve each patched source file to its corresponding test file(s).
-  // Convention: `engine/foo.js` → `tests/foo.test.js` (and variants).
-  // We also accept the patched file itself if it IS a test file.
+  // Resolve each patched source file to its corresponding test file(s) by base
+  // name: `engine/job-store.js` → `tests/job-store.test.js`, `pkg/foo.py` →
+  // `tests/test_foo.py`, `foo.go` → `foo_test.go`, `Foo.java` → `FooTest.java`.
+  // A patched file that is itself a test file is included directly.
   let scopedResult = null;
 
   if (files.length > 0) {
-    const allTestFiles = findTestFiles(cwd);
-
     const scopedTargets = new Set();
 
     for (const src of files) {
       const srcAbs = path.resolve(cwd, src);
 
-      // If the patched file is itself a test file, include it directly.
-      if (TEST_FILE_RE.test(srcAbs)) {
+      if (tc.testFileRe.test(srcAbs)) {
         scopedTargets.add(srcAbs);
         continue;
       }
+      if (!tc.sourceRe.test(srcAbs)) continue; // another language's file
 
-      // Derive the base name without extension to match test file variants:
-      //   engine/job-store.js  →  job-store
-      // then look for tests/job-store.test.js, tests/job-store.spec.ts, etc.
-      const baseName = path.basename(srcAbs).replace(/\.[cm]?[jt]sx?$/, '');
-
-      for (const tf of allTestFiles) {
-        const tfBase = path.basename(tf).replace(TEST_FILE_RE, '');
-        if (tfBase === baseName) {
-          scopedTargets.add(tf);
-        }
+      const baseName = tc.baseName(srcAbs);
+      for (const tf of allTests) {
+        if (tc.baseName(tf) === baseName) scopedTargets.add(tf);
       }
     }
 
     if (scopedTargets.size > 0) {
-      scopedResult = vitestRun(cwd, projectRoot, [...scopedTargets], tenantId);
+      scopedResult = run([...scopedTargets], true);
 
       // Fast-fail: if the directly-related tests already break, no need to
       // spend time on the full suite.  The worker will roll back immediately.
@@ -130,9 +90,6 @@ export function runTests(cwd, files = [], tenantId) {
   }
 
   // ── Pass 2: full suite ────────────────────────────────────────────────────
-  // Run every test file in the worktree to catch cross-module regressions.
-  const allTests = findTestFiles(cwd);
-
   // If there are no test files in the worktree at all, treat as a pass with
   // a clear notice rather than silently succeeding.
   if (allTests.length === 0) {
@@ -145,9 +102,8 @@ export function runTests(cwd, files = [], tenantId) {
     };
   }
 
-  const fullResult = vitestRun(cwd, projectRoot, allTests, tenantId);
+  const fullResult = run(allTests, false);
 
-  // ── Combine outputs ───────────────────────────────────────────────────────
   const sections = [];
   if (scopedResult) sections.push(`[scoped tests PASSED]\n\n${scopedResult.output}`);
   sections.push(
@@ -157,5 +113,55 @@ export function runTests(cwd, files = [], tenantId) {
   return {
     success: fullResult.success,
     output:  sections.join('\n\n' + '─'.repeat(60) + '\n\n'),
+  };
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * runTests(cwd, files?)
+ *
+ * Runs the tests of every language detected at the worktree root inside the
+ * Docker sandbox (see engine/sandbox.js, engine/toolchains.js):
+ *
+ *   node    → Vitest      python → pytest (or unittest)
+ *   go      → go test     java   → Maven surefire / Gradle test
+ *
+ * Each language gets the scoped-then-full two-pass run described on
+ * runToolchainTests. All languages must pass for the overall result to be
+ * { success: true }; outputs are concatenated so the caller (agent-worker) has
+ * the full picture when deciding to roll back or retry.
+ *
+ * Security: test execution runs inside a Docker sandbox — no network,
+ * read-only rootfs, memory/CPU cap, wall-clock timeout.
+ *
+ * @param {string}   cwd     - Absolute path to the tenant worktree directory.
+ * @param {string[]} [files] - Source files that were patched. If empty, only the
+ *                             full-suite pass runs.
+ * @param {string}   [tenantId] - Tenant to attribute sandbox-minutes usage to.
+ * @returns {{ success: boolean, output: string }}
+ */
+export function runTests(cwd, files = [], tenantId) {
+  const projectRoot = path.resolve(import.meta.dirname, '..');
+
+  const toolchains = detectToolchains(cwd);
+  if (toolchains.length === 0) {
+    return { success: true, output: NO_TOOLCHAIN_NOTICE };
+  }
+
+  const allFiles = scanRepoSync(cwd);
+  const results = toolchains.map(tc => ({
+    tc,
+    result: runToolchainTests(tc, cwd, projectRoot, files, allFiles, tenantId),
+  }));
+
+  // A single toolchain returns its output untouched (the original format).
+  if (results.length === 1) return results[0].result;
+
+  return {
+    success: results.every(r => r.result.success),
+    output: results
+      .map(({ tc, result }) => `[tests:${tc.id} ${result.success ? 'PASSED' : 'FAILED'}]\n\n${result.output}`)
+      .join('\n\n' + '═'.repeat(60) + '\n\n'),
   };
 }

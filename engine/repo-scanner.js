@@ -12,8 +12,10 @@
  *   • a call graph     (which function calls which, scoped per file)
  *   • a dependency map (reverse of the import graph: who depends on each file)
  *
- * All analysis is best-effort: files that cannot be parsed (non-JS, syntax
- * errors, binary) are silently skipped so the walk never throws.
+ * JavaScript is parsed with acorn; Python, Go and Java use the structural
+ * scanners in engine/analyzers/. All analysis is best-effort: files that cannot
+ * be parsed (other languages, syntax errors, binary) are silently skipped so
+ * the walk never throws.
  *
  * Public API
  * ──────────
@@ -27,13 +29,26 @@ import fs          from 'fs';
 import fsPromises  from 'fs/promises';
 import path        from 'path';
 import { parse }   from 'acorn';
+import { analyzePython } from './analyzers/python.js';
+import { analyzeGo }     from './analyzers/go.js';
+import { analyzeJava }   from './analyzers/java.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const PRUNE_DIRS = new Set(['node_modules', '.git', '.cache', 'dist', 'coverage']);
+const PRUNE_DIRS = new Set([
+  'node_modules', '.git', '.cache', 'dist', 'coverage',
+  // other ecosystems: virtualenvs/bytecode, Go vendor, Maven/Gradle output
+  '__pycache__', '.venv', 'venv', '.tox', '.mypy_cache', '.pytest_cache', 'vendor', 'target', '.gradle',
+]);
 
 /** File extensions we attempt to parse as JavaScript/ESM. */
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts']);
+
+/**
+ * Non-JS languages, analysed by the dependency-free scanners in engine/analyzers/
+ * (acorn only parses JavaScript). Same output shape as the JS path.
+ */
+const ANALYZERS = { '.py': analyzePython, '.go': analyzeGo, '.java': analyzeJava };
 
 /** Max bytes read for AST analysis (avoids parsing huge generated files). */
 const PARSE_SIZE_LIMIT = 200_000;
@@ -172,7 +187,7 @@ function resolveSpecifier(specifier, fromFile) {
   // Try the specifier as-is, then with common JS extensions appended
   const candidates = [
     resolved,
-    ...JS_EXTENSIONS.values().map ? [...JS_EXTENSIONS].map(ext => resolved + ext) : [],
+    ...[...JS_EXTENSIONS].map(ext => resolved + ext),
     path.join(resolved, 'index.js'),
     path.join(resolved, 'index.mjs'),
   ];
@@ -236,9 +251,10 @@ function nameOf(node) {
  * Analyse a single JS/TS file: extract imports, exported symbols, and calls.
  *
  * @param {string} filePath
+ * @param {object} [ctx]  - repo-wide lookups for non-JS import resolution
  * @returns {FileAnalysis}
  */
-function analyzeFile(filePath) {
+function analyzeFile(filePath, ctx) {
   /** @type {FileAnalysis} */
   const result = {
     filePath,
@@ -259,6 +275,16 @@ function analyzeFile(filePath) {
     source = fs.readFileSync(filePath, 'utf-8');
   } catch (err) {
     result.parseError = `read error: ${err.message}`;
+    return result;
+  }
+
+  const nonJs = ANALYZERS[path.extname(filePath)];
+  if (nonJs) {
+    try {
+      Object.assign(result, nonJs(source, filePath, ctx));
+    } catch (err) {
+      result.parseError = err.message;
+    }
     return result;
   }
 
@@ -496,6 +522,45 @@ function extractDeclSymbols(decl, out, exported) {
   }
 }
 
+/**
+ * Repo-wide lookups the Python/Go/Java analyzers use to resolve imports to
+ * files: the file set, the Go module path (go.mod), Go package directories,
+ * and Java files indexed by name and directory.
+ */
+function buildContext(root, files) {
+  const fileSet = new Set(files);
+  const goDirIndex = new Map();
+  const javaByName = new Map();
+  const javaByDir = new Map();
+
+  for (const f of files) {
+    const ext = path.extname(f);
+    const dir = path.dirname(f);
+    if (ext === '.go' && !f.endsWith('_test.go')) {
+      if (!goDirIndex.has(dir)) goDirIndex.set(dir, []);
+      goDirIndex.get(dir).push(f);
+    } else if (ext === '.java') {
+      const base = path.basename(f);
+      if (!javaByName.has(base)) javaByName.set(base, []);
+      javaByName.get(base).push(f);
+      if (!javaByDir.has(dir)) javaByDir.set(dir, []);
+      javaByDir.get(dir).push(f);
+    }
+  }
+
+  let goModule = null;
+  const goMod = path.join(root, 'go.mod');
+  if (fileSet.has(goMod)) {
+    try {
+      goModule = /^module[ \t]+(\S+)/m.exec(fs.readFileSync(goMod, 'utf-8'))?.[1] ?? null;
+    } catch {
+      // unreadable go.mod — Go imports just won't resolve
+    }
+  }
+
+  return { root, fileSet, goModule, goDirIndex, javaByName, javaByDir };
+}
+
 // ─── Public: analyzeRepo ──────────────────────────────────────────────────────
 
 /**
@@ -505,7 +570,7 @@ function extractDeclSymbols(decl, out, exported) {
  * acorn, and returns a RepoAnalysis with symbol table, import graph, call
  * graph, and dependency map.
  *
- * Non-JS files are included in `files` but omitted from `fileMap` / graphs.
+ * Files in other languages are included in `files` but omitted from `fileMap` / graphs.
  * Files with parse errors are included with their `parseError` field set.
  *
  * @param {string} [root]
@@ -526,15 +591,20 @@ export async function analyzeRepo(root = process.cwd()) {
   // Initialise dependency map keys for all known files upfront
   for (const f of files) dependencyMap.set(f, []);
 
-  // Analyse JS/TS files concurrently (I/O bound — Promise.all is safe here)
-  const jsFiles = files.filter(f => JS_EXTENSIONS.has(path.extname(f)));
+  const ctx = buildContext(root, files);
+
+  // Analyse source files concurrently (I/O bound — Promise.all is safe here)
+  const jsFiles = files.filter(f => {
+    const ext = path.extname(f);
+    return JS_EXTENSIONS.has(ext) || ext in ANALYZERS;
+  });
 
   await Promise.all(
     jsFiles.map(async (filePath) => {
       // analyzeFile is synchronous (reads + parses); run in next microtask to
       // let other promises interleave on the event loop during heavy scans.
       await Promise.resolve();
-      const analysis = analyzeFile(filePath);
+      const analysis = analyzeFile(filePath, ctx);
       fileMap.set(filePath, analysis);
       importGraph.set(filePath, analysis.imports);
       symbolTable.set(filePath, analysis.symbols.filter(s => s.exported));

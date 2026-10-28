@@ -1,20 +1,27 @@
 import path from 'path';
-import { runInSandbox } from './sandbox.js';
+import {
+  detectToolchains,
+  commandContext,
+  runToolchainCommand,
+  NO_TOOLCHAIN_NOTICE,
+} from './toolchains.js';
 
 /**
  * runLint(cwd, files?)
  *
- * Runs ESLint inside a Docker sandbox (see engine/sandbox.js).
+ * Lints the tenant worktree inside the Docker sandbox (see engine/sandbox.js),
+ * once per language detected at the worktree root (see engine/toolchains.js):
  *
- * Security change: lint no longer executes on the host via execSync.
- * Instead, it runs inside a container with:
- *   - no network access
- *   - read-only rootfs (worktree mounted rw, node_modules ro)
- *   - 512 MB RAM / 1 CPU cap
- *   - 60-second timeout
+ *   node    → ESLint  (Aegis's own binary, host node_modules mounted read-only)
+ *   python  → ruff when the image has it, otherwise a stdlib syntax check
+ *   go      → gofmt -l + go vet
+ *   java    → mvn test-compile / gradle classes testClasses
  *
- * All previous behaviour (cwd scoping, file-scoped vs whole-worktree lint,
- * eslint binary resolved from project root) is preserved.
+ * Every run has no network access, a read-only rootfs (worktree mounted rw),
+ * a memory/CPU cap and a wall-clock timeout. Scoping is preserved: when
+ * `files` is given only those files are linted, and a toolchain with nothing
+ * in scope is skipped. A worktree with no supported language passes with a
+ * notice, the same way a worktree with no tests does.
  *
  * @param {string}   cwd     - Absolute path to the tenant worktree directory.
  * @param {string[]} [files] - Relative paths (within cwd) of files to lint.
@@ -24,23 +31,36 @@ import { runInSandbox } from './sandbox.js';
 export function runLint(cwd, files = [], tenantId) {
   const projectRoot = path.resolve(import.meta.dirname, '..');
 
-  // Resolve the eslint binary path as seen inside the container.
-  // The bind mount maps absNodeModules → absNodeModules, so the path is identical
-  // inside the container — no path translation needed.
-  const eslint = path.join(projectRoot, 'node_modules', '.bin', 'eslint');
+  const toolchains = detectToolchains(cwd);
+  if (toolchains.length === 0) {
+    return { success: true, output: NO_TOOLCHAIN_NOTICE };
+  }
 
-  const targets =
-    files.length > 0
-      ? files.map(f => path.resolve(cwd, f)).join(' ')
-      : '.';
+  const sections = [];
+  let success = true;
+  let ran = 0;
 
-  // --resolve-plugins-relative-to points eslint at the project root so the
-  // shared eslintrc.cjs is honoured even when cwd is a worktree subdirectory.
-  const cmd = [
-    eslint,
-    '--resolve-plugins-relative-to', projectRoot,
-    targets,
-  ].join(' ');
+  for (const tc of toolchains) {
+    const cmd = tc.lintCommand(commandContext(tc, { cwd, files, projectRoot }));
+    if (cmd == null) continue; // nothing in scope for this language
 
-  return runInSandbox(cmd, cwd, projectRoot, tenantId);
+    const result = runToolchainCommand(tc, cmd, { cwd, projectRoot, tenantId });
+    ran += 1;
+    sections.push({ tc, result });
+    if (!result.success) success = false;
+  }
+
+  if (ran === 0) {
+    return { success: true, output: '[lint] No lintable files in scope — skipped.' };
+  }
+
+  // A single toolchain returns its output untouched (the original format).
+  if (sections.length === 1) return sections[0].result;
+
+  return {
+    success,
+    output: sections
+      .map(({ tc, result }) => `[lint:${tc.id} ${result.success ? 'PASSED' : 'FAILED'}]\n${result.output}`)
+      .join('\n\n'),
+  };
 }
