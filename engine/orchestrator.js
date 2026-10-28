@@ -1,4 +1,5 @@
 import { runAgent } from './agent-runner.js';
+import { assertNoInjection } from './prompt-guard.js';
 import { logger } from './logger.js';
 import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
@@ -257,6 +258,10 @@ export function validatePlan(plan) {
     if (typeof t.description !== 'string' || t.description.trim() === '') {
       throw new Error(`${loc} (id="${t.id}") must have a non-empty description string`);
     }
+
+    // Planner text becomes a later agent's Task, so it must not carry injected
+    // instructions from the repo it just read (throws in block mode → re-plan).
+    assertNoInjection(`plan task ${t.id} description`, t.description);
 
     // depends_on — must be array; every dep must be a previously-seen id
     if (!Array.isArray(t.depends_on)) {

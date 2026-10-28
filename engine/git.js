@@ -557,12 +557,17 @@ export function getWorker(tenantId) {
             error: attempt > 1 ? lastError : undefined,
             patch: attempt > 1 ? lastPatch  : undefined,
             workflowId,
+            // Step descriptions come from the planner, which read untrusted repo
+            // content; runAgent labels and fences them accordingly.
+            taskSource: attempt === 1 ? 'planner' : undefined,
           };
 
           const taskDescription =
             attempt === 1
               ? step.description
-              : `Fix this error (attempt ${attempt}, agent: ${activeAgent}):\n${lastError}`;
+              // lastError is test/lint output derived from repo code — untrusted. It is
+              // delivered fenced via context.error, never interpolated into the Task.
+              : `Fix the error in the "Previous error output" section (attempt ${attempt}, agent: ${activeAgent}).`;
 
           await ensureTenantRepo(tenant); // multi-repo: clone/refresh before the agent reads it
           const result = await runAgent(
@@ -603,8 +608,16 @@ export function getWorker(tenantId) {
               throw new Error('System review failed');
             }
 
-            const aiReview = await runAgent('review-guard', patch, { patch, workflowId }, tenant, cwd);
-            if (!aiReview.includes('APPROVED')) {
+            // The patch is model output derived from untrusted content: pass it fenced
+            // (context.patch), not as the trusted Task.
+            const aiReview = await runAgent(
+              'review-guard',
+              'Review the patch in "Previous patch attempt" and answer APPROVED or REJECTED.',
+              { patch, workflowId }, tenant, cwd
+            );
+            // Strict verdict: first line must be exactly APPROVED. `includes` would
+            // pass "REJECTED ... not APPROVED" and any reply quoting the word.
+            if (aiReview.trim().split('\n')[0].trim() !== 'APPROVED') {
               await recordFailure(job.id);
               await updateJob(job.id, { status: 'failed', result: 'AI review rejected' }, tenant);
               await updateStep(workflowId, step.id, 'failed');

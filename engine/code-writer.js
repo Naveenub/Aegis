@@ -31,15 +31,21 @@ const BLOCKED_PATTERNS = [
 // Control-plane paths a prompt-injected patch could abuse to gain execution or
 // weaken the gate (CI workflows, git hooks, agent personas). Matched against the
 // path relative to the worktree root, case-insensitively.
-const PROTECTED_PATHS = [
-  /^\.git(\/|$)/,
+const ALWAYS_PROTECTED = [
+  /^\.git(\/|$)/,          // git internals / hooks
+  /^\.claude(\/|$)/,       // agent personas
+  /^\.gitattributes$/,     // filter drivers
+];
+// CI definitions: blocked by default; operators whose customers need Aegis to fix
+// CI can opt in with AEGIS_ALLOW_CI_PATCHES=1 (read per call). The review gate and
+// approval gate still apply.
+const CI_PATHS = [
   /^\.github(\/|$)/,
-  /^\.claude(\/|$)/,
   /^\.circleci(\/|$)/,
   /^\.gitlab-ci\.ya?ml$/,
   /^jenkinsfile$/,
-  /^\.gitattributes$/,
 ];
+const ciPatchesAllowed = () => process.env.AEGIS_ALLOW_CI_PATCHES === '1';
 
 /**
  * Validate that a resolved absolute path is safe to write.
@@ -55,7 +61,8 @@ export function validateTargetPath(resolved, root = PROJECT_ROOT) {
 
   // 1b. Control-plane paths (CI, git internals, agent personas) are off limits.
   const relPath = path.relative(root, resolved).split(path.sep).join('/').toLowerCase();
-  const protectedHit = PROTECTED_PATHS.find(re => re.test(relPath));
+  const protectedHit = [...ALWAYS_PROTECTED, ...(ciPatchesAllowed() ? [] : CI_PATHS)]
+    .find(re => re.test(relPath));
   if (protectedHit) {
     return `Protected path blocked: ${relPath}`;
   }
