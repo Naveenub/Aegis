@@ -93,6 +93,7 @@ import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
 import { getEffectivePolicy, parseRetentionUpdate, invalidatePolicy, defaultRetention, RETENTION_BOUNDS } from './engine/retention-policy.js';
 import { runRetentionSweep, purgeTenantContent } from './engine/retention.js';
+import { startRetentionScheduler } from './engine/retention-scheduler.js';
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import { signupTenant, getSignupConfig, logRunnerStartupStatus } from './engine/billing/signup.js';
@@ -924,7 +925,7 @@ app.get('/subprocessors', (_req, res, next) => (subprocessorsHtml ? res.type('ht
 app.get('/subprocessors.json', (_req, res) => {
   if (!subprocessorData) return res.status(503).json({ error: 'Subprocessor list unavailable.' });
   // operatorConfirm is an internal launch-checklist marker, not customer-facing.
-  const pub = { ...subprocessorData, subprocessors: subprocessorData.subprocessors.map(({ operatorConfirm: _o, ...s }) => s) };
+  const pub = { ...subprocessorData, subprocessors: subprocessorData.subprocessors.map(({ operatorConfirm: _o, confirmed: _c, ...s }) => s) };
   delete pub._comment;
   res.set('Cache-Control', 'public, max-age=3600').json(pub);
 });
@@ -1461,6 +1462,15 @@ async function start() {
   // Evaluates metric rules every ANOMALY_INTERVAL_MS (default 60 s) and fires
   // alerts to stderr + AEGIS_ALERT_WEBHOOK when thresholds are sustained.
   startAnomalyDetector();
+
+  // Retention safety net: purges even if the external cron was never deployed.
+  startRetentionScheduler();
+
+  // Launch gate reminder: unverified subprocessor facts / unreviewed legal pages.
+  if (process.env.NODE_ENV === 'production' && subprocessorData) {
+    const unconfirmed = subprocessorData.subprocessors.filter((x) => (x.operatorConfirm || []).some((f) => !x.confirmed?.[f]));
+    if (unconfirmed.length) console.warn(`[compliance] ${unconfirmed.length} subprocessor entr${unconfirmed.length === 1 ? 'y' : 'ies'} not confirmed (${unconfirmed.map((x) => x.id).join(', ')}) — run npm run compliance:check`);
+  }
 
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);

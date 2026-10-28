@@ -41,6 +41,7 @@
     "billing:migrate-tokens": "node scripts/migrate-token-split.js",
     "billing:cleanup": "node scripts/cleanup-pending.js",
     "retention:sweep": "node scripts/retention-sweep.js",
+    "compliance:check": "node scripts/compliance-check.js",
     "onboard": "node scripts/onboard-design-partner.js",
     "check": "npm run lint && npm run test:coverage",
     "test:coverage": "vitest run --coverage",
