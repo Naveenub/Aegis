@@ -6,7 +6,7 @@ import DataTable from '../components/DataTable';
 const RESOLUTIONS = ['retrying', 'skip', 'escalate'];
 
 export default function ReviewQueue() {
-  const { apiKey } = useAuth();
+  const { apiKey, can } = useAuth();
   const [items, setItems] = useState([]);
   const [status, setStatus] = useState('pending');
   const [busyKey, setBusyKey] = useState(null);
@@ -66,7 +66,7 @@ export default function ReviewQueue() {
           { key: 'stepId', header: 'Step', mono: true },
           { key: 'agent', header: 'Agent', mono: true },
           { key: 'error', header: 'Error', wrap: true, render: (r) => <span style={{ color: 'var(--danger)' }}>{r.error}</span> },
-          {
+          ...(!can('review.resolve') ? [] : [{
             key: 'resolve',
             header: 'Resolve',
             render: (r) => {
@@ -95,7 +95,7 @@ export default function ReviewQueue() {
                 </div>
               );
             },
-          },
+          }]),
         ]}
       />
     </div>

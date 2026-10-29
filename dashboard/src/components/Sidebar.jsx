@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 
 const LINKS = [
   { to: '/', label: 'Overview', end: true },
@@ -7,10 +8,13 @@ const LINKS = [
   { to: '/dlq', label: 'Dead letters' },
   { to: '/traces', label: 'Traces' },
   { to: '/anomalies', label: 'Anomalies' },
-  { to: '/tenants', label: 'Tenants & keys' },
+  { to: '/tenants', label: 'Tenants & keys', permission: 'key.manage' },
+  { to: '/users', label: 'Users', permission: 'user.manage' },
+  { to: '/audit', label: 'Audit log', permission: 'audit.read' },
 ];
 
 export default function Sidebar() {
+  const { can } = useAuth();
   return (
     <div
       style={{
@@ -36,7 +40,7 @@ export default function Sidebar() {
       >
         AEGIS
       </div>
-      {LINKS.map((link) => (
+      {LINKS.filter((l) => !l.permission || can(l.permission)).map((link) => (
         <NavLink
           key={link.to}
           to={link.to}

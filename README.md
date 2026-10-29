@@ -252,6 +252,8 @@ curl -X PUT $AEGIS/tenants/acme/sso -H "x-admin-key: $AEGIS_ADMIN_KEY" -H 'conte
 
 Pre-provision admins with `POST /tenants/acme/users {"email":"jo@acme.com","role":"admin"}`; anyone else from an allowed domain is created at `jitRole` (never `admin`; omit `jitRole` to allow only pre-provisioned users). The first login binds the IdP `sub` to the user. Sessions last `AEGIS_SESSION_TTL_HOURS` (default 8); disabling a user or changing their role applies immediately. SAML is not supported.
 
+**Dashboard.** Admins get *Users* (add, change role, disable) and *Audit log* (who did what, hash-chain status, CSV export) pages; UI controls follow the signed-in role.
+
 **Audit identity.** Audit events record `actorType` (`user` / `api-key`), `actorId`, `actorEmail`, `actorRole` and `ip`; logins, logouts, denied logins, user changes and SSO changes are audited, and API keys record who created them.
 
 ## Billing

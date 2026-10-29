@@ -13,6 +13,8 @@ import DLQ from './pages/DLQ';
 import Traces from './pages/Traces';
 import Anomalies from './pages/Anomalies';
 import Tenants from './pages/Tenants';
+import Users from './pages/Users';
+import AuditLog from './pages/AuditLog';
 
 function AuthedApp() {
   return (
@@ -32,6 +34,8 @@ function AuthedApp() {
                 <Route path="/traces" element={<Traces />} />
                 <Route path="/anomalies" element={<Anomalies />} />
                 <Route path="/tenants" element={<Tenants />} />
+                <Route path="/users" element={<Users />} />
+                <Route path="/audit" element={<AuditLog />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </div>

@@ -7,7 +7,7 @@ import StatCard from '../components/StatCard';
 import DataTable from '../components/DataTable';
 
 export default function Overview() {
-  const { apiKey } = useAuth();
+  const { apiKey, can } = useAuth();
   const { tenantId } = useTenant();
   const { metrics: liveMetrics } = useSSE();
   const [metrics, setMetrics] = useState(null);
@@ -44,7 +44,7 @@ export default function Overview() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      <form onSubmit={submitTask} style={{ display: 'flex', gap: 10 }}>
+      {can('workflow.run') && <form onSubmit={submitTask} style={{ display: 'flex', gap: 10 }}>
         <input
           value={task}
           onChange={(e) => setTask(e.target.value)}
@@ -72,7 +72,7 @@ export default function Overview() {
         >
           {submitting ? 'Submitting…' : 'Submit task'}
         </button>
-      </form>
+      </form>}
       {submitMsg && (
         <div style={{ color: submitMsg.ok ? 'var(--accent)' : 'var(--danger)', fontSize: 13, marginTop: -14 }}>
           {submitMsg.text}

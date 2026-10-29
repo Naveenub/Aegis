@@ -5,7 +5,7 @@ import { useTenant } from '../context/TenantContext';
 import DataTable from '../components/DataTable';
 
 export default function Tenants() {
-  const { apiKey } = useAuth();
+  const { apiKey, can } = useAuth();
   const { tenants, refresh } = useTenant();
   const [newTenantId, setNewTenantId] = useState('');
   const [expanded, setExpanded] = useState(null);
@@ -58,7 +58,7 @@ export default function Tenants() {
       <DataTable
         rows={tenants}
         keyField="id"
-        onRowClick={openTenant}
+        onRowClick={can('key.manage') ? openTenant : undefined}
         emptyLabel="No tenants registered."
         columns={[
           { key: 'id', header: 'Tenant', mono: true, render: (r) => r.id ?? r.tenantId },
@@ -66,7 +66,7 @@ export default function Tenants() {
         ]}
       />
 
-      {expanded && (
+      {expanded && can('key.manage') && (
         <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <span className="mono" style={{ fontWeight: 600 }}>{expanded} — API keys</span>

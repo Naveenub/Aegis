@@ -7,7 +7,7 @@ import Badge from '../components/Badge';
 
 export default function WorkflowDetail() {
   const { workflowId } = useParams();
-  const { apiKey } = useAuth();
+  const { apiKey, can } = useAuth();
   const navigate = useNavigate();
   const [wf, setWf] = useState(null);
   const [error, setError] = useState(null);
@@ -50,14 +50,14 @@ export default function WorkflowDetail() {
         <span>Started: <span className="mono" style={{ color: 'var(--text)' }}>{new Date(wf.startedAt).toLocaleString()}</span></span>
       </div>
 
-      <div style={{ display: 'flex', gap: 10 }}>
+      {can('workflow.run') && <div style={{ display: 'flex', gap: 10 }}>
         <ActionButton onClick={() => act(() => api.resumeWorkflow(apiKey, { workflowId, tenantId: wf.tenantId }), 'Resume')}>
           Resume
         </ActionButton>
         <ActionButton danger onClick={() => act(() => api.cancelWorkflow(apiKey, { workflowId, tenantId: wf.tenantId, reason: 'cancelled via dashboard' }), 'Cancel')}>
           Cancel
         </ActionButton>
-      </div>
+      </div>}
       {actionMsg && (
         <div style={{ color: actionMsg.ok ? 'var(--accent)' : 'var(--danger)', fontSize: 13 }}>{actionMsg.text}</div>
       )}
@@ -78,7 +78,7 @@ export default function WorkflowDetail() {
               key: 'action',
               header: '',
               render: (r) =>
-                r.status === 'completed' ? (
+                r.status === 'completed' && can('workflow.run') ? (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

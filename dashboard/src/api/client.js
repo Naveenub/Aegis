@@ -97,6 +97,17 @@ export const api = {
   updateUser: (apiKey, tenantId, userId, patch) =>
     request(`/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}`, { method: 'PATCH', apiKey, body: patch }),
 
+  // audit log (admin only)
+  getAuditLog: (apiKey, tenantId, { action, resourceType, from, to, limit } = {}) =>
+    request(`/tenants/${encodeURIComponent(tenantId)}/audit-log`, { apiKey, params: { action, resourceType, from, to, limit } }),
+  downloadAuditLog: async (apiKey, tenantId, format = 'csv') => {
+    const url = new URL(`/tenants/${encodeURIComponent(tenantId)}/audit-log/export`, BASE_URL || window.location.origin);
+    url.searchParams.set('format', format);
+    const res = await fetch(url.toString(), { headers: { 'x-api-key': apiKey } });
+    if (!res.ok) throw new ApiError(`Export failed (${res.status})`, res.status);
+    return res.blob();
+  },
+
   // tenants
   listTenants: (apiKey) => request('/tenants', { apiKey }),
   createTenant: (apiKey, { tenantId, label }) =>
