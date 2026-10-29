@@ -1,4 +1,5 @@
-import { execSync, execFileSync } from 'child_process';
+import { execSync, execFileSync, spawnSync } from 'child_process';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
@@ -50,6 +51,8 @@ import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
  *   AEGIS_SANDBOX_MEMORY      Memory limit (default: 512m; Go/Java default to 1g unless set)
  *   AEGIS_SANDBOX_CPUS        CPU limit (default: 1)
  *   AEGIS_SANDBOX_TIMEOUT_MS  Wall-clock timeout ms (default: 60000; Java defaults to 180000 unless set)
+ *   AEGIS_SANDBOX_TRANSPORT   'stream' to send the worktree as a tar instead of bind-mounting it
+ *                             (forced when DOCKER_HOST is set); STREAM_MAX_MB / WORKTREE_TMPFS_MB cap it
  *
  * Security properties of each sandboxed run:
  *   - Network is completely disabled (--network none).
@@ -75,6 +78,18 @@ const IN_CI              = process.env.CI === 'true';
 // fail closed rather than silently running tenant patches on the host.
 const REMOTE_RUNNER = Boolean(process.env.DOCKER_HOST);
 const UNSANDBOXED_OK = !REMOTE_RUNNER && (DISABLE_EXPLICITLY || LOCAL_MODE || IN_CI);
+
+// Transport for getting the worktree into the container.
+//   bind   — host paths are bind-mounted. Only valid when the Docker daemon runs
+//            on THIS machine's filesystem (local dev, CI).
+//   stream — nothing is mounted: the worktree (minus .git) is sent as a tar on
+//            stdin into tmpfs mounts, only stdout comes back. Mandatory for any
+//            remote/sidecar daemon, where bind paths would resolve on the wrong
+//            host. Forced whenever DOCKER_HOST is set. The image must already
+//            contain the toolchain (build Dockerfile.sandbox for node).
+const STREAM = REMOTE_RUNNER || process.env.AEGIS_SANDBOX_TRANSPORT === 'stream';
+const STREAM_MAX_BYTES = parseInt(process.env.AEGIS_SANDBOX_STREAM_MAX_MB ?? '256') * 1024 * 1024;
+const WORKTREE_TMPFS_BYTES = parseInt(process.env.AEGIS_SANDBOX_WORKTREE_TMPFS_MB ?? '256') * 1024 * 1024;
 
 const IMAGE      = process.env.AEGIS_SANDBOX_IMAGE        ?? 'node:22-alpine';
 const MEMORY     = process.env.AEGIS_SANDBOX_MEMORY       ?? '512m';
@@ -184,7 +199,9 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId, opts = {}) {
     ?? (TIMEOUT_SET ? TIMEOUT_MS : (opts.timeoutMs ?? TIMEOUT_MS));
 
   const result = dockerAvailable
-    ? runDocker(cmd, cwd, projectRoot, opts, timeoutMs)
+    ? (STREAM
+        ? runDockerStream(cmd, cwd, opts, timeoutMs)
+        : runDocker(cmd, cwd, projectRoot, opts, timeoutMs))
     : UNSANDBOXED_OK
       ? runDirect(cmd, cwd, opts, timeoutMs)
       : {
@@ -216,6 +233,7 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId, opts = {}) {
       quantity: minutes,
       metadata: {
         mode: dockerAvailable ? 'docker' : 'direct',
+        ...(dockerAvailable ? { transport: STREAM ? 'stream' : 'bind' } : {}),
         ...(opts.toolchain ? { toolchain: opts.toolchain } : {}),
       },
     });
@@ -363,6 +381,144 @@ function runDocker(cmd, cwd, projectRoot, opts = {}, timeoutMs = TIMEOUT_MS) {
   }
 }
 
+// ─── Docker execution: stream transport (remote / sidecar daemon) ────────────
+// No --volume at all. Worktree (+ optional dep cache) go in as a tar on stdin
+// and land in size-capped tmpfs mounts owned by the sandbox uid; .git is never
+// sent (it can hold remote URLs/tokens). Container writes never reach the host.
+// rwMounts (the network-enabled dependency install) are tarred back on stdout
+// after the command, with the command's own output moved to stderr.
+
+function relFromRoot(abs) { return abs.replace(/^\/+/, ''); }
+
+function archiveIsSafe(listing) {
+  for (const line of listing.split('\n').filter(Boolean)) {
+    const type = line[0];
+    if (type === 'h') return false;                      // hardlinks
+    const name = line.split(/\s+\d{4}-\d\d-\d\d \d\d:\d\d\s+/)[1] ?? '';
+    const [entry, target] = name.split(' -> ');
+    if (entry.startsWith('/') || entry.split('/').includes('..')) return false;
+    if (type === 'l' && target && (target.startsWith('/') || target.split('/').includes('..'))) return false;
+  }
+  return true;
+}
+
+function extractCollected(tarBuf, roots) {
+  if (!tarBuf || tarBuf.length === 0) return null;
+  try {
+    const listing = execFileSync('tar', ['-tvf', '-'], { input: tarBuf, stdio: 'pipe', maxBuffer: 64 * 1024 * 1024 }).toString();
+    if (!archiveIsSafe(listing)) return 'refused unsafe archive from sandbox (link or path escape)';
+    for (const r of roots) fs.mkdirSync(r, { recursive: true });
+    execFileSync('tar', ['-xf', '-', '-C', '/', '--no-same-owner', '--no-same-permissions'],
+      { input: tarBuf, stdio: 'pipe', maxBuffer: 64 * 1024 * 1024 });
+    return null;
+  } catch (err) {
+    return `could not extract sandbox output: ${err.stderr?.toString().trim() || err.message}`;
+  }
+}
+
+function runDockerStream(cmd, cwd, opts = {}, timeoutMs = TIMEOUT_MS) {
+  const absWorktree = path.resolve(cwd);
+  const absDeps = opts.deps ? path.resolve(opts.deps) : null;
+  const rwMounts = (opts.rwMounts ?? []).map(m => path.resolve(m));
+  const image = opts.image ?? IMAGE;
+  const memory = MEMORY_SET ? MEMORY : (opts.memory ?? MEMORY);
+  const tmpfsSize = String(opts.tmpfsBytes ?? TMPFS_SIZE);
+
+  if (!fs.existsSync(absWorktree)) {
+    return { success: false, output: `Sandbox error: worktree not found: ${absWorktree}` };
+  }
+  if (absDeps && !fs.existsSync(absDeps)) {
+    return { success: false, output: `Sandbox error: dependency cache not found: ${absDeps}` };
+  }
+
+  const pullError = ensureImage(image);
+  if (pullError) return { success: false, output: pullError };
+
+  // Paths that exist on the host and must exist in the container.
+  const sendDirs = [absWorktree, ...(absDeps ? [absDeps] : []), ...rwMounts.filter(m => fs.existsSync(m))];
+  const mountDirs = [...new Set([absWorktree, ...(absDeps ? [absDeps] : []), ...rwMounts])];
+  const uidOpts = 'uid=65534,gid=65534,mode=0755';
+
+  let tarIn;
+  try {
+    tarIn = execFileSync(
+      'tar',
+      ['-cf', '-', '--exclude=.git', '-C', '/', ...[...new Set(sendDirs)].map(relFromRoot)],
+      { stdio: 'pipe', maxBuffer: STREAM_MAX_BYTES },
+    );
+  } catch (err) {
+    const tooBig = err.code === 'ENOBUFS' || /maxBuffer/i.test(err.message);
+    return {
+      success: false,
+      output: tooBig
+        ? `Sandbox error: worktree exceeds AEGIS_SANDBOX_STREAM_MAX_MB (${STREAM_MAX_BYTES / 1048576} MB)`
+        : `Sandbox error: could not archive worktree: ${err.stderr?.toString().trim() || err.message}`,
+    };
+  }
+
+  const envArgs = Object.entries(opts.env ?? {})
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+
+  const name = `aegis-sbx-${crypto.randomBytes(8).toString('hex')}`;
+  const collect = rwMounts.map(relFromRoot);
+  const script = collect.length
+    ? 'tar xof - -C / || exit 125; c="$1"; shift; sh -c "$c" 1>&2; rc=$?; tar cf - -C / "$@" 2>/dev/null; exit $rc'
+    : 'tar xof - -C / || exit 125; exec sh -c "$1"';
+
+  const dockerArgs = [
+    'run', '--rm', '-i', '--name', name,
+    '--network', opts.network ? 'bridge' : 'none',
+    '--read-only',
+    '--tmpfs', `/tmp:size=${tmpfsSize},mode=1777`,
+    ...mountDirs.flatMap(d => ['--tmpfs', `${d}:size=${WORKTREE_TMPFS_BYTES},${uidOpts}`]),
+    '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'ALL',
+    '--pids-limit', '512',
+    '--user', '65534:65534',
+    '--memory', memory,
+    '--memory-swap', memory,
+    '--cpus', CPUS,
+    ...envArgs,
+    '--workdir', absWorktree,
+    image,
+    'sh', '-c', script, 'sh', cmd, ...collect,
+  ];
+
+  const r = spawnSync('docker', dockerArgs, {
+    input: tarIn,
+    timeout: timeoutMs,
+    maxBuffer: STREAM_MAX_BYTES,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGTERM';
+  if (timedOut || r.error) {
+    // Killing the local CLI does not stop a container on a remote daemon.
+    try { execFileSync('docker', ['rm', '-f', name], { stdio: 'pipe', timeout: 15000 }); } catch { /* already gone */ }
+  }
+
+  const stdoutBuf = r.stdout ?? Buffer.alloc(0);
+  const stderrTxt = r.stderr?.toString() ?? '';
+  const text = collect.length ? stderrTxt : stdoutBuf.toString();
+
+  if (collect.length && !timedOut && r.status !== 125) {
+    const extractErr = extractCollected(stdoutBuf, rwMounts);
+    if (extractErr && r.status === 0) return { success: false, output: `Sandbox error: ${extractErr}` };
+  }
+
+  if (timedOut) {
+    return { success: false, output: `Sandbox timeout after ${timeoutMs}ms:\n${text || stderrTxt}` };
+  }
+  if (r.error) {
+    return { success: false, output: r.error.message };
+  }
+  if (r.status !== 0) {
+    return { success: false, output: text || stderrTxt || `exit ${r.status}` };
+  }
+  return { success: true, output: text || 'OK' };
+}
+
 // ─── Direct (unsandboxed) fallback ────────────────────────────────────────────
 // Only reachable when UNSANDBOXED_OK is true (Rules 2).
 
@@ -447,5 +603,5 @@ export function getSandboxCapabilities() {
     );
   }
 
-  return { enabled, enforced, docker, mode, image: IMAGE, memory: MEMORY, cpus: CPUS, warnings };
+  return { enabled, enforced, docker, mode, transport: STREAM ? 'stream' : 'bind', image: IMAGE, memory: MEMORY, cpus: CPUS, warnings };
 }

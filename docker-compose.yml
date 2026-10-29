@@ -98,6 +98,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       DOCKER_HOST: tcp://dind:2375
+      # dind is a separate filesystem: the worktree is streamed in, so the image must carry
+      # the toolchain. Build it once: scripts/sandbox-setup.sh image aegis-sandbox:local --compose
+      AEGIS_SANDBOX_IMAGE: aegis-sandbox:local
       DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis
       AEGIS_REPOS_BASE: /repo/tenants
     volumes:

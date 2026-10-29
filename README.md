@@ -342,7 +342,7 @@ The system suite (`tests/integration/system/`) exercises the Docker sandbox, git
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Naveenub/aegis)
 
-`render.yaml` provisions Postgres, a Redis Stack private service, a single combined web service (server + worker + dlq-worker sharing one disk), and an hourly billing-flush cron. You'll be prompted for `ANTHROPIC_API_KEY` during setup. This topology trades away Docker-sandboxed patch execution (it runs with `AEGIS_SANDBOX_MODE=local`) and horizontal worker scaling in exchange for a deploy with no self-hosting step. Fork the repo first if you're deploying your own copy.
+`render.yaml` provisions Postgres, a Redis Stack private service, a single combined web service (server + worker + dlq-worker sharing one disk), and an hourly billing-flush cron. You'll be prompted for `ANTHROPIC_API_KEY` during setup. Tenant code never runs on the web service: set `DOCKER_HOST` (mutual TLS), the `ca.pem`/`cert.pem`/`key.pem` Secret Files and `AEGIS_SANDBOX_IMAGE` (built from `Dockerfile.sandbox`) to point it at an isolated remote runner (see `scripts/provision-runner.sh`); without them lint/test steps are blocked and self-serve signup stays off. The worktree is streamed to the runner as a tar (no host paths, no `.git`), so only stdout comes back. This topology trades away horizontal worker scaling in exchange for a deploy with no nested Docker. Fork the repo first if you're deploying your own copy.
 
 ### Self-hosted with Docker Compose (production)
 

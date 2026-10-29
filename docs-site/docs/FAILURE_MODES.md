@@ -51,6 +51,7 @@ Lint/test runs in Docker: 512 MB RAM, 1 CPU, 60 s wall clock (`AEGIS_SANDBOX_TIM
 |---|---|---|---|
 | S1 | Docker unavailable | Step hard-fails | By design |
 | S2 | Escape hatches | `AEGIS_SANDBOX_MODE=local`, `AEGIS_SANDBOX_DISABLE=true` or `CI=true` run generated code unsandboxed on the host; harmless in CI, unsafe if left set in production | By design (documented in README) |
+| S4 | Remote runner transport | With `DOCKER_HOST` set, the worktree is sent as a tar on stdin into tmpfs (no bind mounts, `.git` excluded); size capped by `AEGIS_SANDBOX_STREAM_MAX_MB`; a timed-out run is `docker rm -f`'d on the runner | By design |
 | S3 | Remote runner down | When `DOCKER_HOST` is set, the S2 escape hatches are ignored: an unreachable runner blocks the step and never falls back to the host | By design |
 
 ## 5. Vector memory (`engine/vector-memory.js`)
