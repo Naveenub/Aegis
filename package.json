@@ -70,6 +70,7 @@
   "devDependencies": {
     "@vitest/coverage-v8": "1.6.0",
     "eslint": "^8.57.0",
+    "ioredis-mock": "^8.13.1",
     "vitest": "^1.6.0"
   }
 }
