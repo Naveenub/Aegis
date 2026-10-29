@@ -71,7 +71,10 @@ const IN_CI              = process.env.CI === 'true';
 // Any of these signals that the operator has consciously accepted unsandboxed
 // execution — or that we are in a standard CI environment where Docker is
 // unavailable and unsandboxed execution is an acceptable trade-off.
-const UNSANDBOXED_OK = DISABLE_EXPLICITLY || LOCAL_MODE || IN_CI;
+// A configured remote runner (DOCKER_HOST) is a hard requirement: if it is down,
+// fail closed rather than silently running tenant patches on the host.
+const REMOTE_RUNNER = Boolean(process.env.DOCKER_HOST);
+const UNSANDBOXED_OK = !REMOTE_RUNNER && (DISABLE_EXPLICITLY || LOCAL_MODE || IN_CI);
 
 const IMAGE      = process.env.AEGIS_SANDBOX_IMAGE        ?? 'node:22-alpine';
 const MEMORY     = process.env.AEGIS_SANDBOX_MEMORY       ?? '512m';
@@ -105,7 +108,13 @@ function isDockerAvailable() {
 // Hard-fail decisions are made at call-time (runInSandbox), not here, so the
 // server can still start and report /health even if Docker is absent.
 
-if (DISABLE_EXPLICITLY) {
+if (REMOTE_RUNNER && !isDockerAvailable()) {
+  console.error(
+    '[sandbox] ✖  DOCKER_HOST is set but the remote Docker daemon is unreachable. ' +
+    'Execution will FAIL rather than fall back to the host, even with ' +
+    'AEGIS_SANDBOX_MODE=local, AEGIS_SANDBOX_DISABLE=true or CI=true.'
+  );
+} else if (DISABLE_EXPLICITLY) {
   console.warn(
     '[sandbox] ⚠️  AEGIS_SANDBOX_DISABLE=true — unsandboxed execution ENABLED (legacy flag). ' +
     'Prefer AEGIS_SANDBOX_MODE=local for new configurations. ' +
@@ -180,7 +189,11 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId, opts = {}) {
       ? runDirect(cmd, cwd, opts, timeoutMs)
       : {
           success: false,
-          output:
+          output: REMOTE_RUNNER
+            ? '[sandbox] Execution blocked: DOCKER_HOST is set but the remote Docker daemon is ' +
+              'unreachable. Unsandboxed fallback is disabled while a remote runner is configured. ' +
+              'Restore the runner (or unset DOCKER_HOST for local dev).'
+            :
             '[sandbox] Execution blocked: Docker is not available and no unsandboxed ' +
             'fallback is configured.\n\n' +
             'Fix options:\n' +
@@ -400,6 +413,12 @@ export function getSandboxCapabilities() {
   let mode;
   if (docker) {
     mode = 'docker';
+  } else if (REMOTE_RUNNER) {
+    mode = 'blocked';
+    warnings.push(
+      'DOCKER_HOST is set but the remote Docker daemon is unreachable — execution is BLOCKED ' +
+      'and will not fall back to the host.'
+    );
   } else if (LOCAL_MODE) {
     mode = 'local';
     warnings.push(
