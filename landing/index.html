@@ -374,9 +374,23 @@ Failures ──▶ workers/dlq-worker.js: retry with backoff, escalate to
       <div class="section-head">
         <div class="section-eyebrow">Pricing</div>
         <h2>Base plan + metered overage</h2>
-        <p class="section-desc">Each plan includes a monthly allowance. Usage beyond it is metered and billed per unit — no surprise throttling, hard abuse limits stay separate.</p>
+        <p class="section-desc">Start free, no card. Paid plans include a monthly allowance; usage beyond it is metered and billed per unit — no surprise throttling, hard abuse limits stay separate. The free plan stops at its limits instead of billing.</p>
       </div>
       <div class="tiers">
+        <div class="tier">
+          <h3>Free</h3>
+          <p class="tier-note">Try AEGIS on a real repo. No card, hard monthly limits.</p>
+          <p class="tier-price">Free</p>
+          <ul>
+            <li>Workflow runs <b>25</b></li>
+            <li>Agent steps <b>250</b></li>
+            <li>Input tokens <b>300K</b></li>
+            <li>Output tokens <b>40K</b></li>
+            <li>Sandbox minutes <b>30</b></li>
+            <li>Concurrent workflows <b>1</b></li>
+          </ul>
+          <a href="/get-started?tier=free" class="btn btn-ghost">Start free</a>
+        </div>
         <div class="tier">
           <h3>Starter</h3>
           <p class="tier-note">For a single team trying AEGIS on real repos.</p>
@@ -420,7 +434,7 @@ Failures ──▶ workers/dlq-worker.js: retry with backoff, escalate to
           <a href="mailto:{{CONTACT_EMAIL}}?subject=AEGIS%20access%20request%20Enterprise" class="btn btn-ghost">Contact us</a>
         </div>
       </div>
-      <p class="pricing-foot">Allowances reset monthly (UTC). Starter and Pro base prices are shown live from checkout; Enterprise is quoted individually.</p>
+      <p class="pricing-foot">Allowances reset monthly (UTC). Starter and Pro base prices are shown live from checkout; Enterprise is quoted individually. Free limits are hard stops, not overage; upgrade any time from the API (POST /billing/plan).</p>
     </div>
   </section>
 
@@ -473,9 +487,6 @@ curl -X POST localhost:3000/task \
       <a href="#quickstart">Quickstart</a>
       <a href="/terms">Terms</a>
       <a href="/privacy">Privacy</a>
-      <a href="/dpa">DPA</a>
-      <a href="/subprocessors">Subprocessors</a>
-      <a href="/security">Security</a>
       <a href="mailto:{{CONTACT_EMAIL}}">Contact</a>
     </div>
   </div>
@@ -486,13 +497,15 @@ curl -X POST localhost:3000/task \
   fetch('/signup/config').then(function (r) { if (!r.ok) throw 0; return r.json(); }).then(function (cfg) {
     cfg.tiers.forEach(function (t) {
       var el = document.querySelector('.tier-price[data-tier="' + t.id + '"]');
-      if (!el || !t.price) return;
+      if (!el) return;
+      if (!t.price) { el.textContent = 'Contact us'; return; } // price not configured in Stripe yet
+      if (t.price.amount === 0) { el.textContent = 'Free'; return; }
       var amt = new Intl.NumberFormat(undefined, { style: 'currency', currency: t.price.currency.toUpperCase() }).format(t.price.amount / 100);
       el.textContent = amt;
       if (t.price.interval) { var s = document.createElement('small'); s.textContent = ' / ' + t.price.interval; el.appendChild(s); }
     });
   }).catch(function () {
-    document.querySelectorAll('.tier-price[data-tier]').forEach(function (el) { el.textContent = 'See checkout'; });
+    document.querySelectorAll('.tier-price[data-tier]').forEach(function (el) { el.textContent = 'Contact us'; });
   });
 })();
 </script>

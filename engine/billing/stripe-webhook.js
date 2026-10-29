@@ -10,6 +10,13 @@
  *   checkout.session.completed       → metadata.kind=credit_topup: add prepaid credits;
  *                                      otherwise log only (manual Payment Link flow)
  *   invoice.paid (amount_paid > 0)   → also stamps firstPaidAt (lifts unverified spend cap)
+ * Plan changes: the tier is stamped on the subscription metadata (`tier`) by
+ * stripe-customer.js. When a paid invoice / active subscription carries a
+ * different tier than the tenant has, the tenant (and its quota) moves to it —
+ * that is how free→paid upgrades, immediate upgrades and period-end downgrades
+ * (subscription-schedule phase metadata) take effect. A subscription deleted
+ * with metadata.downgradeTo='free' puts the tenant on the free tier, active.
+ * A free tenant is never suspended by a lapsed upgrade attempt.
  * The tenant is resolved from metadata.tenantId (set on the subscription by
  * stripe-customer.js). Events with no resolvable, registered tenant are
  * logged and acknowledged without changing anything, so manual design-partner
@@ -34,7 +41,9 @@
 
 import express from 'express';
 import Stripe from 'stripe';
-import { getTenant, setStatus, markFirstPaid } from '../tenant-registry.js';
+import { getTenant, setStatus, markFirstPaid, getTier, setTier } from '../tenant-registry.js';
+import { setQuota } from '../tenant-quota.js';
+import { getTierConfig, isPaidTier } from './tiers.js';
 import { addCredits } from './spend-guard.js';
 
 let _client = null;
@@ -77,6 +86,24 @@ function resolveTenantId(obj) {
   );
 }
 
+function resolveTier(obj) {
+  return (
+    obj.metadata?.tier ??
+    obj.parent?.subscription_details?.metadata?.tier ??   // invoices (current API)
+    obj.subscription_details?.metadata?.tier ??           // invoices (older API)
+    null
+  );
+}
+
+/** Move a tenant to a tier (and its quota). No-op if already there. */
+async function applyTier(tenantId, tier) {
+  if ((await getTier(tenantId)) === tier) return false;
+  await setTier(tenantId, tier);
+  await setQuota(tenantId, getTierConfig(tier).quota);
+  console.log(`[stripe-webhook] tenant=${tenantId} tier=${tier}`);
+  return true;
+}
+
 export const stripeWebhookRouter = express.Router();
 
 // Stripe signature verification needs the exact raw body bytes — same
@@ -102,16 +129,34 @@ stripeWebhookRouter.post('/stripe', async (req, res) => {
     const status = mapped === 'derived' ? subscriptionStatus(event.data.object) : mapped;
     console.log(`[stripe-webhook] ${event.type} tenant=${tenantId ?? '(unknown)'} id=${event.id}`);
 
-    if (status && tenantId) {
+    const obj = event.data.object;
+    const downgradeToFree =
+      event.type === 'customer.subscription.deleted' && obj.metadata?.downgradeTo === 'free';
+
+    if ((status || downgradeToFree) && tenantId) {
       try {
         if (await getTenant(tenantId)) {
-          await setStatus(tenantId, status);
-          // First real payment lifts the unverified spend cap (spend-guard.js).
-          // amount_paid > 0 so a $0 trial invoice does not count.
-          if (event.type === 'invoice.paid' && event.data.object.amount_paid > 0) {
-            await markFirstPaid(tenantId);
+          if (downgradeToFree) {
+            // Scheduled paid → free: keep the tenant working on the free tier.
+            await applyTier(tenantId, 'free');
+            await setStatus(tenantId, 'active');
+          } else if (status === 'suspended' && (await getTier(tenantId)) === 'free') {
+            // A free tenant has no paid subscription to lapse; this is a
+            // cancelled or expired upgrade attempt. Leave the account alone.
+            console.log(`[stripe-webhook] tenant=${tenantId} is free — ignoring ${event.type}`);
+          } else {
+            await setStatus(tenantId, status);
+            if (status === 'active') {
+              const tier = resolveTier(obj);
+              if (isPaidTier(tier)) await applyTier(tenantId, tier);
+            }
+            // First real payment lifts the unverified spend cap (spend-guard.js).
+            // amount_paid > 0 so a $0 trial invoice does not count.
+            if (event.type === 'invoice.paid' && obj.amount_paid > 0) {
+              await markFirstPaid(tenantId);
+            }
+            console.log(`[stripe-webhook] tenant=${tenantId} status=${status}`);
           }
-          console.log(`[stripe-webhook] tenant=${tenantId} status=${status}`);
         }
       } catch (err) {
         console.error('[stripe-webhook] status update failed', err);

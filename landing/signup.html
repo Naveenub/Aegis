@@ -102,7 +102,7 @@
     <div class="field">
       <label for="tier">Plan</label>
       <select id="tier" name="tier"></select>
-      <p class="hint">Base price shown. Usage beyond your plan's included monthly allowance is billed as metered overage.</p>
+      <p id="tier-hint" class="hint"></p>
     </div>
     <p class="hint" style="margin:0 0 16px">By continuing you agree to the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
     <button id="account-submit" class="btn" type="submit" disabled>Continue to payment</button>
@@ -132,7 +132,7 @@
     <p class="hint">See the <a href="https://github.com/Naveenub/aegis/blob/main/README.md">README</a> for the full API.</p>
   </section>
 </main>
-<footer style="max-width:520px;margin:0 auto;padding:0 28px 40px;font-size:13px;color:var(--muted-2)"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/dpa">DPA</a> · <a href="/subprocessors">Subprocessors</a> · <a href="/security">Security</a> · <a href="mailto:{{CONTACT_EMAIL}}">Contact</a></footer>
+<footer style="max-width:520px;margin:0 auto;padding:0 28px 40px;font-size:13px;color:var(--muted-2)"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="mailto:{{CONTACT_EMAIL}}">Contact</a></footer>
 
 <script src="https://js.stripe.com/v3/"></script>
 <script>
@@ -191,13 +191,13 @@
       .catch(function () { return false; });
   }
 
-  function finish() {
+  function finish(free) {
     setStep(3);
     show('payment-form', false);
     show('account-form', false);
     showKey();
     show('done', true);
-    $('done-msg').textContent = 'Payment received — confirming activation…';
+    $('done-msg').textContent = free ? 'Free account created — confirming activation…' : 'Payment received — confirming activation…';
     $('curl-example').textContent =
       'curl -X POST ' + location.origin + '/task \\\n' +
       '  -H "X-API-Key: ' + pending.apiKey + '" \\\n' +
@@ -206,7 +206,9 @@
     waitForActivation(Date.now() + 60000).then(function (active) {
       $('done-msg').textContent = active
         ? 'You\'re live. Your API key is active.'
-        : 'Payment received. Activation can take a minute — your key will start working as soon as it completes.';
+        : (free
+          ? 'Your account is created. Activation can take a minute — your key will start working as soon as it completes.'
+          : 'Payment received. Activation can take a minute — your key will start working as soon as it completes.');
     });
     clearSession();
   }
@@ -218,7 +220,19 @@
     show('payment-form', true);
   }
 
+  function isFree(tier) { return tier === 'free'; }
+
+  // Button and hint follow the selected plan: the free plan skips payment entirely.
+  function syncPlanUi() {
+    var free = isFree($('tier').value);
+    $('account-submit').textContent = free ? 'Create free account' : 'Continue to payment';
+    $('tier-hint').textContent = free
+      ? 'No card needed. The free plan has hard monthly limits and no overage; upgrade any time.'
+      : 'Base price shown. Usage beyond your plan\'s included monthly allowance is billed as metered overage.';
+  }
+
   function formatPrice(p) {
+    if (p.amount === 0) return 'Free';
     var amount = new Intl.NumberFormat(undefined, { style: 'currency', currency: p.currency.toUpperCase() })
       .format(p.amount / 100);
     return amount + (p.interval ? ' / ' + p.interval : '');
@@ -234,11 +248,13 @@
       cfg.tiers.forEach(function (t) {
         var opt = document.createElement('option');
         opt.value = t.id;
-        opt.textContent = t.price ? t.label + ' — ' + formatPrice(t.price) : t.label;
+        opt.textContent = t.price && t.price.amount !== 0 ? t.label + ' — ' + formatPrice(t.price) : t.label;
         select.appendChild(opt);
       });
       var wanted = new URLSearchParams(location.search).get('tier');
       select.value = cfg.tiers.some(function (t) { return t.id === wanted; }) ? wanted : cfg.defaultTier;
+      select.addEventListener('change', syncPlanUi);
+      syncPlanUi();
       $('account-submit').disabled = false;
     });
   }
@@ -273,12 +289,12 @@
       saveSession();
       show('account-form', false);
       showKey();
-      if (r.body.status === 'active' || !r.body.clientSecret) { finish(); return; }
+      if (r.body.status === 'active' || !r.body.clientSecret) { finish(isFree(r.body.tier)); return; }
       mountPayment(r.body.clientSecret);
     }).catch(function (err) {
       showError(err.message);
       btn.disabled = false;
-      btn.textContent = 'Continue to payment';
+      syncPlanUi();
     });
   });
 

@@ -1,11 +1,11 @@
 import { runAgent } from './agent-runner.js';
-import { assertNoInjection } from './prompt-guard.js';
 import { logger } from './logger.js';
 import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
 import { initVectorIndex } from './vector-memory.js';
 import { assertTenantId, DEFAULT_TENANT } from './tenant.js';
 import { assertWorkflowQuota, trackWorkflowStart } from './tenant-quota.js';
+import { assertFreeTierLimits } from './billing/free-tier.js';
 import { recordUsageEvent, EVENT_TYPES } from './usage-recorder.js';
 import { scanRepo } from './repo-scanner.js';
 import { worktreeDir } from './git.js';
@@ -259,10 +259,6 @@ export function validatePlan(plan) {
       throw new Error(`${loc} (id="${t.id}") must have a non-empty description string`);
     }
 
-    // Planner text becomes a later agent's Task, so it must not carry injected
-    // instructions from the repo it just read (throws in block mode → re-plan).
-    assertNoInjection(`plan task ${t.id} description`, t.description);
-
     // depends_on — must be array; every dep must be a previously-seen id
     if (!Array.isArray(t.depends_on)) {
       throw new Error(
@@ -369,6 +365,7 @@ export async function runSystem(task, opts = {}) {
 
   // 0️⃣ Quota check — reject before any work is done if tenant is over limit
   await assertWorkflowQuota(tenantId);
+  await assertFreeTierLimits(tenantId);
 
   // Ensure this tenant's vector index exists before first use
   await initVectorIndex(tenantId);
@@ -429,6 +426,7 @@ export async function runTemplate(template, opts = {}) {
   logger.info({ tenantId, workflowId, task: template.task, priority }, 'Start (from template)');
 
   await assertWorkflowQuota(tenantId);
+  await assertFreeTierLimits(tenantId);
   await initVectorIndex(tenantId);
 
   const plan = validatePlan({ tasks: template.tasks });

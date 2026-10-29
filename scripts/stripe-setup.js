@@ -2,12 +2,14 @@
 /**
  * scripts/stripe-setup.js
  *
- * One-time Stripe provisioning: 5 Billing Meters, 3 base prices, and 15
- * per-tier metered prices (graduated — the tier's included allowance from
+ * One-time Stripe provisioning: 5 Billing Meters, one base price per PAID tier
+ * (the free tier has no Stripe objects), and 5 metered prices per paid tier (graduated — the tier's included allowance from
  * engine/billing/tiers.js is the free band, overage above it is charged).
  * Prints the env lines for .env / k8s secrets.
  *
- * You supply the money (nothing is defaulted):
+ * You supply the money (nothing is defaulted). Derive it from measured cost
+ * with scripts/measure-cost.js → scripts/propose-pricing.js, which prints these
+ * exact variables:
  *   BASE_USD_STARTER, BASE_USD_PRO, BASE_USD_ENTERPRISE   monthly base, USD
  *   OVERAGE_USD_WORKFLOW_RUN, OVERAGE_USD_AGENT_STEP,
  *   OVERAGE_USD_TOKENS_IN, OVERAGE_USD_TOKENS_OUT,
@@ -16,7 +18,8 @@
  *     are separate meters: Claude costs $3/M in, $15/M out, so one price
  *     for both cannot hold margin. Overage below provider cost is refused
  *     unless ALLOW_BELOW_COST=1. Cost basis: AEGIS_COST_INPUT_PER_MTOK /
- *     AEGIS_COST_OUTPUT_PER_MTOK (defaults 3 / 15).
+ *     AEGIS_COST_OUTPUT_PER_MTOK (defaults 3 / 15) and, if set,
+ *     AEGIS_COST_SANDBOX_PER_MIN for the sandbox-minutes meter.
  *
  *   STRIPE_SECRET_KEY=sk_... BASE_USD_STARTER=... node scripts/stripe-setup.js [--dry-run]
  *
@@ -24,7 +27,7 @@
  */
 import dotenv from 'dotenv';
 import Stripe from 'stripe';
-import { TIERS } from '../engine/billing/tiers.js';
+import { TIERS, PAID_TIERS } from '../engine/billing/tiers.js';
 import { EVENT_TYPES } from '../engine/usage-recorder.js';
 import { meterEventName } from '../engine/billing/stripe-reporter.js';
 
@@ -41,7 +44,7 @@ function need(name) {
 }
 
 const base = {};
-for (const tier of Object.keys(TIERS)) base[tier] = need(`BASE_USD_${tier.toUpperCase()}`);
+for (const tier of PAID_TIERS) base[tier] = need(`BASE_USD_${tier.toUpperCase()}`);
 const overage = {};
 for (const ev of Object.values(EVENT_TYPES)) overage[ev] = need(`OVERAGE_USD_${ev.toUpperCase()}`);
 
@@ -50,11 +53,17 @@ const costPerTok = {
   [EVENT_TYPES.TOKENS_IN]:  Number(process.env.AEGIS_COST_INPUT_PER_MTOK  ?? 3)  / 1e6,
   [EVENT_TYPES.TOKENS_OUT]: Number(process.env.AEGIS_COST_OUTPUT_PER_MTOK ?? 15) / 1e6,
 };
-for (const [ev, cost] of Object.entries(costPerTok)) {
+const costPerUnit = { ...costPerTok };
+// Sandbox minutes are infrastructure cost the operator knows, not Anthropic's;
+// guarded only when they say what it is.
+if (process.env.AEGIS_COST_SANDBOX_PER_MIN) {
+  costPerUnit[EVENT_TYPES.SANDBOX_MINUTES] = Number(process.env.AEGIS_COST_SANDBOX_PER_MIN);
+}
+for (const [ev, cost] of Object.entries(costPerUnit)) {
   if (overage[ev] < cost && process.env.ALLOW_BELOW_COST !== '1') {
     console.error(
       `[stripe-setup] OVERAGE_USD_${ev.toUpperCase()}=${overage[ev]} is below provider cost ` +
-      `(${cost}/token). Raise it or set ALLOW_BELOW_COST=1.`
+      `(${cost}/unit). Raise it or set ALLOW_BELOW_COST=1.`
     );
     process.exit(2);
   }
@@ -89,7 +98,7 @@ for (const ev of Object.values(EVENT_TYPES)) {
   meters[ev] = m.id;
 }
 
-for (const [tier, cfg] of Object.entries(TIERS)) {
+for (const [tier, cfg] of Object.entries(TIERS).filter(([t]) => PAID_TIERS.includes(t))) {
   const T = tier.toUpperCase();
   const bp = await call(`base ${tier}`, {
     currency: 'usd',

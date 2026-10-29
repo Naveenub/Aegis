@@ -122,6 +122,44 @@ describe('signupTenant provisioning', () => {
   });
 });
 
+describe('signupTenant free tier', () => {
+  const free = { email: 'a@b.co', tenantId: 'acme', tier: 'free' };
+
+  it('creates an ACTIVE tenant with a usable key and touches no Stripe object', async () => {
+    const r = await signupTenant(free);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({
+      tenantId: 'acme', tier: 'free', apiKey: 'raw_key', status: 'active',
+      clientSecret: null, stripeCustomerId: null, stripeSubscriptionId: null,
+    });
+    expect(stripe.provisionSubscription).not.toHaveBeenCalled();
+    expect(reg.setStripeCustomerId).not.toHaveBeenCalled();
+    expect(reg.setStatus).toHaveBeenCalledWith('acme', 'active');
+    expect(reg.setTier).toHaveBeenCalledWith('acme', 'free');
+  });
+
+  it('applies the free quota and keeps the email for a later upgrade', async () => {
+    await signupTenant(free);
+    expect(setQuota).toHaveBeenCalledWith('acme', expect.objectContaining({ maxActiveWorkflows: 1, maxDailyWorkflows: 3 }));
+    expect(reg.registerTenant).toHaveBeenCalledWith('acme', expect.objectContaining({ email: 'a@b.co' }));
+  });
+
+  it('still requires an isolated runner, same as paid signup', async () => {
+    delete process.env.DOCKER_HOST;
+    vi.resetModules();
+    ({ signupTenant } = await import('../engine/billing/signup.js'));
+    expect((await signupTenant(free)).status).toBe(503);
+  });
+
+  it('removes the partial tenant if provisioning fails, with no Stripe rollback to attempt', async () => {
+    createKey.mockRejectedValue(new Error('redis down'));
+    const r = await signupTenant(free);
+    expect(r.status).toBe(500);
+    expect(reg.removeTenant).toHaveBeenCalledWith('acme');
+    expect(stripe.cancelSubscription).not.toHaveBeenCalled();
+  });
+});
+
 describe('isolated runner guard', () => {
   const clear = () => { for (const k of RUNNER_KEYS) delete process.env[k]; };
   afterEach(() => { restoreRunnerEnv(); delete process.env.STRIPE_PUBLISHABLE_KEY; });
@@ -222,9 +260,12 @@ describe('getSignupConfig', () => {
     const r = await getSignupConfig();
     expect(r.status).toBe(200);
     expect(r.body.publishableKey).toBe('pk_test_123');
-    expect(r.body.tiers.map((t) => t.id)).toEqual(['starter', 'pro']);
-    expect(r.body.tiers[1].price).toEqual({ amount: 9900, currency: 'usd', interval: 'month' });
-    expect(r.body.defaultTier).toBe('starter');
+    expect(r.body.tiers.map((t) => t.id)).toEqual(['free', 'starter', 'pro']);
+    expect(r.body.tiers[2].price).toEqual({ amount: 9900, currency: 'usd', interval: 'month' });
+    // free is a fixed zero, never looked up in Stripe
+    expect(r.body.tiers[0].price).toEqual({ amount: 0, currency: 'usd', interval: 'month' });
+    expect(stripe.getBasePrice).not.toHaveBeenCalledWith('free');
+    expect(r.body.defaultTier).toBe('free');
   });
 
   it('still serves config with price null when Stripe lookup fails', async () => {
@@ -233,6 +274,6 @@ describe('getSignupConfig', () => {
     const { getSignupConfig } = await import('../engine/billing/signup.js');
     const r = await getSignupConfig();
     expect(r.status).toBe(200);
-    expect(r.body.tiers.every((t) => t.price === null)).toBe(true);
+    expect(r.body.tiers.filter((t) => t.id !== 'free').every((t) => t.price === null)).toBe(true);
   });
 });

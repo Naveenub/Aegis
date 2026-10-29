@@ -18,7 +18,14 @@ const getTenantMock = vi.fn();
 const setStatusMock = vi.fn();
 const markFirstPaidMock = vi.fn();
 const addCreditsMock = vi.fn();
-vi.mock('../engine/tenant-registry.js', () => ({ getTenant: getTenantMock, setStatus: setStatusMock, markFirstPaid: markFirstPaidMock }));
+const getTierMock = vi.fn();
+const setTierMock = vi.fn();
+const setQuotaMock = vi.fn();
+vi.mock('../engine/tenant-registry.js', () => ({
+  getTenant: getTenantMock, setStatus: setStatusMock, markFirstPaid: markFirstPaidMock,
+  getTier: getTierMock, setTier: setTierMock,
+}));
+vi.mock('../engine/tenant-quota.js', () => ({ setQuota: setQuotaMock }));
 vi.mock('../engine/billing/spend-guard.js', () => ({ addCredits: addCreditsMock }));
 
 let server, base;
@@ -32,6 +39,9 @@ beforeEach(async () => {
   setStatusMock.mockReset().mockResolvedValue(undefined);
   markFirstPaidMock.mockReset().mockResolvedValue(undefined);
   addCreditsMock.mockReset().mockResolvedValue({ applied: true });
+  getTierMock.mockReset().mockResolvedValue('starter'); // a paying tenant unless a test says otherwise
+  setTierMock.mockReset().mockResolvedValue(undefined);
+  setQuotaMock.mockReset().mockResolvedValue(undefined);
   vi.spyOn(console, 'log').mockImplementation(() => {});
   const { stripeWebhookRouter } = await import('../engine/billing/stripe-webhook.js');
   const app = express();
@@ -154,5 +164,100 @@ describe('stripe webhook', () => {
       metadata: { tenantId: 'acme', kind: 'credit_topup' }, payment_status: 'paid', currency: 'usd', amount_total: 5000,
     }));
     expect((await post()).status).toBe(500);
+  });
+
+  // ── plan changes ──────────────────────────────────────────────────────────
+
+  describe('plan changes', () => {
+    const paidInvoice = (tier, extra = {}) => event('invoice.paid', {
+      amount_paid: 4900,
+      parent: { subscription_details: { metadata: { tenantId: 'acme', tier } } },
+      ...extra,
+    });
+
+    it('moves the tenant and its quota to the tier on a paid invoice (upgrade)', async () => {
+      constructEventMock.mockReturnValue(paidInvoice('pro'));
+      expect((await post()).status).toBe(200);
+      expect(setTierMock).toHaveBeenCalledWith('acme', 'pro');
+      expect(setQuotaMock).toHaveBeenCalledWith('acme', expect.objectContaining({ maxActiveWorkflows: 10, maxDailyWorkflows: 100 }));
+      expect(setStatusMock).toHaveBeenCalledWith('acme', 'active');
+    });
+
+    it('free -> paid: the tenant becomes the paid tier only when the invoice is paid', async () => {
+      getTierMock.mockResolvedValue('free');
+      constructEventMock.mockReturnValue(paidInvoice('starter'));
+      await post();
+      expect(setTierMock).toHaveBeenCalledWith('acme', 'starter');
+      expect(markFirstPaidMock).toHaveBeenCalledWith('acme');
+    });
+
+    it('does nothing to tier or quota when the tenant is already on it', async () => {
+      constructEventMock.mockReturnValue(paidInvoice('starter'));
+      await post();
+      expect(setTierMock).not.toHaveBeenCalled();
+      expect(setQuotaMock).not.toHaveBeenCalled();
+    });
+
+    it('applies the new tier from subscription.updated (period-end downgrade phase change)', async () => {
+      getTierMock.mockResolvedValue('pro');
+      constructEventMock.mockReturnValue(event('customer.subscription.updated', {
+        status: 'active', metadata: { tenantId: 'acme', tier: 'starter' },
+      }));
+      await post();
+      expect(setTierMock).toHaveBeenCalledWith('acme', 'starter');
+      expect(setQuotaMock).toHaveBeenCalledWith('acme', expect.objectContaining({ maxActiveWorkflows: 3 }));
+    });
+
+    it('does not move the tier when the subscription is not paying', async () => {
+      constructEventMock.mockReturnValue(event('customer.subscription.updated', {
+        status: 'past_due', metadata: { tenantId: 'acme', tier: 'pro' },
+      }));
+      await post();
+      expect(setStatusMock).toHaveBeenCalledWith('acme', 'suspended');
+      expect(setTierMock).not.toHaveBeenCalled();
+    });
+
+    it.each(['free', 'gold', undefined])('ignores tier metadata %s on a paid invoice', async (tier) => {
+      constructEventMock.mockReturnValue(paidInvoice(tier));
+      await post();
+      expect(setTierMock).not.toHaveBeenCalled();
+    });
+
+    it('returns 500 so Stripe retries when the tier write fails', async () => {
+      setTierMock.mockRejectedValue(new Error('redis down'));
+      constructEventMock.mockReturnValue(paidInvoice('pro'));
+      expect((await post()).status).toBe(500);
+    });
+
+    it('paid -> free at period end: the tenant lands on free and stays ACTIVE', async () => {
+      getTierMock.mockResolvedValue('starter');
+      constructEventMock.mockReturnValue(event('customer.subscription.deleted', {
+        status: 'canceled', metadata: { tenantId: 'acme', downgradeTo: 'free' },
+      }));
+      await post();
+      expect(setTierMock).toHaveBeenCalledWith('acme', 'free');
+      expect(setQuotaMock).toHaveBeenCalledWith('acme', expect.objectContaining({ maxActiveWorkflows: 1, maxDailyWorkflows: 3 }));
+      expect(setStatusMock).toHaveBeenCalledWith('acme', 'active');
+      expect(setStatusMock).not.toHaveBeenCalledWith('acme', 'suspended');
+    });
+
+    it.each([
+      ['invoice.payment_failed', { subscription_details: { metadata: { tenantId: 'acme', tier: 'pro' } } }],
+      ['customer.subscription.deleted', { metadata: { tenantId: 'acme', tier: 'pro' } }],
+      ['customer.subscription.updated', { status: 'incomplete_expired', metadata: { tenantId: 'acme', tier: 'pro' } }],
+    ])('never suspends a FREE tenant on %s (a lapsed upgrade attempt)', async (type, obj) => {
+      getTierMock.mockResolvedValue('free');
+      constructEventMock.mockReturnValue(event(type, obj));
+      expect((await post()).status).toBe(200);
+      expect(setStatusMock).not.toHaveBeenCalled();
+      expect(setTierMock).not.toHaveBeenCalled();
+    });
+
+    it('still suspends a paying tenant on payment failure', async () => {
+      getTierMock.mockResolvedValue('pro');
+      constructEventMock.mockReturnValue(event('invoice.payment_failed', { subscription_details: { metadata: { tenantId: 'acme' } } }));
+      await post();
+      expect(setStatusMock).toHaveBeenCalledWith('acme', 'suspended');
+    });
   });
 });

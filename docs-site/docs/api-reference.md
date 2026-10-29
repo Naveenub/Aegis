@@ -33,11 +33,8 @@ Auth: `Authorization: Bearer <key>` where the key is `AEGIS_API_KEY_{TENANTID}` 
 | POST | `/signup` | Self-serve signup (unauthenticated) — see [Billing](billing) |
 | GET | `/tenants/:id/billing` | Tier and this month's usage vs. included allowance |
 | POST | `/billing/portal` | Stripe billing-portal URL (update card, pay invoice) |
+| POST | `/billing/plan` | Change plan `{ tier, email? }`: free→paid, upgrade now, downgrade / cancel at period end |
 | POST | `/webhooks/stripe` | Stripe webhook (signature-verified) |
-| GET/PUT | `/tenants/:id/retention` | Read / set data-retention policy and zero-retention mode — see [Compliance](compliance) |
-| POST | `/tenants/:id/data-deletion` | Delete all finished-workflow, job and memory content for the tenant (`{ "confirm": "<tenantId>" }`) |
-| GET | `/privacy`, `/terms`, `/dpa`, `/security`, `/subprocessors` | Public legal and trust pages (unauthenticated) |
-| GET | `/subprocessors.json` | Machine-readable subprocessor list (unauthenticated) |
 | GET | `/events` | Live SSE event stream |
 
 ## Billing status codes

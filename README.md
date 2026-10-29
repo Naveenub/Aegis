@@ -100,8 +100,7 @@ Agent inputs include AST-level repo context (symbol tables, import/call graphs) 
 - **Inbound webhooks** (`webhook-receiver.js`) — signature-verified GitHub/GitLab push and PR/MR webhooks can trigger workflows, filtered by branch pattern.
 - **PR/MR automation** — `AEGIS_PR_PROVIDER` (`github` / `gitlab` / `bitbucket`) opens a pull/merge request after a workflow merges, targeting `AEGIS_PR_TARGET_BRANCH`.
 - **AST-based repo intelligence** (`repo-scanner.js`) — built on `acorn`; produces symbol tables and import/call graphs to give agents accurate repo context.
-- **Prompt eval harness** (`prompt-eval.js`, `npm run eval`) — scores each agent persona against golden cases using the real Claude API; runs as a CI gate so a bad persona edit is caught before it ships. It checks output *format* only; it is not evidence of outcomes.
-- **ROI benchmark** (`bench/`, `npm run bench`) — runs Aegis on real merged PRs from public repos and scores merge rate (verified by held-out tests), cost per merged PR, and net time saved. Harness and 8 verified tasks are included; **no published results yet** — see [`bench/README.md`](bench/README.md). A design-partner case-study generator (`npm run case-study`) and pilot protocol live in `docs-site/docs/case-studies/`.
+- **Prompt eval harness** (`prompt-eval.js`, `npm run eval`) — scores each agent persona against golden cases using the real Claude API; runs as a CI gate so a bad persona edit is caught before it ships.
 - **CLI** (`cli/claude.js`) — submits a task, polls `GET /workflows/:workflowId` to a terminal state, and writes a context snapshot to `.claude/context/jobs.json`.
 
 ---
@@ -216,13 +215,12 @@ Auth: `Authorization: Bearer <key>` or `x-api-key: <key>`. Keys resolve in this 
 | GET | `/signup/config` | Unauthenticated; Stripe publishable key and self-serve tiers for the signup page |
 | POST | `/signup` | Unauthenticated self-serve signup (Stripe customer + subscription, tenant, first API key) |
 | POST | `/billing/portal` | Stripe billing-portal URL |
+| POST | `/billing/plan` | Change plan (free→paid, upgrade, period-end downgrade) |
 | GET/POST | `/tenants`, `/tenants/:id` | Tenant management |
 | GET | `/tenants/:id/billing` | Tier + usage vs. included allowance |
 | GET/POST/DELETE | `/tenants/:id/keys[/:keyId]` | Per-tenant API key management (key is returned once on creation) |
 | GET | `/tenants/:id/audit-log` | Query the compliance audit trail |
 | GET | `/tenants/:id/audit-log/export` | Export the audit trail (JSON or CSV) |
-| GET / PUT | `/tenants/:id/retention` | Data-retention policy and zero-retention mode ([docs](docs-site/docs/compliance.md)) |
-| POST | `/tenants/:id/data-deletion` | Delete the tenant's workflow, job and memory content |
 
 **Inbound webhooks** (authenticated by signature, not API key)
 

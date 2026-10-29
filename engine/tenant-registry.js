@@ -58,7 +58,8 @@ export async function getTenant(tenantId) {
  * Register a tenant.  Idempotent — calling it twice for the same id is safe.
  *
  * @param {string} tenantId   – must pass assertTenantId()
- * @param {object} [meta]     – optional { label } stored alongside the id
+ * @param {object} [meta]     – optional { label, email } stored alongside the id
+ *   (email lets a free tenant upgrade later without re-entering it)
  * @returns {Promise<{ tenantId, created: boolean }>}
  *   created=false when the tenant already existed
  */
@@ -73,6 +74,7 @@ export async function registerTenant(tenantId, meta = {}) {
     await redis.hset(TENANT_META_KEY(tenantId), {
       createdAt: String(Date.now()),
       label: meta.label ?? tenantId,
+      ...(meta.email ? { email: meta.email } : {}),
     });
   }
 
@@ -225,46 +227,6 @@ export async function getSpendConfig(tenantId) {
   assertTenantId(tenantId);
   const [mode, cap] = await redis.hmget(TENANT_META_KEY(tenantId), 'spendMode', 'spendCapUsd');
   return { mode: mode ?? null, capUsd: cap != null ? Number(cap) : null };
-}
-
-/**
- * Per-tenant data-retention overrides (see engine/retention-policy.js for the
- * defaults, bounds and validation — this just persists what it is given).
- * A null value clears that override so the platform default applies again.
- *
- * @param {string} tenantId
- * @param {{ jobsDays?: number|null, workflowsDays?: number|null,
- *           memoryDays?: number|null, zeroRetention?: boolean }} updates
- */
-export async function setRetentionConfig(tenantId, updates = {}) {
-  assertTenantId(tenantId);
-  const FIELD = { jobsDays: 'retentionJobsDays', workflowsDays: 'retentionWorkflowsDays', memoryDays: 'retentionMemoryDays' };
-  const set = {};
-  const del = [];
-  for (const [k, field] of Object.entries(FIELD)) {
-    if (updates[k] === undefined) continue;
-    if (updates[k] === null) del.push(field); else set[field] = String(updates[k]);
-  }
-  if (updates.zeroRetention !== undefined) {
-    if (updates.zeroRetention) set.zeroRetention = '1'; else del.push('zeroRetention');
-  }
-  if (Object.keys(set).length) await redis.hset(TENANT_META_KEY(tenantId), set);
-  if (del.length) await redis.hdel(TENANT_META_KEY(tenantId), ...del);
-}
-
-/**
- * Raw per-tenant retention overrides. null = no override (use platform default).
- * @param {string} tenantId
- * @returns {Promise<{ jobsDays: number|null, workflowsDays: number|null, memoryDays: number|null, zeroRetention: boolean }>}
- */
-export async function getRetentionConfig(tenantId) {
-  assertTenantId(tenantId);
-  const [j, w, m, z] = await redis.hmget(
-    TENANT_META_KEY(tenantId),
-    'retentionJobsDays', 'retentionWorkflowsDays', 'retentionMemoryDays', 'zeroRetention',
-  );
-  const num = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
-  return { jobsDays: num(j), workflowsDays: num(w), memoryDays: num(m), zeroRetention: z === '1' };
 }
 
 /**

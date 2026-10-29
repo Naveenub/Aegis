@@ -49,6 +49,30 @@ describe('tiers', () => {
     expect(Object.values(enterprise.allowance).every((v) => v === null)).toBe(true);
   });
 
+  it('has a free tier that is unpaid, smaller than starter, and has a finite cap', () => {
+    const { free, starter } = tiers.TIERS;
+    expect(free.paid).toBe(false);
+    expect(tiers.isPaidTier('free')).toBe(false);
+    expect(tiers.isPaidTier('starter')).toBe(true);
+    for (const e of ['workflow_run', 'agent_step', 'tokens_in', 'tokens_out', 'sandbox_minutes']) {
+      expect(free.allowance[e]).toBeGreaterThan(0);
+      expect(free.allowance[e]).toBeLessThan(starter.allowance[e]);
+    }
+    expect(free.spend.capUsd).toBeLessThan(starter.spend.capUsd);
+    expect(tiers.PAID_TIERS).toEqual(['starter', 'pro', 'enterprise']);
+  });
+
+  it('never makes free the fallback for tenants with no stored tier', () => {
+    expect(tiers.DEFAULT_TIER).toBe('starter');
+    expect(tiers.getTierConfig('free')).toBe(tiers.TIERS.free);
+  });
+
+  it('orders tiers so an upgrade can be told from a downgrade', () => {
+    expect(tiers.tierRank('pro')).toBeGreaterThan(tiers.tierRank('starter'));
+    expect(tiers.tierRank('starter')).toBeGreaterThan(tiers.tierRank('free'));
+    expect(tiers.tierRank('nope')).toBe(-1);
+  });
+
   it('is frozen and falls back to the default tier for unknown names', () => {
     expect(Object.isFrozen(tiers.TIERS)).toBe(true);
     expect(tiers.getTierConfig('nope')).toBe(tiers.TIERS[tiers.DEFAULT_TIER]);

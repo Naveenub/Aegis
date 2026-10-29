@@ -4,7 +4,11 @@
  * Self-serve signup orchestration behind POST /signup, kept out of server.js
  * so it is unit-testable. Returns { status, body } for the route to send.
  *
- * Flow: validate → 409 if tenant exists → Stripe customer + incomplete
+ * Free tier: no Stripe objects at all. The tenant is registered 'active' with
+ * the free tier's quota and its first key works immediately; limits are hard
+ * (billing/free-tier.js + spend-guard.js). Upgrading later is POST /billing/plan.
+ *
+ * Paid tiers — flow: validate → 409 if tenant exists → Stripe customer + incomplete
  * subscription → register tenant (status 'pending' until the first payment is
  * confirmed; 'active' only if Stripe reports the subscription already active)
  * → issue first API key (unusable while pending, see middleware/auth.js).
@@ -16,7 +20,7 @@ import { getTenant, registerTenant, setTier, setStripeCustomerId, setStatus, rem
 import { setQuota } from '../tenant-quota.js';
 import { createKey } from '../key-store.js';
 import { recordAuditEvent } from '../audit-log.js';
-import { getTierConfig, DEFAULT_TIER, TIERS } from './tiers.js';
+import { getTierConfig, DEFAULT_TIER, SIGNUP_DEFAULT_TIER, TIERS, isPaidTier } from './tiers.js';
 import { provisionSubscription, cancelSubscription, getBasePrice } from './stripe-customer.js';
 
 /**
@@ -105,20 +109,25 @@ export async function signupTenant(input) {
     return { status: 409, body: { error: `Tenant "${id}" already exists.` } };
   }
 
-  let subscription;
-  try {
-    subscription = await provisionSubscription({ email, tenantId: id, tier: resolvedTier });
-  } catch (err) {
-    console.error('[signup] Stripe provisioning failed', err);
-    return { status: 502, body: { error: `Billing provisioning failed: ${err.message}` } };
+  // Free tier: nothing to bill, nothing to confirm.
+  const free = !isPaidTier(resolvedTier);
+
+  let subscription = null;
+  if (!free) {
+    try {
+      subscription = await provisionSubscription({ email, tenantId: id, tier: resolvedTier });
+    } catch (err) {
+      console.error('[signup] Stripe provisioning failed', err);
+      return { status: 502, body: { error: `Billing provisioning failed: ${err.message}` } };
+    }
   }
 
   try {
-    await registerTenant(id, { label });
+    await registerTenant(id, { label, email });
     await setTier(id, resolvedTier);
     await setQuota(id, getTierConfig(resolvedTier).quota);
-    await setStripeCustomerId(id, subscription.customerId);
-    const status = subscription.status === 'active' ? 'active' : 'pending';
+    if (subscription) await setStripeCustomerId(id, subscription.customerId);
+    const status = free || subscription.status === 'active' ? 'active' : 'pending';
     await setStatus(id, status);
     const key = await createKey(id, { label: label || 'signup' });
 
@@ -127,7 +136,7 @@ export async function signupTenant(input) {
       action: 'tenant.signup',
       resourceType: 'tenant',
       resourceId: id,
-      detail: { tier: resolvedTier, stripeCustomerId: subscription.customerId },
+      detail: { tier: resolvedTier, stripeCustomerId: subscription?.customerId ?? null },
     }).catch((err) => console.error('[audit] tenant.signup', err));
 
     return {
@@ -137,17 +146,20 @@ export async function signupTenant(input) {
         tier: resolvedTier,
         apiKey: key.rawKey,
         keyId: key.keyId,
-        stripeCustomerId: subscription.customerId,
-        stripeSubscriptionId: subscription.subscriptionId,
+        stripeCustomerId: subscription?.customerId ?? null,
+        stripeSubscriptionId: subscription?.subscriptionId ?? null,
         status,
         // Confirm payment client-side with Stripe.js; the key works once status is active.
-        clientSecret: subscription.clientSecret,
+        // Null for the free tier.
+        clientSecret: subscription?.clientSecret ?? null,
       },
     };
   } catch (err) {
-    console.error('[signup] Tenant provisioning failed after Stripe subscription created', err);
-    await cancelSubscription(subscription.subscriptionId).catch((e) =>
-      console.error('[signup] Failed to roll back Stripe subscription', e));
+    console.error('[signup] Tenant provisioning failed after signup began', err);
+    if (subscription) {
+      await cancelSubscription(subscription.subscriptionId).catch((e) =>
+        console.error('[signup] Failed to roll back Stripe subscription', e));
+    }
     await removeTenant(id).catch((e) => console.error('[signup] Failed to remove partial tenant', e));
     return { status: 500, body: { error: err.message } };
   }
@@ -160,9 +172,9 @@ export async function signupTenant(input) {
  * it, self-serve signup is reported as unavailable (503) and the page falls
  * back to the contact email.
  *
- * Only starter and pro are offered self-serve; enterprise stays sales-led.
+ * free, starter and pro are offered self-serve; enterprise stays sales-led.
  */
-export const SELF_SERVE_TIERS = Object.freeze(['starter', 'pro']);
+export const SELF_SERVE_TIERS = Object.freeze(['free', 'starter', 'pro']);
 
 const PRICE_TTL_MS = 5 * 60 * 1000;
 let _priceCache = null; // { at, prices }
@@ -170,7 +182,7 @@ let _priceCache = null; // { at, prices }
 async function loadPrices() {
   if (_priceCache && Date.now() - _priceCache.at < PRICE_TTL_MS) return _priceCache.prices;
   const prices = {};
-  await Promise.all(SELF_SERVE_TIERS.map(async (id) => {
+  await Promise.all(SELF_SERVE_TIERS.filter(isPaidTier).map(async (id) => {
     try {
       prices[id] = await getBasePrice(id);
     } catch (err) {
@@ -195,8 +207,13 @@ export async function getSignupConfig() {
     status: 200,
     body: {
       publishableKey,
-      tiers: SELF_SERVE_TIERS.map((id) => ({ id, label: TIERS[id].label, price: prices[id] ?? null })),
-      defaultTier: DEFAULT_TIER,
+      tiers: SELF_SERVE_TIERS.map((id) => ({
+        id,
+        label: TIERS[id].label,
+        // The free tier has no Stripe price; it is a fixed zero, not a lookup.
+        price: isPaidTier(id) ? (prices[id] ?? null) : { amount: 0, currency: 'usd', interval: 'month' },
+      })),
+      defaultTier: SIGNUP_DEFAULT_TIER,
     },
   };
 }
