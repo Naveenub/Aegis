@@ -19,7 +19,7 @@ If `VITE_AEGIS_API_URL` is unset, requests go to the page's own origin.
 
 ## Auth
 
-The login screen takes an AEGIS API key, verifies it against `GET /tenants`, and stores it in `localStorage` (`aegis.apiKey`). Keys are sent as `x-api-key`. Use a key scoped to the tenant you want to view.
+The login screen offers **SSO** (enter your tenant ID → redirected to your identity provider) or an AEGIS **API key**. Either way the credential is verified against `GET /auth/me`, stored in `localStorage` (`aegis.apiKey`) and sent as `x-api-key`; the top bar shows who you are and your role. SSO sessions are short-lived (`AEGIS_SESSION_TTL_HOURS`, default 8) and revocable. SSO needs the server's `AEGIS_DASHBOARD_URL` set to this app's URL — see the root README. API keys are scoped to a tenant and a role.
 
 ## Structure
 

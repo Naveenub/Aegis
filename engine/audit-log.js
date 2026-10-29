@@ -19,6 +19,9 @@
  * signed with AEGIS_AUDIT_SIGNING_KEY so a party with Redis access but not the
  * signing key cannot forge a replacement chain either.
  *
+ * actorEmail / actorRole / ip are hashed only when present, so chains written
+ * before they existed still verify unchanged (JSON.stringify drops undefined).
+ *
  * The chain-tip read + advance is serialised per tenant via the same
  * distributed lock used elsewhere in Aegis (engine/lock.js), so concurrent
  * appends from the API server and workers never race on prevHash.
@@ -36,8 +39,11 @@
  *     id:           string,   // "{tenantId}-{seq}"
  *     ts:           number,   // ms epoch
  *     tenantId:     string,
- *     actorId:      string,   // keyId, 'system', or 'env-key'
- *     actorType:    string,   // 'api-key' | 'system'
+ *     actorId:      string,   // userId, keyId, 'system', or 'env-key'
+ *     actorType:    string,   // 'user' | 'api-key' | 'system' | 'anonymous'
+ *     actorEmail?:  string,   // set for 'user' actors (SSO identity)
+ *     actorRole?:   string,   // RBAC role the actor held when it acted
+ *     ip?:          string,   // client IP as seen by the server
  *     action:       string,   // e.g. 'workflow.submitted', 'key.revoked'
  *     resourceType: string,   // e.g. 'workflow', 'apiKey'
  *     resourceId:   string,
@@ -60,7 +66,6 @@ import { createHash, createHmac, randomBytes } from 'crypto';
 import IORedis from 'ioredis';
 import { assertTenantId } from './tenant.js';
 import { acquireLock, releaseLock } from './lock.js';
-import { isZeroRetention, REDACTED } from './retention-policy.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect:          true,
@@ -102,8 +107,8 @@ const K = {
 
 function canonicalCore(core) {
   // Stable key order so the same core always hashes the same way.
-  const { id, ts, tenantId, actorId, actorType, action, resourceType, resourceId, detail } = core;
-  return JSON.stringify({ id, ts, tenantId, actorId, actorType, action, resourceType, resourceId, detail });
+  const { id, ts, tenantId, actorId, actorType, action, resourceType, resourceId, detail, actorEmail, actorRole, ip } = core;
+  return JSON.stringify({ id, ts, tenantId, actorId, actorType, action, resourceType, resourceId, detail, actorEmail, actorRole, ip });
 }
 
 function hashEvent(prevHash, core) {
@@ -121,8 +126,11 @@ function signHash(hash) {
  *
  * @param {string} tenantId
  * @param {object} opts
- * @param {string}  opts.actorId       - keyId, 'system', or 'env-key'
- * @param {string}  [opts.actorType]   - 'api-key' | 'system' (default 'api-key')
+ * @param {string}  opts.actorId       - userId, keyId, 'system', or 'env-key'
+ * @param {string}  [opts.actorType]   - 'user' | 'api-key' | 'system' | 'anonymous' (default 'api-key')
+ * @param {string}  [opts.actorEmail]  - identity of a 'user' actor
+ * @param {string}  [opts.actorRole]   - RBAC role at the time of the action
+ * @param {string}  [opts.ip]          - client IP
  * @param {string}  opts.action        - e.g. 'workflow.submitted'
  * @param {string}  opts.resourceType  - e.g. 'workflow'
  * @param {string}  opts.resourceId
@@ -132,6 +140,9 @@ function signHash(hash) {
 export async function recordAuditEvent(tenantId, {
   actorId,
   actorType = 'api-key',
+  actorEmail,
+  actorRole,
+  ip,
   action,
   resourceType,
   resourceId,
@@ -144,12 +155,6 @@ export async function recordAuditEvent(tenantId, {
 
   const ts = Date.now();
 
-  // Zero-retention: the audit trail is kept (it is metadata), but free-text
-  // excerpts of the customer's task are not written into it.
-  if (detail && typeof detail.task === 'string' && await isZeroRetention(tenantId)) {
-    detail = { ...detail, task: REDACTED };
-  }
-
   // Chain-tip read + advance must be strictly ordered per tenant, or two
   // concurrent appends could compute a hash from the same prevHash and one
   // would silently overwrite the other's position in the chain. Reuse the
@@ -159,19 +164,26 @@ export async function recordAuditEvent(tenantId, {
   let event;
   try {
     const id = `${tenantId}-${await redis.incr(K.seq(tenantId))}`;
-    const core = { id, ts, tenantId, actorId, actorType, action, resourceType, resourceId, detail };
+    // null → undefined so an absent identity field never enters the hash (see header note).
+    const core = {
+      id, ts, tenantId, actorId, actorType, action, resourceType, resourceId, detail,
+      actorEmail: actorEmail ?? undefined, actorRole: actorRole ?? undefined, ip: ip ?? undefined,
+    };
 
     const prevHash = (await redis.get(K.tip(tenantId))) || '';
     const hash = hashEvent(prevHash, core);
     const sig = signHash(hash);
     event = { ...core, prevHash, hash, sig };
+    const optional = Object.fromEntries(
+      Object.entries({ actorEmail: core.actorEmail, actorRole: core.actorRole, ip: core.ip }).filter(([, v]) => v !== undefined),
+    );
 
     const eventKey = K.event(tenantId, id);
     await redis.pipeline()
       .hset(eventKey, {
         id, ts: ts.toString(), tenantId, actorId, actorType, action,
         resourceType, resourceId, detail: JSON.stringify(detail),
-        prevHash, hash, sig,
+        prevHash, hash, sig, ...optional,
       })
       .zadd(K.index(tenantId), ts, eventKey)
       .set(K.tip(tenantId), hash)
@@ -197,6 +209,9 @@ function deserializeEvent(raw) {
     resourceType: raw.resourceType,
     resourceId:   raw.resourceId,
     detail:       raw.detail ? JSON.parse(raw.detail) : {},
+    actorEmail:   raw.actorEmail,
+    actorRole:    raw.actorRole,
+    ip:           raw.ip,
     prevHash:     raw.prevHash,
     hash:         raw.hash,
     sig:          raw.sig,
@@ -250,6 +265,7 @@ export function verifyChain(events) {
     const expectedHash = hashEvent(e.prevHash, {
       id: e.id, ts: e.ts, tenantId: e.tenantId, actorId: e.actorId, actorType: e.actorType,
       action: e.action, resourceType: e.resourceType, resourceId: e.resourceId, detail: e.detail,
+      actorEmail: e.actorEmail, actorRole: e.actorRole, ip: e.ip,
     });
     if (expectedHash !== e.hash || signHash(e.hash) !== e.sig) {
       return { ok: false, brokenAt: e.id };
@@ -261,10 +277,10 @@ export function verifyChain(events) {
 // ─── Export ─────────────────────────────────────────────────────────────────────
 
 function toCsv(events) {
-  const header = ['id', 'ts', 'tenantId', 'actorId', 'actorType', 'action', 'resourceType', 'resourceId', 'detail', 'prevHash', 'hash', 'sig'];
+  const header = ['id', 'ts', 'tenantId', 'actorId', 'actorType', 'actorEmail', 'actorRole', 'ip', 'action', 'resourceType', 'resourceId', 'detail', 'prevHash', 'hash', 'sig'];
   const escape = v => `"${String(v).replace(/"/g, '""')}"`;
   const rows = events.map(e => header.map(f => {
-    const v = f === 'detail' ? JSON.stringify(e.detail) : e[f];
+    const v = f === 'detail' ? JSON.stringify(e.detail) : (e[f] ?? '');
     return escape(v);
   }).join(','));
   return [header.join(','), ...rows].join('\n');

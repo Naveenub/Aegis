@@ -22,21 +22,38 @@
  *   Authorization: Bearer <key>
  *   x-api-key: <key>
  *
+ * Dashboard sessions (SSO)
+ * ────────────────────────
+ * A session token ("aegs_…", issued by POST /auth/sso/exchange) travels exactly
+ * like an API key — same headers, same ?apiKey= SSE fallback — and resolves to
+ * a human user instead of a key. Role and disabled state are read live from
+ * the user record on every request.
+ *
  * After successful auth:
- *   req.resolvedTenantId  – the tenant the key authorises
+ *   req.resolvedTenantId  – the tenant the credential authorises
  *   req.resolvedKeyId     – the keyId from the store, or 'env' for static keys
+ *                           (undefined for user sessions)
+ *   req.actor             – { type: 'user'|'api-key', id, role, email? }
+ *
+ * Authorisation: put requirePermission('<perm>') after requireApiKey
+ * (permissions → minimum role live in engine/rbac.js). Keys created before
+ * roles existed, and env-var keys, are 'admin'.
  *
  * Usage (unchanged from before)
  * ──────────────────────────────
- *   import { requireApiKey, optionalApiKey, assertTenantAccess } from './middleware/auth.js';
+ *   import { requireApiKey, optionalApiKey, assertTenantAccess, requirePermission } from './middleware/auth.js';
  *
- *   app.post('/task', (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId));
+ *   app.post('/task', (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+ *                     requirePermission('workflow.run'), handler);
  *   app.get('/health', optionalApiKey, handler);
  *   if (!assertTenantAccess(req, tenantId, res)) return;
  */
 
+import { timingSafeEqual } from 'crypto';
 import { hashKey, lookupByHash } from '../engine/key-store.js';
 import { getStatus } from '../engine/tenant-registry.js';
+import { resolveSession, SESSION_PREFIX } from '../engine/user-store.js';
+import { can, LEGACY_ROLE, PERMISSIONS } from '../engine/rbac.js';
 
 const GLOBAL_KEY        = process.env.AEGIS_API_KEY ?? '';
 const DEFAULT_TENANT_ID = 'default';
@@ -83,7 +100,7 @@ function tenantEnvSuffix(tenantId) {
  * connections — browsers cannot set custom headers on EventSource requests.
  * Header-based auth (Authorization: Bearer or x-api-key) takes priority.
  */
-function extractKey(req) {
+export function extractKey(req) {
   const authHeader = req.headers['authorization'] ?? '';
   if (authHeader.toLowerCase().startsWith('bearer ')) {
     return authHeader.slice(7).trim();
@@ -126,16 +143,29 @@ function resolveEnvKey(requestedTenantId) {
 }
 
 /**
- * Core async key resolution.
+ * Core async credential resolution.
  *
- * Checks Redis key-store first (runtime keys), then falls back to env vars
- * (static keys).  Returns { tenantId, keyId } on success or null on failure.
+ * Session tokens resolve to a user; anything else checks the Redis key-store
+ * first (runtime keys), then env vars (static keys).
+ * Returns { tenantId, keyId, role, actor } on success or null on failure.
  *
- * @param {string}           provided           - raw key from the request
+ * @param {string}           provided           - raw key / session token from the request
  * @param {string|undefined} requestedTenantId  - tenant the caller claims to be
- * @returns {Promise<{ tenantId: string, keyId: string }|null>}
+ * @returns {Promise<{ tenantId: string, keyId: string|null, role: string,
+ *                     actor: { type: string, id: string, role: string, email?: string } }|null>}
  */
 async function resolveKey(provided, requestedTenantId) {
+  // ── 0. SSO dashboard session ──────────────────────────────────────────────
+  if (provided.startsWith(SESSION_PREFIX)) {
+    const user = await resolveSession(provided);
+    if (!user) return null;
+    if (requestedTenantId && requestedTenantId !== user.tenantId) return null;
+    return {
+      tenantId: user.tenantId, keyId: null, role: user.role,
+      actor: { type: 'user', id: user.userId, email: user.email, role: user.role },
+    };
+  }
+
   // ── 1. Redis key-store (runtime keys) ─────────────────────────────────────
   const hash   = hashKey(provided);
   const stored = await lookupByHash(hash);
@@ -145,16 +175,26 @@ async function resolveKey(provided, requestedTenantId) {
     if (requestedTenantId && requestedTenantId !== stored.tenantId) {
       return null; // key is valid but not for the claimed tenant
     }
-    return stored; // { tenantId, keyId }
+    const role = stored.role ?? LEGACY_ROLE;
+    return { tenantId: stored.tenantId, keyId: stored.keyId, role, actor: { type: 'api-key', id: stored.keyId, role } };
   }
 
   // ── 2. Env-var static keys (legacy / bootstrap) ───────────────────────────
   const envEntry = resolveEnvKey(requestedTenantId);
   if (envEntry && safeCompare(provided, envEntry.key)) {
-    return { tenantId: envEntry.tenantId, keyId: 'env' };
+    return {
+      tenantId: envEntry.tenantId, keyId: 'env', role: LEGACY_ROLE,
+      actor: { type: 'api-key', id: 'env-key', role: LEGACY_ROLE },
+    };
   }
 
   return null;
+}
+
+function applyResolved(req, resolved) {
+  req.resolvedTenantId = resolved.tenantId;
+  req.resolvedKeyId    = resolved.keyId ?? undefined;
+  req.actor            = { ...resolved.actor, tenantId: resolved.tenantId };
 }
 
 // ─── Exported middleware ───────────────────────────────────────────────────────
@@ -168,12 +208,17 @@ async function resolveKey(provided, requestedTenantId) {
  *   app.post('/task', (req, res, next) =>
  *     requireApiKey(req, res, next, req.body?.tenantId));
  */
-export async function requireApiKey(req, res, next, requestedTenantId) {
+export async function requireApiKey(req, res, next, ...rest) {
+  // Express treats any handler with fn.length > 3 as an ERROR handler and skips
+  // it for normal requests, so a bare `app.get(path, requireApiKey, …)` would
+  // never run auth. The optional tenant claim therefore rides in a rest
+  // parameter (not counted by fn.length) — keep this function at length 3.
+  const requestedTenantId = rest[0];
   const provided = extractKey(req);
 
   if (!provided) {
     return res.status(401).json({
-      error: 'Missing API key. Provide Authorization: Bearer <key> or x-api-key: <key>.',
+      error: 'Missing API key or session token. Provide Authorization: Bearer <key> or x-api-key: <key>.',
     });
   }
 
@@ -187,7 +232,7 @@ export async function requireApiKey(req, res, next, requestedTenantId) {
   }
 
   if (!resolved) {
-    return res.status(403).json({ error: 'Invalid or revoked API key.' });
+    return res.status(403).json({ error: 'Invalid, revoked or expired credentials.' });
   }
 
   // Billing gate: signed-up-but-unpaid or payment-failed tenants are blocked.
@@ -209,8 +254,7 @@ export async function requireApiKey(req, res, next, requestedTenantId) {
     }
   }
 
-  req.resolvedTenantId = resolved.tenantId;
-  req.resolvedKeyId    = resolved.keyId;
+  applyResolved(req, resolved);
   next();
 }
 
@@ -229,9 +273,8 @@ export async function optionalApiKey(req, res, next) {
     const resolved = await resolveKey(provided, undefined);
     // Pending/suspended tenants are treated as unauthenticated here.
     if (resolved && !(await inactiveStatus(resolved))) {
-      req.authenticated    = true;
-      req.resolvedTenantId = resolved.tenantId;
-      req.resolvedKeyId    = resolved.keyId;
+      req.authenticated = true;
+      applyResolved(req, resolved);
     } else {
       req.authenticated = false;
     }
@@ -258,4 +301,57 @@ export function assertTenantAccess(req, tenantId, res) {
     return false;
   }
   return true;
+}
+
+/**
+ * Route-level authorisation: place AFTER requireApiKey.
+ * Fails closed — no resolved actor, or a role below the permission's minimum, is 403.
+ *
+ *   app.delete('/x', requireApiKey, requirePermission('key.manage'), handler);
+ */
+export function requirePermission(permission) {
+  if (!PERMISSIONS[permission]) throw new Error(`Unknown permission "${permission}".`);
+  return (req, res, next) => {
+    if (!can(req.actor?.role, permission)) {
+      return res.status(403).json({
+        error: `Role "${req.actor?.role ?? 'none'}" cannot perform this action.`,
+        permission,
+        requiredRole: PERMISSIONS[permission],
+      });
+    }
+    next();
+  };
+}
+
+/**
+ * Identity fields for recordAuditEvent(): spread into the event so every
+ * audit entry names the human (or key) behind the request.
+ *
+ *   recordAuditEvent(tenant, { ...auditActor(req), action, resourceType, resourceId })
+ */
+export function auditActor(req) {
+  const a = req.actor;
+  if (!a) return { actorId: req.resolvedKeyId ?? 'env-key', actorType: 'api-key', ip: req.ip };
+  return {
+    actorId: a.id,
+    actorType: a.type,
+    actorRole: a.role,
+    ...(a.email ? { actorEmail: a.email } : {}),
+    ip: req.ip,
+  };
+}
+
+/**
+ * Platform-operator gate (x-admin-key = AEGIS_ADMIN_KEY): cap overrides,
+ * manual credit grants, per-tenant SSO config. Not a tenant role — it is the
+ * deployment owner's key. Unset = routes disabled (fails closed).
+ */
+export function requireAdmin(req, res, next) {
+  const expected = (process.env.AEGIS_ADMIN_KEY ?? '').trim();
+  const given = String(req.headers['x-admin-key'] ?? '');
+  const a = Buffer.from(given), b = Buffer.from(expected);
+  if (!expected || a.length !== b.length || !timingSafeEqual(a, b)) {
+    return res.status(403).json({ error: 'Admin key required.' });
+  }
+  next();
 }

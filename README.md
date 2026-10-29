@@ -215,12 +215,17 @@ Auth: `Authorization: Bearer <key>` or `x-api-key: <key>`. Keys resolve in this 
 | GET | `/signup/config` | Unauthenticated; Stripe publishable key and self-serve tiers for the signup page |
 | POST | `/signup` | Unauthenticated self-serve signup (Stripe customer + subscription, tenant, first API key) |
 | POST | `/billing/portal` | Stripe billing-portal URL |
-| POST | `/billing/plan` | Change plan (free→paid, upgrade, period-end downgrade) |
 | GET/POST | `/tenants`, `/tenants/:id` | Tenant management |
 | GET | `/tenants/:id/billing` | Tier + usage vs. included allowance |
 | GET/POST/DELETE | `/tenants/:id/keys[/:keyId]` | Per-tenant API key management (key is returned once on creation) |
 | GET | `/tenants/:id/audit-log` | Query the compliance audit trail |
 | GET | `/tenants/:id/audit-log/export` | Export the audit trail (JSON or CSV) |
+| GET | `/auth/sso/:tenantId/login` | Start OIDC single sign-on |
+| GET | `/auth/me` | Who am I: identity, role, permissions (API key or session) |
+| POST | `/auth/logout` | End an SSO session |
+| GET / POST | `/tenants/:id/users` | List / pre-provision users (admin) |
+| PATCH | `/tenants/:id/users/:userId` | Change a user's role or disable them (admin) |
+| GET / PUT / DELETE | `/tenants/:id/sso` | SSO config (read: admin; write: operator `x-admin-key`) |
 
 **Inbound webhooks** (authenticated by signature, not API key)
 
@@ -231,6 +236,23 @@ Auth: `Authorization: Bearer <key>` or `x-api-key: <key>`. Keys resolve in this 
 | POST | `/webhooks/stripe` | Stripe events that drive tenant status |
 
 ---
+
+## Access control & SSO
+
+**Roles.** Every credential has one: `viewer` (read-only), `member` (+ run, cancel, resume, rewind workflows; resolve reviews), `admin` (+ API keys, users, audit log, BYOK, billing actions). The permission table is `engine/rbac.js`. API keys get a role at creation (`POST /tenants/:id/keys {"role":"member"}`, default `member`); keys from before roles existed and env-var keys are `admin`.
+
+**SSO (OIDC).** Set `AEGIS_PUBLIC_URL`, `AEGIS_TOKEN_ENCRYPTION_KEY`, `AEGIS_ADMIN_KEY` and (for the React dashboard) `AEGIS_DASHBOARD_URL`. Register `<AEGIS_PUBLIC_URL>/auth/sso/callback` as the redirect URI at your IdP, then, as the operator:
+
+```bash
+curl -X PUT $AEGIS/tenants/acme/sso -H "x-admin-key: $AEGIS_ADMIN_KEY" -H 'content-type: application/json' -d '{
+  "issuer": "https://acme.okta.com", "clientId": "…", "clientSecret": "…",
+  "allowedDomains": ["acme.com"], "jitRole": "viewer"
+}'
+```
+
+Pre-provision admins with `POST /tenants/acme/users {"email":"jo@acme.com","role":"admin"}`; anyone else from an allowed domain is created at `jitRole` (never `admin`; omit `jitRole` to allow only pre-provisioned users). The first login binds the IdP `sub` to the user. Sessions last `AEGIS_SESSION_TTL_HOURS` (default 8); disabling a user or changing their role applies immediately. SAML is not supported.
+
+**Audit identity.** Audit events record `actorType` (`user` / `api-key`), `actorId`, `actorEmail`, `actorRole` and `ip`; logins, logouts, denied logins, user changes and SSO changes are audited, and API keys record who created them.
 
 ## Billing
 
@@ -306,7 +328,7 @@ npm run eval           # agent prompt eval (needs ANTHROPIC_API_KEY)
 npm run check          # lint + coverage
 ```
 
-The unit suite (`tests/`) covers agent-runner, approval-gate, audit-log, auth/billing gate, billing tiers and allowance, concurrency, the git engine, the pipeline, prompt-eval (including adversarial cases), repo-scanner, retry-policy, review-system, signup, Stripe reporter/webhook, pending-cleanup, usage-recorder, vector-memory, and workflow-store.
+The unit suite (`tests/`) covers agent-runner, approval-gate, audit-log (incl. identity), auth/billing gate, RBAC, SSO and sessions, billing tiers and allowance, concurrency, the git engine, the pipeline, prompt-eval (including adversarial cases), repo-scanner, retry-policy, review-system, signup, Stripe reporter/webhook, pending-cleanup, usage-recorder, vector-memory, and workflow-store.
 
 The system suite (`tests/integration/system/`) exercises the Docker sandbox, git worktrees, the end-to-end pipeline, and the BullMQ/Redis Streams/SQS queue backends against real infrastructure. These need a live Docker daemon and Redis (Redis Stack for FT.SEARCH-backed vector memory); the Docker sandbox tests skip themselves when Docker isn't reachable.
 

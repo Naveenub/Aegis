@@ -29,6 +29,8 @@
  *     hash:      string,   // hex SHA-256 of the raw key
  *     tenantId:  string,
  *     label:     string,   // human-readable note ("prod rotation 2026-05")
+ *     role:      string,   // 'viewer' | 'member' | 'admin' (absent on pre-RBAC keys = 'admin')
+ *     createdBy: object|null, // { type, id, email? } of whoever minted it
  *     createdAt: number,   // ms epoch
  *     expiresAt: number|null,  // ms epoch, null = never
  *     revokedAt: number|null,  // ms epoch, null = active
@@ -49,6 +51,7 @@
 import { createHash, randomBytes } from 'crypto';
 import IORedis from 'ioredis';
 import { assertTenantId } from './tenant.js';
+import { isRole, LEGACY_ROLE } from './rbac.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect:          true,
@@ -94,11 +97,16 @@ export function hashKey(raw) {
  * @param {object} [opts]
  * @param {string}      [opts.label]     - human-readable note (e.g. "prod deploy 2026-05")
  * @param {number|null} [opts.expiresAt] - ms epoch; null = never expires
+ * @param {string}      [opts.role]      - RBAC role. Defaults to 'admin' here so internal
+ *                                         callers (signup's first key, onboarding script)
+ *                                         keep their behaviour; the HTTP route defaults lower.
+ * @param {object|null} [opts.createdBy] - actor that minted the key (for attribution)
  * @returns {Promise<{ keyId: string, rawKey: string, record: KeyRecord }>}
  *   rawKey is returned ONCE and never stored — the caller must distribute it.
  */
-export async function createKey(tenantId, { label = '', expiresAt = null } = {}) {
+export async function createKey(tenantId, { label = '', expiresAt = null, role = LEGACY_ROLE, createdBy = null } = {}) {
   assertTenantId(tenantId);
+  if (!isRole(role)) throw new Error(`Invalid role "${role}".`);
 
   const rawKey  = generateRawKey();
   const hash    = hashKey(rawKey);
@@ -108,6 +116,8 @@ export async function createKey(tenantId, { label = '', expiresAt = null } = {})
     keyId,
     hash,
     tenantId,
+    role,
+    createdBy,
     label:     label || `key created ${new Date().toISOString()}`,
     createdAt: Date.now(),
     expiresAt: expiresAt ?? null,
@@ -187,7 +197,7 @@ export async function listKeys(tenantId) {
  *   - key is expired (expiresAt < now)
  *
  * @param {string} hash  - hex SHA-256 of the raw key from the request
- * @returns {Promise<{ tenantId: string, keyId: string }|null>}
+ * @returns {Promise<{ tenantId: string, keyId: string, role: string }|null>}
  */
 export async function lookupByHash(hash) {
   const tenantId = await redis.get(KEY_INDEX_KEY(hash));
@@ -208,7 +218,7 @@ export async function lookupByHash(hash) {
       return null;
     }
 
-    return { tenantId: record.tenantId, keyId: record.keyId };
+    return { tenantId: record.tenantId, keyId: record.keyId, role: record.role ?? LEGACY_ROLE };
   }
 
   return null;

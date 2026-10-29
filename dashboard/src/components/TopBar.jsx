@@ -4,7 +4,7 @@ import { useTenant } from '../context/TenantContext';
 import PulseStrip from './PulseStrip';
 
 export default function TopBar() {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const { connected } = useSSE();
   const { tenantId, setTenantId, tenants } = useTenant();
 
@@ -57,6 +57,12 @@ export default function TopBar() {
           </option>
         ))}
       </select>
+
+      {user && (
+        <span style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+          {user.email || user.id} · {user.role}
+        </span>
+      )}
 
       <button
         onClick={logout}

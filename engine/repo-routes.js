@@ -24,7 +24,7 @@
  */
 
 import express from 'express';
-import { requireApiKey, assertTenantAccess } from '../middleware/auth.js';
+import { requireApiKey, assertTenantAccess, auditActor } from '../middleware/auth.js';
 import { recordAuditEvent } from './audit-log.js';
 import {
   getRepoConfig, bindInstallation, bindProviderAccount, selectRepo, setRepoStatus, clearRepo,
@@ -44,7 +44,7 @@ export const githubAppWebhookRouter = express.Router();
 
 const audit = (req, tenantId, action, detail = {}) =>
   recordAuditEvent(tenantId, {
-    actorId: req.resolvedKeyId ?? 'env-key', action,
+    ...auditActor(req), action,
     resourceType: 'repo', resourceId: tenantId, detail,
   }).catch(err => console.error(`[audit] ${action}`, err));
 

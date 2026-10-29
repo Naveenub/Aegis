@@ -1,9 +1,16 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { api } from '../api/client';
 
 export default function Login() {
   const { login, verifying, error } = useAuth();
   const [key, setKey] = useState('');
+  const [ssoTenant, setSsoTenant] = useState('');
+
+  const startSso = (e) => {
+    e.preventDefault();
+    if (ssoTenant.trim()) window.location.assign(api.ssoLoginUrl(ssoTenant.trim()));
+  };
 
   const submit = (e) => {
     e.preventDefault();
@@ -33,7 +40,33 @@ export default function Login() {
           AEGIS
         </div>
         <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 20 }}>
-          Enter a tenant API key to connect to the orchestrator.
+          Sign in with your organisation, or use a tenant API key.
+        </div>
+
+        <label style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          Tenant ID (SSO)
+        </label>
+        <div style={{ display: 'flex', gap: 8, marginTop: 6, marginBottom: 18 }}>
+          <input
+            value={ssoTenant}
+            onChange={(e) => setSsoTenant(e.target.value)}
+            placeholder="acme"
+            style={{
+              flex: 1, minWidth: 0, padding: '9px 10px', background: 'var(--surface-2)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius)', fontFamily: 'var(--font-mono)',
+            }}
+          />
+          <button
+            type="button"
+            onClick={startSso}
+            disabled={!ssoTenant.trim()}
+            style={{
+              padding: '0 14px', background: 'transparent', color: 'var(--accent)',
+              border: '1px solid var(--accent)', borderRadius: 'var(--radius)', fontWeight: 600, cursor: 'pointer',
+            }}
+          >
+            SSO
+          </button>
         </div>
 
         <label style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>

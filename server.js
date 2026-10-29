@@ -43,7 +43,6 @@
  *   GET    /signup/config                      Public signup config (Stripe publishable key)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
- *   POST   /billing/plan                       Change plan: free→paid, upgrade now, downgrade / cancel at period end
  *   GET    /tenants                            List registered tenants
  *   POST   /tenants                            Register a new tenant
  *   GET    /tenants/:id                        Get tenant metadata
@@ -53,6 +52,16 @@
  *   DELETE /tenants/:id/keys/:kid              Revoke an API key
  *   GET    /tenants/:id/audit-log              Query the compliance audit trail
  *   GET    /tenants/:id/audit-log/export       Export audit trail (JSON or CSV)
+ *
+ * Identity & access (engine/auth-routes.js; roles in engine/rbac.js):
+ *   GET    /auth/sso/:tenantId/login           Start OIDC sign-in
+ *   GET    /auth/sso/callback                  IdP redirect target
+ *   POST   /auth/sso/exchange                  One-time code → session token
+ *   GET    /auth/me                            Current identity + permissions
+ *   POST   /auth/logout                        End the session
+ *   GET|POST /tenants/:id/users                List / pre-provision users
+ *   PATCH  /tenants/:id/users/:userId          Change role / disable
+ *   GET|PUT|DELETE /tenants/:id/sso            SSO config (PUT/DELETE: operator x-admin-key)
  */
 
 import 'dotenv/config';
@@ -76,13 +85,12 @@ import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
 import { createPortalSession } from './engine/billing/stripe-customer.js';
-import { changePlan } from './engine/billing/plan-change.js';
 import { getSpendStatus, addCredits } from './engine/billing/spend-guard.js';
 import { setByokKey, deleteByokKey, hasByok } from './engine/billing/byok.js';
 import { createCreditCheckout } from './engine/billing/credits.js';
-import { timingSafeEqual } from 'crypto';
 import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
+import { isRole }                            from './engine/rbac.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
 import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
@@ -92,7 +100,11 @@ import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } fr
 
 // ─── Middleware imports ───────────────────────────────────────────────────────
 import { signupTenant, getSignupConfig, logRunnerStartupStatus } from './engine/billing/signup.js';
-import { requireApiKey, optionalApiKey, assertTenantAccess, allowInactiveTenant } from './middleware/auth.js';
+import {
+  requireApiKey, optionalApiKey, assertTenantAccess, allowInactiveTenant,
+  requirePermission, requireAdmin, auditActor,
+} from './middleware/auth.js';
+import { authRouter } from './engine/auth-routes.js';
 import { taskRateLimiter } from './middleware/rate-limit.js';
 
 // ─── Dashboard HTML (read once at startup) ────────────────────────────────────
@@ -167,6 +179,7 @@ app.post(
   '/task',
   taskRateLimiter,
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  requirePermission('workflow.run'),
   async (req, res) => {
     const { task, tenantId, priority } = req.body ?? {};
 
@@ -181,7 +194,7 @@ app.post(
         priority,
       });
       recordAuditEvent(effectiveTenant, {
-        actorId: req.resolvedKeyId ?? 'env-key',
+        ...auditActor(req),
         action: 'workflow.submitted',
         resourceType: 'workflow',
         resourceId: workflowId,
@@ -208,6 +221,7 @@ app.post(
   '/resume',
   taskRateLimiter,
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  requirePermission('workflow.run'),
   async (req, res) => {
     const { workflowId, tenantId } = req.body ?? {};
 
@@ -234,6 +248,7 @@ app.post(
 app.post(
   '/cancel',
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  requirePermission('workflow.run'),
   async (req, res) => {
     const { workflowId, reason, tenantId } = req.body ?? {};
 
@@ -244,7 +259,7 @@ app.post(
     try {
       await cancelWorkflow(workflowId, reason ?? 'user request');
       recordAuditEvent(tenantId ?? req.resolvedTenantId ?? 'default', {
-        actorId: req.resolvedKeyId ?? 'env-key',
+        ...auditActor(req),
         action: 'workflow.cancelled',
         resourceType: 'workflow',
         resourceId: workflowId,
@@ -317,6 +332,7 @@ app.get('/workflows/:workflowId', requireApiKey, async (req, res) => {
 app.post(
   '/templates',
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  requirePermission('workflow.run'),
   async (req, res) => {
     const { id, task, tasks } = req.body ?? {};
     const tenantId = req.body?.tenantId ?? req.resolvedTenantId;
@@ -374,6 +390,7 @@ app.post(
   '/templates/:id/run',
   taskRateLimiter,
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  requirePermission('workflow.run'),
   async (req, res) => {
     const tenantId = req.body?.tenantId ?? req.resolvedTenantId;
 
@@ -474,6 +491,7 @@ app.get(
 app.post(
   '/workflows/:workflowId/steps/:stepId/rewind',
   (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId),
+  requirePermission('workflow.run'),
   async (req, res) => {
     const { workflowId, stepId } = req.params;
     const { tenantId, reason }   = req.body ?? {};
@@ -720,7 +738,7 @@ app.get('/review-queue', requireApiKey, async (req, res) => {
  *   escalate  — cancel the workflow entirely and persist the human note so
  *               operators have a permanent record of why it was escalated.
  */
-app.post('/review-queue/resolve', requireApiKey, async (req, res) => {
+app.post('/review-queue/resolve', requireApiKey, requirePermission('review.resolve'), async (req, res) => {
   const { workflowId, stepId, resolution, note, tenantId } = req.body ?? {};
 
   if (!workflowId || !stepId || !resolution) {
@@ -759,7 +777,7 @@ app.post('/review-queue/resolve', requireApiKey, async (req, res) => {
     }
 
     recordAuditEvent(effectiveTenant, {
-      actorId: req.resolvedKeyId ?? 'env-key',
+      ...auditActor(req),
       action: 'review.resolved',
       resourceType: 'workflowStep',
       resourceId: `${workflowId}/${stepId}`,
@@ -897,7 +915,7 @@ app.get('/privacy', (_req, res, next) => (privacyHtml ? res.type('html').send(pr
  *
  * Returns: { url: string }
  */
-app.post('/billing/portal', allowInactiveTenant, requireApiKey, async (req, res) => {
+app.post('/billing/portal', allowInactiveTenant, requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
   try {
     const customerId = await getStripeCustomerId(req.resolvedTenantId);
     if (!customerId) {
@@ -908,28 +926,6 @@ app.post('/billing/portal', allowInactiveTenant, requireApiKey, async (req, res)
     console.error('[POST /billing/portal]', err);
     res.status(502).json({ error: `Billing portal unavailable: ${err.message}` });
   }
-});
-
-/**
- * POST /billing/plan
- * Body: { tier: 'free'|'starter'|'pro', email?: string }
- *
- *   free → paid       202  { clientSecret }  confirm with Stripe.js; the tier moves when paid
- *   starter → pro     200  effective 'now'   prorated base difference invoiced
- *   pro → starter     200  effective 'period_end'
- *   paid → free       200  effective 'period_end' (lands on the free tier, not suspended)
- *   same tier         200  clears a pending downgrade / cancel
- *
- * `currentTier` is what the tenant runs on right now; `targetTier` is where it
- * is headed. See engine/billing/plan-change.js.
- */
-app.post('/billing/plan', taskRateLimiter, requireApiKey, async (req, res) => {
-  const { status, body } = await changePlan({
-    tenantId: req.resolvedTenantId,
-    tier: req.body?.tier,
-    email: req.body?.email,
-  });
-  res.status(status).json(body);
 });
 
 // ─── Tenant management ────────────────────────────────────────────────────────
@@ -1023,17 +1019,6 @@ app.get('/tenants/:id/billing', allowInactiveTenant, requireApiKey, async (req, 
 
 // ─── Spend control & BYOK ─────────────────────────────────────────────────────
 
-/** Operator-only gate (cap overrides, manual credit grants). Fails closed. */
-function requireAdmin(req, res, next) {
-  const expected = (process.env.AEGIS_ADMIN_KEY ?? '').trim();
-  const given = String(req.headers['x-admin-key'] ?? '');
-  const a = Buffer.from(given), b = Buffer.from(expected);
-  if (!expected || a.length !== b.length || !timingSafeEqual(a, b)) {
-    return res.status(403).json({ error: 'Admin key required.' });
-  }
-  next();
-}
-
 /** GET /tenants/:id/spend — cap/credit state for this month. Reachable while suspended. */
 app.get('/tenants/:id/spend', allowInactiveTenant, requireApiKey, async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
@@ -1066,7 +1051,7 @@ app.post('/tenants/:id/credits', requireAdmin, async (req, res) => {
 });
 
 /** POST /tenants/:id/credits/checkout — tenant buys credits. Body { usd }. Reachable while suspended. */
-app.post('/tenants/:id/credits/checkout', allowInactiveTenant, requireApiKey, async (req, res) => {
+app.post('/tenants/:id/credits/checkout', allowInactiveTenant, requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
   try {
     res.json(await createCreditCheckout(req.params.id, Number(req.body?.usd)));
@@ -1076,7 +1061,7 @@ app.post('/tenants/:id/credits/checkout', allowInactiveTenant, requireApiKey, as
 });
 
 /** PUT /tenants/:id/byok — enterprise: store own Anthropic key. Body { apiKey }. Never echoed back. */
-app.put('/tenants/:id/byok', requireApiKey, async (req, res) => {
+app.put('/tenants/:id/byok', requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
   try {
     await setByokKey(req.params.id, req.body?.apiKey);
@@ -1088,7 +1073,7 @@ app.put('/tenants/:id/byok', requireApiKey, async (req, res) => {
 });
 
 /** DELETE /tenants/:id/byok — revert to the platform key (platform spend cap applies again). */
-app.delete('/tenants/:id/byok', requireApiKey, async (req, res) => {
+app.delete('/tenants/:id/byok', requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
   try {
     await deleteByokKey(req.params.id);
@@ -1104,7 +1089,7 @@ app.delete('/tenants/:id/byok', requireApiKey, async (req, res) => {
  * GET /tenants/:id/keys
  * List API keys for a tenant (hashes only — raw keys are never stored).
  */
-app.get('/tenants/:id/keys', requireApiKey, async (req, res) => {
+app.get('/tenants/:id/keys', requireApiKey, requirePermission('key.manage'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
 
   try {
@@ -1120,24 +1105,29 @@ app.get('/tenants/:id/keys', requireApiKey, async (req, res) => {
  * POST /tenants/:id/keys
  * Create a new API key for a tenant.
  *
- * Body:    { label?: string, expiresAt?: number }
+ * Body:    { label?: string, expiresAt?: number, role?: 'viewer'|'member'|'admin' (default 'member') }
  * Returns: { keyId, rawKey, tenantId, label, createdAt, expiresAt }
  *
  * rawKey is returned ONCE and never stored — save it immediately.
  */
-app.post('/tenants/:id/keys', requireApiKey, async (req, res) => {
+app.post('/tenants/:id/keys', requireApiKey, requirePermission('key.manage'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
 
-  const { label, expiresAt } = req.body ?? {};
+  // Least privilege by default: a key is `member` unless the caller asks for more.
+  const { label, expiresAt, role = 'member' } = req.body ?? {};
+  if (!isRole(role)) return res.status(400).json({ error: '`role` must be viewer, member or admin.' });
 
   try {
-    const result = await createKey(req.params.id, { label, expiresAt: expiresAt ?? null });
+    const result = await createKey(req.params.id, {
+      label, expiresAt: expiresAt ?? null, role,
+      createdBy: { type: req.actor.type, id: req.actor.id, ...(req.actor.email && { email: req.actor.email }) },
+    });
     recordAuditEvent(req.params.id, {
-      actorId: req.resolvedKeyId ?? 'env-key',
+      ...auditActor(req),
       action: 'key.created',
       resourceType: 'apiKey',
       resourceId: result.keyId,
-      detail: { label: result.record.label, expiresAt: result.record.expiresAt },
+      detail: { label: result.record.label, role: result.record.role, expiresAt: result.record.expiresAt },
     }).catch(err => console.error('[audit] key.created', err));
     res.status(201).json(result);
   } catch (err) {
@@ -1150,14 +1140,14 @@ app.post('/tenants/:id/keys', requireApiKey, async (req, res) => {
  * DELETE /tenants/:id/keys/:keyId
  * Revoke an API key immediately (no restart required).
  */
-app.delete('/tenants/:id/keys/:keyId', requireApiKey, async (req, res) => {
+app.delete('/tenants/:id/keys/:keyId', requireApiKey, requirePermission('key.manage'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
 
   try {
     const revoked = await revokeKey(req.params.id, req.params.keyId);
     if (revoked) {
       recordAuditEvent(req.params.id, {
-        actorId: req.resolvedKeyId ?? 'env-key',
+        ...auditActor(req),
         action: 'key.revoked',
         resourceType: 'apiKey',
         resourceId: req.params.keyId,
@@ -1181,7 +1171,7 @@ app.delete('/tenants/:id/keys/:keyId', requireApiKey, async (req, res) => {
  * Query: ?from=<ms>&to=<ms>&action=<action>&resourceType=<type>&limit=<n>
  * Returns: { events: AuditEvent[], chainValid: boolean }
  */
-app.get('/tenants/:id/audit-log', requireApiKey, async (req, res) => {
+app.get('/tenants/:id/audit-log', requireApiKey, requirePermission('audit.read'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
 
   const { from, to, action, resourceType, limit } = req.query;
@@ -1209,7 +1199,7 @@ app.get('/tenants/:id/audit-log', requireApiKey, async (req, res) => {
  *
  * Query: ?from=<ms>&to=<ms>&format=json|csv
  */
-app.get('/tenants/:id/audit-log/export', requireApiKey, async (req, res) => {
+app.get('/tenants/:id/audit-log/export', requireApiKey, requirePermission('audit.read'), async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
 
   const { from, to, format } = req.query;
@@ -1320,6 +1310,7 @@ app.get('/events', requireApiKey, (req, res) => {
     // (GitHub) or a shared secret token (GitLab) inside webhookRouter itself.
     app.use('/webhooks', webhookRouter);
 
+app.use(authRouter);
 app.use(repoRouter);
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────

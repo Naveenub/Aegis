@@ -85,14 +85,26 @@ export const api = {
   getMetrics: (apiKey) => request('/api/metrics', { apiKey }),
   getAnomalies: (apiKey, limit) => request('/anomalies', { apiKey, params: { limit } }),
 
+  // identity (API key or SSO session token — both travel as x-api-key)
+  me: (apiKey) => request('/auth/me', { apiKey }),
+  logout: (apiKey) => request('/auth/logout', { method: 'POST', apiKey }),
+  exchangeSsoCode: (code) => request('/auth/sso/exchange', { method: 'POST', body: { code } }),
+  ssoLoginUrl: (tenantId) =>
+    new URL(`/auth/sso/${encodeURIComponent(tenantId)}/login`, BASE_URL || window.location.origin).toString(),
+  listUsers: (apiKey, tenantId) => request(`/tenants/${encodeURIComponent(tenantId)}/users`, { apiKey }),
+  createUser: (apiKey, tenantId, { email, name, role }) =>
+    request(`/tenants/${encodeURIComponent(tenantId)}/users`, { method: 'POST', apiKey, body: { email, name, role } }),
+  updateUser: (apiKey, tenantId, userId, patch) =>
+    request(`/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}`, { method: 'PATCH', apiKey, body: patch }),
+
   // tenants
   listTenants: (apiKey) => request('/tenants', { apiKey }),
   createTenant: (apiKey, { tenantId, label }) =>
     request('/tenants', { method: 'POST', apiKey, body: { tenantId, label } }),
   getTenant: (apiKey, id) => request(`/tenants/${encodeURIComponent(id)}`, { apiKey }),
   listKeys: (apiKey, tenantId) => request(`/tenants/${encodeURIComponent(tenantId)}/keys`, { apiKey }),
-  createKey: (apiKey, tenantId, { label, expiresAt } = {}) =>
-    request(`/tenants/${encodeURIComponent(tenantId)}/keys`, { method: 'POST', apiKey, body: { label, expiresAt } }),
+  createKey: (apiKey, tenantId, { label, expiresAt, role } = {}) =>
+    request(`/tenants/${encodeURIComponent(tenantId)}/keys`, { method: 'POST', apiKey, body: { label, expiresAt, role } }),
   revokeKey: (apiKey, tenantId, keyId) =>
     request(`/tenants/${encodeURIComponent(tenantId)}/keys/${encodeURIComponent(keyId)}`, { method: 'DELETE', apiKey }),
 
