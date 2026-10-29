@@ -258,7 +258,7 @@ Pre-provision admins with `POST /tenants/acme/users {"email":"jo@acme.com","role
 
 Billing is optional. A deployment without Stripe or Postgres still runs; usage simply isn't metered.
 
-- **Tiers** (`engine/billing/tiers.js`) — `starter` (default), `pro`, and `enterprise`. Each defines hard quota ceilings (`maxActiveWorkflows`, `maxDailyWorkflows`, `maxQueuedJobs`) and an included monthly allowance for four metered dimensions: workflow runs, agent steps, tokens, and sandbox minutes. Enterprise allowances are unlimited.
+- **Tiers** (`engine/billing/tiers.js`) — `free`, `starter` (default for existing tenants), `pro`, and `enterprise`. Each defines hard quota ceilings (`maxActiveWorkflows`, `maxDailyWorkflows`, `maxQueuedJobs`) and an included monthly allowance for five metered dimensions: workflow runs, agent steps, input tokens, output tokens, and sandbox minutes. Input and output tokens are separate meters because output costs 5x input ($3/M vs $15/M for Claude Sonnet); one summed meter would let output-heavy tenants run at negative margin. Enterprise allowances are unlimited.
 - **Metering** — every billable action is appended to an immutable `usage_events` table in Postgres (`DATABASE_URL`). This is separate from `tenant-quota.js`, which only holds live rate-limit counters in Redis.
 - **Reporting** — `npm run billing:flush` pushes unreported usage to Stripe's metered billing API. Run it on a schedule (hourly cron, the k8s CronJob, or the Render cron in `render.yaml`). Without `STRIPE_SECRET_KEY` it fails closed and usage keeps accumulating.
 - **Signup page** — `/get-started` is a built-in page that calls `POST /signup` and confirms the first payment with Stripe.js. Set `STRIPE_PUBLISHABLE_KEY`; the landing page's pricing buttons link to it.
