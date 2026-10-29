@@ -295,6 +295,9 @@ Configuration is environment-variable driven — see `.env.example` for the full
 ```bash
 ANTHROPIC_API_KEY=...          # required — all agent LLM calls
 OPENAI_API_KEY=...             # optional — enables vector memory embeddings
+AEGIS_MODEL_BUILD=...          # optional — model for patch/test agents (default Sonnet)
+AEGIS_MODEL_CHEAP=...          # optional — model for planner + review-guard (default Haiku)
+AEGIS_CAP_FALLBACK=1           # 0 = refuse at the spend cap instead of downgrading to CHEAP
 REDIS_URL=redis://...          # Redis Stack
 DATABASE_URL=postgres://...    # optional — usage metering / billing
 AEGIS_API_KEY_DEFAULT=...      # per-tenant API key(s)

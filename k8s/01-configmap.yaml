@@ -19,6 +19,12 @@ data:
   AEGIS_PUBLIC_URL: ""
   AEGIS_GITLAB_OAUTH_CLIENT_ID: ""
   AEGIS_BITBUCKET_OAUTH_CLIENT_ID: ""
+  # Model routing: planner/review-guard use CHEAP, everything else BUILD.
+  # Leave unset to use the built-in defaults; AEGIS_MODEL (legacy) pins both.
+  AEGIS_MODEL_BUILD: ""
+  AEGIS_MODEL_CHEAP: ""
+  # "0" = refuse at the spend cap instead of retrying on the cheap model.
+  AEGIS_CAP_FALLBACK: "1"
   AEGIS_IDEM_TTL_SECONDS: "604800"
   AEGIS_CONCURRENCY_CRITICAL: "8"
   AEGIS_CONCURRENCY_HIGH: "5"
