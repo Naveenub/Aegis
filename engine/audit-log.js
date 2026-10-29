@@ -66,6 +66,7 @@ import { createHash, createHmac, randomBytes } from 'crypto';
 import IORedis from 'ioredis';
 import { assertTenantId } from './tenant.js';
 import { acquireLock, releaseLock } from './lock.js';
+import { isZeroRetention, REDACTED } from './retention-policy.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect:          true,
@@ -154,6 +155,12 @@ export async function recordAuditEvent(tenantId, {
   }
 
   const ts = Date.now();
+
+  // Zero-retention tenants: the audit log can't be pruned (hash chain), so free-text
+  // task content is redacted before it is hashed and stored.
+  if (typeof detail?.task === 'string' && await isZeroRetention(tenantId)) {
+    detail = { ...detail, task: REDACTED };
+  }
 
   // Chain-tip read + advance must be strictly ordered per tenant, or two
   // concurrent appends could compute a hash from the same prevHash and one

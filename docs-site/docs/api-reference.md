@@ -36,6 +36,9 @@ Auth: `Authorization: Bearer <key>` where the key is `AEGIS_API_KEY_{TENANTID}` 
 | POST | `/billing/plan` | Change plan `{ tier, email? }`: free→paid, upgrade now, downgrade / cancel at period end |
 | POST | `/webhooks/stripe` | Stripe webhook (signature-verified) |
 | GET | `/events` | Live SSE event stream |
+| GET/PUT | `/tenants/:id/retention` | Per-tenant retention (`jobsDays`, `workflowsDays`, `memoryDays`, 1–365) and `zeroRetention` — see [Compliance](compliance) |
+| POST | `/tenants/:id/data-deletion` | Delete workspace content `{ confirm: "<tenantId>" }` (admin) |
+| GET | `/dpa`, `/privacy`, `/security`, `/subprocessors`, `/subprocessors.json` | Public legal and trust pages (no auth) |
 
 ## Billing status codes
 

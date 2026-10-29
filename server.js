@@ -39,7 +39,10 @@
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   GET    /                                   Marketing landing page (HTML)
  *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
- *   GET    /terms, /privacy                    Legal pages (HTML)
+ *   GET    /terms, /privacy, /dpa, /security   Legal + trust pages (HTML)
+ *   GET    /subprocessors[.json]               Subprocessor list (page / machine-readable)
+ *   GET|PUT /tenants/:id/retention             Retention policy + zero-retention mode
+ *   POST   /tenants/:id/data-deletion          Delete workspace content on request
  *   GET    /signup/config                      Public signup config (Stripe publishable key)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
@@ -81,7 +84,7 @@ import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getRe
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
-import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId, setSpendConfig } from './engine/tenant-registry.js';
+import { listTenants, getTenant, registerTenant, seedTenantsFromEnv, setTier, getStripeCustomerId, setSpendConfig, setRetentionConfig } from './engine/tenant-registry.js';
 import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
@@ -94,6 +97,10 @@ import { EVENT_TYPES } from './engine/usage-recorder.js';
 import { createKey, revokeKey, listKeys }    from './engine/key-store.js';
 import { isRole }                            from './engine/rbac.js';
 import { logVectorCapabilityWarnings }        from './engine/vector-memory.js';
+import { getEffectivePolicy, invalidatePolicy, parseRetentionUpdate, RETENTION_BOUNDS } from './engine/retention-policy.js';
+import { runRetentionSweep, purgeTenantContent } from './engine/retention.js';
+import { startRetentionScheduler }          from './engine/retention-scheduler.js';
+import { renderSubprocessorsPage, publicSubprocessors } from './engine/compliance-pages.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
 import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
 import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
@@ -142,6 +149,15 @@ const landingHtml = readLanding('index.html');
 const signupHtml  = readLanding('signup.html');
 const termsHtml   = readLanding('terms.html');
 const privacyHtml = readLanding('privacy.html');
+const dpaHtml      = readLanding('dpa.html');
+const securityHtml = readLanding('security.html');
+// compliance/subprocessors.json is the single source for the page, the JSON endpoint and the DPA.
+const subprocessors = (() => {
+  try { return JSON.parse(readFileSync(join(__dirname, 'compliance', 'subprocessors.json'), 'utf-8')); }
+  catch (err) { console.warn('[compliance] Could not read compliance/subprocessors.json:', err.message); return null; }
+})();
+const subprocessorsRaw = readLanding('subprocessors.html');
+const subprocessorsHtml = subprocessors && subprocessorsRaw ? renderSubprocessorsPage(subprocessorsRaw, subprocessors) : null;
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 const app  = express();
@@ -908,6 +924,10 @@ app.get('/', (_req, res, next) => (landingHtml ? res.type('html').send(landingHt
 app.get('/get-started', (_req, res, next) => (signupHtml ? res.type('html').send(signupHtml) : next()));
 app.get('/terms', (_req, res, next) => (termsHtml ? res.type('html').send(termsHtml) : next()));
 app.get('/privacy', (_req, res, next) => (privacyHtml ? res.type('html').send(privacyHtml) : next()));
+app.get('/dpa', (_req, res, next) => (dpaHtml ? res.type('html').send(dpaHtml) : next()));
+app.get('/security', (_req, res, next) => (securityHtml ? res.type('html').send(securityHtml) : next()));
+app.get('/subprocessors', (_req, res, next) => (subprocessorsHtml ? res.type('html').send(subprocessorsHtml) : next()));
+app.get('/subprocessors.json', (_req, res, next) => (subprocessors ? res.json(publicSubprocessors(subprocessors)) : next()));
 
 /**
  * POST /billing/portal
@@ -1101,6 +1121,83 @@ app.delete('/tenants/:id/byok', requireApiKey, requirePermission('tenant.admin')
     await deleteByokKey(req.params.id);
     res.json({ byok: false });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Data retention, zero-retention mode, deletion ────────────────────────────
+
+/** GET /tenants/:id/retention — effective policy (overrides merged over platform defaults). */
+app.get('/tenants/:id/retention', requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try {
+    invalidatePolicy(req.params.id);
+    const { jobsDays, workflowsDays, memoryDays, zeroRetention, overrides } = await getEffectivePolicy(req.params.id);
+    res.json({ jobsDays, workflowsDays, memoryDays, zeroRetention, overrides, bounds: RETENTION_BOUNDS });
+  } catch (err) {
+    console.error('[GET /tenants/:id/retention]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /tenants/:id/retention — body: any of { jobsDays, workflowsDays, memoryDays, zeroRetention }.
+ * Days are 1–365 (null resets to the platform default). Enabling zero-retention
+ * sweeps the tenant immediately so existing content is scrubbed.
+ */
+app.put('/tenants/:id/retention', requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  const { updates, error } = parseRetentionUpdate(req.body);
+  if (error) return res.status(400).json({ error });
+  try {
+    const before = await getEffectivePolicy(req.params.id);
+    await setRetentionConfig(req.params.id, updates);
+    invalidatePolicy(req.params.id);
+    const after = await getEffectivePolicy(req.params.id);
+
+    await recordAuditEvent(req.params.id, {
+      ...auditActor(req),
+      action: 'retention.updated',
+      resourceType: 'tenant',
+      resourceId: req.params.id,
+      detail: { updates, previous: { jobsDays: before.jobsDays, workflowsDays: before.workflowsDays, memoryDays: before.memoryDays, zeroRetention: before.zeroRetention } },
+    }).catch((err) => console.error('[audit] retention.updated', err));
+
+    let sweep = null;
+    if (updates.zeroRetention === true && !before.zeroRetention) {
+      try { sweep = (await runRetentionSweep({ tenantIds: [req.params.id] })).tenants[req.params.id] ?? null; }
+      catch (err) { console.error('[retention] immediate sweep failed (daily sweep will retry):', err.message); }
+    }
+    res.json({ jobsDays: after.jobsDays, workflowsDays: after.workflowsDays, memoryDays: after.memoryDays, zeroRetention: after.zeroRetention, overrides: after.overrides, sweep });
+  } catch (err) {
+    console.error('[PUT /tenants/:id/retention]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /tenants/:id/data-deletion — body { confirm: "<tenantId>" }.
+ * Deletes finished-workflow, job and vector-memory content (DPA §8). Active
+ * workflows are skipped (cancel, then call again). The audit log, billing
+ * records, API keys and repo clone are NOT removed — see docs "Compliance".
+ */
+app.post('/tenants/:id/data-deletion', requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  if (req.body?.confirm !== req.params.id) {
+    return res.status(400).json({ error: `Send {"confirm":"${req.params.id}"} to confirm deletion of this workspace's content.` });
+  }
+  try {
+    const result = await purgeTenantContent(req.params.id);
+    await recordAuditEvent(req.params.id, {
+      ...auditActor(req),
+      action: 'data.deleted',
+      resourceType: 'tenant',
+      resourceId: req.params.id,
+      detail: result,
+    }).catch((err) => console.error('[audit] data.deleted', err));
+    res.json(result);
+  } catch (err) {
+    console.error('[POST /tenants/:id/data-deletion]', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1366,6 +1463,9 @@ async function start() {
   // Evaluates metric rules every ANOMALY_INTERVAL_MS (default 60 s) and fires
   // alerts to stderr + AEGIS_ALERT_WEBHOOK when thresholds are sustained.
   startAnomalyDetector();
+
+  // In-process safety net for retention (the daily cron is still recommended).
+  startRetentionScheduler();
 
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);

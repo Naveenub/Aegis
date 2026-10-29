@@ -186,6 +186,44 @@ export async function getTier(tenantId) {
 }
 
 /**
+ * Per-tenant data-retention overrides (see engine/retention-policy.js).
+ * Stored as one JSON field on the tenant meta hash. A null day-count means
+ * "use the platform default".
+ *
+ * @param {string} tenantId
+ * @returns {Promise<{ jobsDays:number|null, workflowsDays:number|null, memoryDays:number|null, zeroRetention:boolean }>}
+ */
+export async function getRetentionConfig(tenantId) {
+  assertTenantId(tenantId);
+  const base = { jobsDays: null, workflowsDays: null, memoryDays: null, zeroRetention: false };
+  const raw = await redis.hget(TENANT_META_KEY(tenantId), 'retention');
+  if (!raw) return base;
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      jobsDays:      parsed.jobsDays      ?? null,
+      workflowsDays: parsed.workflowsDays ?? null,
+      memoryDays:    parsed.memoryDays    ?? null,
+      zeroRetention: parsed.zeroRetention === true,
+    };
+  } catch {
+    return base;
+  }
+}
+
+/**
+ * Merge validated updates (from parseRetentionUpdate) into the stored config.
+ * Fields absent from `updates` are left unchanged; null resets a day-count.
+ * @returns {Promise<object>} the stored overrides after the merge
+ */
+export async function setRetentionConfig(tenantId, updates) {
+  assertTenantId(tenantId);
+  const merged = { ...(await getRetentionConfig(tenantId)), ...updates };
+  await redis.hset(TENANT_META_KEY(tenantId), { retention: JSON.stringify(merged) });
+  return merged;
+}
+
+/**
  * Stamp the first successfully PAID invoice (amount > 0). Until set, a tenant
  * with a Stripe customer is held to the unverified spend cap (spend-guard.js).
  * Idempotent — never overwrites.
