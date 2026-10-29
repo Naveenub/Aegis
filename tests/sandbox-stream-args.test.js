@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const execFileSync = vi.fn((cmd, args) => {
+const execFileSync = vi.fn((cmd) => {
   if (cmd === 'tar') return Buffer.from('TAR');
   return Buffer.from('');                       // docker info / image inspect / rm
 });
