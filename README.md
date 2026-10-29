@@ -100,7 +100,7 @@ Agent inputs include AST-level repo context (symbol tables, import/call graphs) 
 - **Inbound webhooks** (`webhook-receiver.js`) — signature-verified GitHub/GitLab push and PR/MR webhooks can trigger workflows, filtered by branch pattern.
 - **PR/MR automation** — `AEGIS_PR_PROVIDER` (`github` / `gitlab` / `bitbucket`) opens a pull/merge request after a workflow merges, targeting `AEGIS_PR_TARGET_BRANCH`.
 - **AST-based repo intelligence** (`repo-scanner.js`) — built on `acorn`; produces symbol tables and import/call graphs to give agents accurate repo context.
-- **Prompt eval harness** (`prompt-eval.js`, `npm run eval`) — scores each agent persona against golden cases using the real Claude API; runs as a CI gate so a bad persona edit is caught before it ships.
+- **Prompt eval harness** (`prompt-eval.js`, `npm run eval`) — scores each agent persona against golden cases using the real Claude API; runs as a CI gate so a bad persona edit is caught before it ships. It checks output *format* only; it is not evidence that Aegis produces mergeable PRs (see [Evidence](#evidence-does-it-pay-for-itself)).
 - **CLI** (`cli/claude.js`) — submits a task, polls `GET /workflows/:workflowId` to a terminal state, and writes a context snapshot to `.claude/context/jobs.json`.
 
 ---
@@ -330,6 +330,8 @@ npm run test:all       # everything
 npm run test:coverage  # unit tests with coverage (80% lines/functions, 70% branches)
 npm run lint           # eslint
 npm run eval           # agent prompt eval (needs ANTHROPIC_API_KEY)
+npm run bench:verify   # ROI benchmark: each task is a valid problem (no LLM)
+npm run bench:selftest # ROI benchmark: harness check, synthetic, not evidence
 npm run check          # lint + coverage
 ```
 
@@ -369,6 +371,26 @@ See [`docs-site/docs/deployment.md`](docs-site/docs/deployment.md) for more.
 
 ---
 
+## Evidence: does it pay for itself?
+
+The prompt eval only scores whether personas follow their output format. ROI is measured separately, on real repos, by outcomes:
+
+| Metric | How it is measured |
+|---|---|
+| Verified merge rate | Aegis's branch merged **and** the original PR's held-out tests (never shown to Aegis) pass, with a 95% Wilson interval |
+| Cost per merged PR | All LLM spend from the engine's own counter, failed attempts and retries included |
+| Time saved | Per PR: baseline minutes − review − fix-up; failures count as lost review time. Only where human time was recorded; never estimated |
+
+```bash
+npm run bench:verify                        # 8 tasks / 4 public repos re-verified (no LLM)
+npm run bench                               # real run: ANTHROPIC_API_KEY + dedicated Redis Stack + Docker
+npm run bench:report -- bench/results/<runId> --hourly-usd 120
+npm run case-study -- export <tenantId>     # design-partner ledger, then `render`
+```
+
+**Status (honest):** the harness, 8 verified tasks and the case-study generator are built and tested. **No published Aegis results and no named design-partner case study exist yet**; both are produced only by running the commands above, never written by hand. Methodology and limits: [`bench/README.md`](bench/README.md), [ROI benchmark](docs-site/docs/benchmark.md), [design-partner protocol](docs-site/docs/case-studies/pilot-protocol.md).
+
+---
 ## Documentation
 
 The Docusaurus site in `docs-site/` covers the intro, quickstart, architecture, configuration, API reference, billing, deployment, testing, and a candid [failure-modes](docs-site/docs/FAILURE_MODES.md) register. Run it locally with:
