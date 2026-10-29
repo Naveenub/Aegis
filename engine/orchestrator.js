@@ -1,4 +1,5 @@
 import { runAgent } from './agent-runner.js';
+import { assertNoInjection } from './prompt-guard.js';
 import { logger } from './logger.js';
 import { addStep, Priority } from './queue.js';
 import { createWorkflow, getRunnableSteps } from './workflow-store.js';
@@ -173,7 +174,7 @@ function assertDescriptionsSubstantive(tasks) {
  * @param {string} raw   - Raw text returned by the planner agent
  * @returns {{ tasks: object[] }}
  */
-function parsePlan(raw) {
+export function parsePlan(raw) {
   let plan;
   try {
     plan = JSON.parse(stripFences(raw));
@@ -184,7 +185,11 @@ function parsePlan(raw) {
     );
   }
 
-  return validatePlan(plan);
+  const validated = validatePlan(plan);
+  // Planner text was shaped by untrusted repo content and becomes the Task of
+  // later agents: reject plans whose descriptions carry injected instructions.
+  for (const t of validated.tasks) assertNoInjection(`plan task ${t.id}`, t.description);
+  return validated;
 }
 
 /**
@@ -384,6 +389,8 @@ export async function runSystem(task, opts = {}) {
       plan = parsePlan(planRaw);
       break; // success
     } catch (err) {
+      // An injection block is a security verdict, not a formatting glitch: don't re-prompt.
+      if (err?.code === 'PROMPT_INJECTION_BLOCKED') throw err;
       lastError = err;
       logger.warn(
         { tenantId, workflowId, attempt, error: err.message },
