@@ -90,6 +90,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # Builds the sandbox image inside dind (the worktree is streamed, so the image
+  # must carry eslint/vitest). Runs once; worker waits for it.
+  sandbox-image:
+    image: docker:27-cli
+    restart: "no"
+    environment:
+      DOCKER_HOST: tcp://dind:2375
+    volumes:
+      - ./Dockerfile.sandbox:/ctx/Dockerfile.sandbox:ro
+      - ./package.json:/ctx/package.json:ro
+      - ./package-lock.json:/ctx/package-lock.json:ro
+    command: docker build -f /ctx/Dockerfile.sandbox -t aegis-sandbox:local /ctx
+    depends_on:
+      dind:
+        condition: service_healthy
+
   worker:
     build: .
     command: node workers/agent-worker.js
@@ -99,7 +115,7 @@ services:
       REDIS_URL: redis://redis:6379
       DOCKER_HOST: tcp://dind:2375
       # dind is a separate filesystem: the worktree is streamed in, so the image must carry
-      # the toolchain. Build it once: scripts/sandbox-setup.sh image aegis-sandbox:local --compose
+      # the toolchain; the sandbox-image service builds it in dind.
       AEGIS_SANDBOX_IMAGE: aegis-sandbox:local
       DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis
       AEGIS_REPOS_BASE: /repo/tenants
@@ -110,6 +126,8 @@ services:
         condition: service_healthy
       dind:
         condition: service_healthy
+      sandbox-image:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 

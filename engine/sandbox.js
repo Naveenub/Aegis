@@ -200,7 +200,7 @@ export function runInSandbox(cmd, cwd, projectRoot, tenantId, opts = {}) {
 
   const result = dockerAvailable
     ? (STREAM
-        ? runDockerStream(cmd, cwd, opts, timeoutMs)
+        ? runDockerStream(cmd, cwd, projectRoot, opts, timeoutMs)
         : runDocker(cmd, cwd, projectRoot, opts, timeoutMs))
     : UNSANDBOXED_OK
       ? runDirect(cmd, cwd, opts, timeoutMs)
@@ -416,7 +416,40 @@ function extractCollected(tarBuf, roots) {
   }
 }
 
-function runDockerStream(cmd, cwd, opts = {}, timeoutMs = TIMEOUT_MS) {
+function memToBytes(m) {
+  const x = /^(\d+(?:\.\d+)?)([kmg]?)b?$/i.exec(String(m).trim());
+  if (!x) return null;
+  return Math.round(parseFloat(x[1]) * ({ '': 1, k: 1024, m: 1048576, g: 1073741824 })[x[2].toLowerCase()]);
+}
+
+// tmpfs pages are charged to the container's memory cgroup, so the limit is the
+// configured memory PLUS the worktree tmpfs, otherwise a full worktree OOM-kills the run.
+function streamMemory(memory, tmpfsMounts) {
+  const base = memToBytes(memory);
+  if (base === null) return memory;
+  return `${Math.ceil((base + tmpfsMounts * WORKTREE_TMPFS_BYTES) / 1048576)}m`;
+}
+
+// The image must carry the toolchain (stream mode mounts nothing). Fail with an
+// actionable message instead of an opaque "eslint: not found".
+const _toolchainOk = new Set();
+function checkImageToolchain(image, projectRoot) {
+  const bin = path.join(path.resolve(projectRoot), 'node_modules', '.bin', 'eslint');
+  const key = `${image}|${bin}`;
+  if (_toolchainOk.has(key)) return null;
+  try {
+    execFileSync('docker', ['run', '--rm', '--network', 'none', '--entrypoint', 'test', image, '-x', bin],
+      { stdio: 'pipe', timeout: 30000 });
+    _toolchainOk.add(key);
+    return null;
+  } catch {
+    return `Sandbox error: image ${image} has no ${bin}. With a remote runner nothing is mounted, ` +
+      'so the image must contain the toolchain: build Dockerfile.sandbox ' +
+      '(scripts/sandbox-setup.sh image <tag> [--push|--compose]) and set AEGIS_SANDBOX_IMAGE to it.';
+  }
+}
+
+function runDockerStream(cmd, cwd, projectRoot, opts = {}, timeoutMs = TIMEOUT_MS) {
   const absWorktree = path.resolve(cwd);
   const absDeps = opts.deps ? path.resolve(opts.deps) : null;
   const rwMounts = (opts.rwMounts ?? []).map(m => path.resolve(m));
@@ -433,6 +466,10 @@ function runDockerStream(cmd, cwd, opts = {}, timeoutMs = TIMEOUT_MS) {
 
   const pullError = ensureImage(image);
   if (pullError) return { success: false, output: pullError };
+  if (opts.hostNodeModules ?? true) {
+    const tcError = checkImageToolchain(image, projectRoot);
+    if (tcError) return { success: false, output: tcError };
+  }
 
   // Paths that exist on the host and must exist in the container.
   const sendDirs = [absWorktree, ...(absDeps ? [absDeps] : []), ...rwMounts.filter(m => fs.existsSync(m))];
@@ -476,8 +513,8 @@ function runDockerStream(cmd, cwd, opts = {}, timeoutMs = TIMEOUT_MS) {
     '--cap-drop', 'ALL',
     '--pids-limit', '512',
     '--user', '65534:65534',
-    '--memory', memory,
-    '--memory-swap', memory,
+    '--memory', streamMemory(memory, mountDirs.length),
+    '--memory-swap', streamMemory(memory, mountDirs.length),
     '--cpus', CPUS,
     ...envArgs,
     '--workdir', absWorktree,

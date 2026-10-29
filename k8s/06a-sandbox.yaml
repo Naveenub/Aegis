@@ -24,7 +24,7 @@ spec:
       labels:
         app: aegis-sandbox
     spec:
-      runtimeClassName: kata # CHANGE to your microVM RuntimeClass
+      runtimeClassName: kata # CHANGE to your microVM RuntimeClass (scripts/sandbox-setup.sh runtimeclass)
       automountServiceAccountToken: false
       containers:
         - name: dockerd

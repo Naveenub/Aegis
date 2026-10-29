@@ -35,6 +35,20 @@ for (const page of ['dpa', 'privacy', 'security', 'terms']) {
   }
 }
 
+// Sandbox runner: privileged dind is only safe inside a microVM guest, and the
+// image must be a real, built one (stream mode mounts nothing).
+const sbx = readFileSync(join(root, 'k8s/06a-sandbox.yaml'), 'utf-8');
+const rc = /^\s*runtimeClassName:\s*(\S+)(.*)$/m.exec(sbx);
+if (/privileged:\s*true/.test(sbx)) {
+  if (!rc) problems.push('k8s/06a-sandbox.yaml: privileged dind without runtimeClassName (must run in a kata/firecracker microVM)');
+  else if (!/kata|firecracker|(^|-)fc($|-)/i.test(rc[1]) || /CHANGE/.test(rc[2])) {
+    problems.push(`k8s/06a-sandbox.yaml: runtimeClassName "${rc[1]}" not confirmed as a microVM class (run scripts/sandbox-setup.sh runtimeclass, then drop the CHANGE comment)`);
+  }
+}
+if (/your-registry\//.test(readFileSync(join(root, 'k8s/01-configmap.yaml'), 'utf-8'))) {
+  problems.push('k8s/01-configmap.yaml: AEGIS_SANDBOX_IMAGE / image still a placeholder (build Dockerfile.sandbox and push)');
+}
+
 console.log('SOC 2: roadmap only, not certified (docs-site/docs/soc2-roadmap.md); pages must not claim certification.');
 if (problems.length) {
   console.error('\nCompliance launch check FAILED:\n' + problems.map((p) => ` - ${p}`).join('\n'));

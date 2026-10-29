@@ -73,4 +73,24 @@ describe('stream transport (remote runner)', () => {
     const { runInSandbox } = await import('../engine/sandbox.js');
     expect(runInSandbox('exit 3', '/tmp', '/app')).toEqual({ success: false, output: 'boom' });
   });
+
+  it('raises the memory limit by the tmpfs size', async () => {
+    const { runInSandbox } = await import('../engine/sandbox.js');
+    runInSandbox('true', '/tmp', '/app');
+    const args = spawnSync.mock.calls[0][1];
+    expect(args[args.indexOf('--memory') + 1]).toBe('768m'); // 512m + 256m worktree tmpfs
+  });
+
+  it('fails clearly when the image lacks the toolchain', async () => {
+    execFileSync.mockImplementation((cmd, args) => {
+      if (cmd === 'docker' && args.includes('--entrypoint')) throw new Error('missing');
+      return Buffer.from('');
+    });
+    const { runInSandbox } = await import('../engine/sandbox.js');
+    const r = runInSandbox('true', '/tmp', '/app');
+    expect(r.success).toBe(false);
+    expect(r.output).toMatch(/Dockerfile\.sandbox/);
+    expect(spawnSync).not.toHaveBeenCalled();
+    execFileSync.mockImplementation((cmd) => (cmd === 'tar' ? Buffer.from('TAR') : Buffer.from('')));
+  });
 });
