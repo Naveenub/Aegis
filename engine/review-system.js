@@ -1,4 +1,5 @@
 import { runLint } from './lint-runner.js';
+import { multiRepoMode } from './tenant-repo.js';
 import { runTests } from './test-runner.js';
 import { validateTargetPath } from './code-writer.js';
 import path from 'path';
@@ -75,6 +76,11 @@ export function validatePatch(patch, root) {
  * @param {string} [tenantId] - Tenant to attribute sandbox-minutes usage to.
  */
 export function runReviewPipeline(patch, cwd, file, tenantId) {
+  // Multi-repo mode: never lint/test the server's own checkout in place of the tenant's repo.
+  if (!cwd && multiRepoMode()) {
+    return reject('No tenant worktree available (multi-repo mode refuses to fall back to the server checkout).');
+  }
+
   // 1. structural + path validation -- pass cwd as root so path.resolve uses
   //    the worktree as the anchor, not process.cwd() of the server process.
   const base = validatePatch(patch, cwd);

@@ -13,7 +13,7 @@
  * code-writer is partially mocked so validateTargetPath stays testable.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mock lint-runner ─────────────────────────────────────────────────────────
 
@@ -252,5 +252,17 @@ describe('runReviewPipeline() — test failure', () => {
     runTests.mockImplementation(() => { callOrder.push('tests'); return { success: false, output: 'err' }; });
     runReviewPipeline(VALID_PATCH);
     expect(callOrder).toEqual(['lint', 'tests']);
+  });
+});
+
+describe('runReviewPipeline — multi-repo fail-closed', () => {
+  afterEach(() => { delete process.env.AEGIS_REPOS_BASE; });
+
+  it('rejects when no tenant worktree is supplied in multi-repo mode', async () => {
+    process.env.AEGIS_REPOS_BASE = '/tmp/aegis-repos';
+    const { runReviewPipeline } = await import('../engine/review-system.js');
+    const res = runReviewPipeline(JSON.stringify({ file: 'a.js', content: 'x' }), undefined, 'a.js', 'acme');
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/multi-repo mode/);
   });
 });
