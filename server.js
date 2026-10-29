@@ -43,6 +43,7 @@
  *   GET    /signup/config                      Public signup config (Stripe publishable key)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
+ *   POST   /billing/plan                       Change plan { tier, email? }: free→paid, upgrade now, downgrade/cancel at period end
  *   GET    /tenants                            List registered tenants
  *   POST   /tenants                            Register a new tenant
  *   GET    /tenants/:id                        Get tenant metadata
@@ -85,6 +86,7 @@ import { setQuota } from './engine/tenant-quota.js';
 import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
 import { createPortalSession } from './engine/billing/stripe-customer.js';
+import { changePlan } from './engine/billing/plan-change.js';
 import { getSpendStatus, addCredits } from './engine/billing/spend-guard.js';
 import { setByokKey, deleteByokKey, hasByok } from './engine/billing/byok.js';
 import { createCreditCheckout } from './engine/billing/credits.js';
@@ -926,6 +928,26 @@ app.post('/billing/portal', allowInactiveTenant, requireApiKey, requirePermissio
     console.error('[POST /billing/portal]', err);
     res.status(502).json({ error: `Billing portal unavailable: ${err.message}` });
   }
+});
+
+/**
+ * POST /billing/plan
+ * Body: { tier: 'free' | 'starter' | 'pro', email?: string }
+ *
+ * Self-serve plan change for the calling tenant (see billing/plan-change.js for
+ * the matrix). Deliberately NOT allowInactiveTenant: a pending or suspended
+ * tenant must fix payment through POST /billing/portal first, not change plan.
+ * Rate-limited because free → paid creates a Stripe subscription.
+ *
+ * Returns: { tenantId, currentTier, targetTier, effective, effectiveAt, clientSecret? }
+ */
+app.post('/billing/plan', taskRateLimiter, requireApiKey, requirePermission('tenant.admin'), async (req, res) => {
+  const { status, body } = await changePlan({
+    tenantId: req.resolvedTenantId,
+    tier: req.body?.tier,
+    email: req.body?.email,
+  });
+  res.status(status).json(body);
 });
 
 // ─── Tenant management ────────────────────────────────────────────────────────
