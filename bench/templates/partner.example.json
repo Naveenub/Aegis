@@ -1,0 +1,8 @@
+{
+  "partner": { "name": "FILL IN", "description": "One paragraph: what they build, team size, stack, the repo Aegis worked on.", "repo": "org/repo" },
+  "period": { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" },
+  "baselineMethod": "FILL IN: how time-without-Aegis was established (e.g. engineers timed 8 comparable past tickets)",
+  "consent": { "namedPublicly": false, "approvedBy": null, "approvedAt": null, "quoteApproved": false },
+  "quote": { "text": "", "attribution": "" },
+  "hourlyUsd": null
+}

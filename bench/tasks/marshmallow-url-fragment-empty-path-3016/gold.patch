@@ -1,0 +1,38 @@
+diff --git a/AUTHORS.rst b/AUTHORS.rst
+index cd928bdf9008fa730a8f8143b2d3baf66844cb2c..e4161f924e7cf97d3ec4f389a5b65577bb0d8489 100644
+--- a/AUTHORS.rst
++++ b/AUTHORS.rst
+@@ -188,3 +188,4 @@ Contributors (chronological)
+ - `@rstar327 <https://github.com/rstar327>`_
+ - Kadir Can Ozden  `@bysiber  <https://github.com/bysiber>`_
+ - Dhruvil Darji  `@dhruvildarji  <https://github.com/dhruvildarji>`_
++- Haïm Dimer `@hdimer  <https://github.com/hdimer>`_
+diff --git a/CHANGELOG.rst b/CHANGELOG.rst
+index 3946327c3de4307f101b6efb55893ff215a68dc0..bb5393d1bae15e9562ab8a8d03d97bd1e6e5e4bf 100644
+--- a/CHANGELOG.rst
++++ b/CHANGELOG.rst
+@@ -9,6 +9,11 @@ Features:
+ - If `by_value` is enabled on an enum with a `None` value `allow_none` now defaults to `True`.
+   Thanks :user:`GeraldineGalindo` for the suggestion (:issue:`2985`).
+ 
++Bug fixes:
++
++- `marshmallow.validate.URL` accepts a fragment that follows an empty path,
++  e.g. ``https://example.com#frag`` (:pr:`3016`). Thanks :user:`hdimer` for the PR.
++
+ 4.3.0 (2026-04-03)
+ ------------------
+ 
+diff --git a/src/marshmallow/validate.py b/src/marshmallow/validate.py
+index 3463a474fecd68b2f00121eaef5468239b8d4e19..35c0e8bcef27641b6710fb1be4e1fadfb9487b6d 100644
+--- a/src/marshmallow/validate.py
++++ b/src/marshmallow/validate.py
+@@ -157,7 +157,7 @@ class URL(Validator):
+                     r"(?::\d+)?",
+                 )
+             )
+-            relative_part = r"(?:/?|[/?]\S+)\Z"
++            relative_part = r"(?:/?|[/?#]\S+)\Z"
+ 
+             if relative:
+                 if absolute:

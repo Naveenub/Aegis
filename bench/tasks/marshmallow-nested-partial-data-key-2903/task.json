@@ -1,0 +1,22 @@
+{
+  "id": "marshmallow-nested-partial-data-key-2903",
+  "repo": "marshmallow-code/marshmallow",
+  "baseSha": "65374df0c31cdc45acc4435741779298201306a2",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/marshmallow-code/marshmallow/pull/2903",
+    "mergedAt": "2026-03-25T22:27:12Z"
+  },
+  "prompt": "Passing a dotted attribute name to partial= for a Nested field that has data_key set does not work. Example: PersonSchema has `address = fields.Nested(AddressSchema, data_key='homeAddress', required=True)` where AddressSchema has required fields zip_code and city. PersonSchema().load({'homeAddress': {'city': 'Springfield'}}, partial=('address.zip_code',)) still raises a ValidationError for the missing zip_code in the nested schema, even though partial names the field by its attribute name as documented. Expected: the nested schema is loaded with zip_code treated as partial, so the load succeeds and the result has no zip_code. Without partial the missing required field should still fail.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . pytest simplejson"
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_deserialization.py -q -k 'test_nested_partial_tuple_with_data_key'",
+  "pass_to_pass": ".venv/bin/python -m pytest tests -q --ignore=tests/test_deserialization.py",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

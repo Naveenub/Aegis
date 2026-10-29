@@ -1,0 +1,22 @@
+{
+  "id": "click-argument-metavar-double-brackets-3578",
+  "repo": "pallets/click",
+  "baseSha": "8929d392781c8113bc569f388c15c47b94f86581",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/pallets/click/pull/3578",
+    "mergedAt": "2026-06-10T13:31:37Z"
+  },
+  "prompt": "The usage line in --help shows doubled square brackets for optional arguments whose type already brackets its metavar. For `@click.argument('method', type=click.Choice(['foo','bar','baz']), nargs=-1)` or the same with required=False, the synopsis renders `[[foo|bar|baz]]...` instead of `[foo|bar|baz]...`. The same happens with click.DateTime arguments, e.g. `[[%Y-%m-%d]]`. Expected: a single pair of brackets, indicating that the argument is optional, while required arguments and types that do not bracket their metavar render as before.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . 'pytest<9'"
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_basic.py -q -k 'optional_metavar'",
+  "pass_to_pass": ".venv/bin/python -m pytest tests -q --deselect tests/test_basic.py::test_choice_argument_optional_metavar --deselect tests/test_basic.py::test_datetime_argument_optional_metavar",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

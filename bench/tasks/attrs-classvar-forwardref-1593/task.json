@@ -1,0 +1,22 @@
+{
+  "id": "attrs-classvar-forwardref-1593",
+  "repo": "python-attrs/attrs",
+  "baseSha": "6851ab593cd25f3c14393e9355d57d22bec2a074",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/python-attrs/attrs/pull/1593",
+    "mergedAt": "2026-07-31T13:28:06Z"
+  },
+  "prompt": "On Python 3.14, annotations are evaluated lazily and a ClassVar that was never imported in the module shows up as a typing.ForwardRef object instead of a string. attrs then fails to recognise it as a class variable when using auto_attribs, so `cls_var: ClassVar[str]` (with ClassVar not imported) is turned into an attribute with no default and breaks construction. The private helper that decides whether an annotation is a ClassVar (attr._make._is_class_var) returns False for typing.ForwardRef('ClassVar[str]'). Expected: forward references that spell out ClassVar are treated as class variables, just like the equivalent string annotations.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . pytest hypothesis pympler cloudpickle zope.interface"
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_annotations.py -q -k 'test_is_class_var'",
+  "pass_to_pass": ".venv/bin/python -m pytest tests/test_annotations.py -q -k 'not test_is_class_var'",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

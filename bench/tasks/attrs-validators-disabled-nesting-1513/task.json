@@ -1,0 +1,22 @@
+{
+  "id": "attrs-validators-disabled-nesting-1513",
+  "repo": "python-attrs/attrs",
+  "baseSha": "ab7f8b2f4c0f747d5b1575247ce35e5adaad182e",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/python-attrs/attrs/pull/1513",
+    "mergedAt": "2026-03-14T14:23:53Z"
+  },
+  "prompt": "attrs.validators.disabled() cannot be nested. If you enter the context manager inside another one, validators are switched back on as soon as the inner block exits, so the rest of the outer block runs with validation enabled again. Repro: `with attrs.validators.disabled(): with attrs.validators.disabled(): pass` and then check attrs.validators.get_run_validators() inside the outer block; it returns True but should still be False. Expected: leaving the inner block restores whatever state was in effect when it was entered, and validators are only re-enabled when the outermost block exits.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . pytest hypothesis pympler cloudpickle zope.interface"
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_validators.py -q -k 'TestDisableValidators'",
+  "pass_to_pass": ".venv/bin/python -m pytest tests/test_validators.py -q -k 'not TestDisableValidators'",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

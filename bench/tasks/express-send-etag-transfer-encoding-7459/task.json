@@ -1,0 +1,22 @@
+{
+  "id": "express-send-etag-transfer-encoding-7459",
+  "repo": "expressjs/express",
+  "baseSha": "3ce6d0eb86e9d93529ff3191c6bb5db8ce6e72c8",
+  "language": "javascript",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/expressjs/express/pull/7459",
+    "mergedAt": "2026-09-15T17:52:26Z"
+  },
+  "prompt": "When a handler sets a Transfer-Encoding header (e.g. `res.set('Transfer-Encoding', 'chunked').send('hello')`), res.send() no longer generates an ETag for the response. Content-Length is correctly omitted in that case since the two headers must not be combined, but the ETag is also silently skipped, so conditional GET/304 handling stops working for such responses. Expected: the response has Transfer-Encoding and no Content-Length, and still carries the normal weak ETag computed from the body (for 'hello' that is W/\"5-qvTGHdzF6KLavt4PO0gs2a6pQ00\").",
+  "setup": [
+    "npm install --no-audit --no-fund"
+  ],
+  "fail_to_pass": "npx mocha --require test/support/env --check-leaks test/res.send.js -g 'should still generate an ETag'",
+  "pass_to_pass": "npx mocha --require test/support/env --check-leaks test/res.send.js test/res.json.js -g 'should still generate an ETag' --invert",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

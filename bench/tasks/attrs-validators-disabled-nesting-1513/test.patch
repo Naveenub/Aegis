@@ -1,0 +1,27 @@
+diff --git a/tests/test_validators.py b/tests/test_validators.py
+index 9fd3f2dcbe6742f8434675632ffd2ccb7d37a2be..5ad2308eb89e6dfa8b0f6362969775b69c692fd6 100644
+--- a/tests/test_validators.py
++++ b/tests/test_validators.py
+@@ -97,6 +97,22 @@ class TestDisableValidators:
+ 
+         assert _config._run_validators is True
+ 
++    def test_disabled_ctx_nested(self):
++        """
++        Nested contextmanagers restore correct state.
++        """
++        assert _config._run_validators is True
++
++        with validator_module.disabled():
++            assert _config._run_validators is False
++
++            with validator_module.disabled():
++                assert _config._run_validators is False
++
++            assert _config._run_validators is False
++
++        assert _config._run_validators is True
++
+ 
+ class TestInstanceOf:
+     """

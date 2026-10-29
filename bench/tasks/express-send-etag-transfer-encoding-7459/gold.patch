@@ -1,0 +1,29 @@
+diff --git a/lib/response.js b/lib/response.js
+index bc6724348906093fff171124b21e52da34fcceba..e3c309744fbb339dc737a6e48d2e4d7916ec7c2c 100644
+--- a/lib/response.js
++++ b/lib/response.js
+@@ -162,10 +162,8 @@ res.send = function send(body) {
+   var etagFn = app.get('etag fn')
+   var generateETag = !this.get('ETag') && typeof etagFn === 'function'
+ 
+-  // Because Content-Length and Transfer-Encoding can't be present in the response headers together,
+-  // Content-Length should be added only if there is no Transfer-Encoding header
+   var len;
+-  if (chunk !== undefined && !this.get('Transfer-Encoding')) {
++  if (chunk !== undefined) {
+     if (Buffer.isBuffer(chunk)) {
+       // get length of Buffer
+       len = chunk.length
+@@ -179,7 +177,11 @@ res.send = function send(body) {
+       len = chunk.length
+     }
+ 
+-    this.set('Content-Length', len);
++    // Because Content-Length and Transfer-Encoding can't be present in the response headers together,
++    // Content-Length should be added only if there is no Transfer-Encoding header
++    if (!this.get('Transfer-Encoding')) {
++      this.set('Content-Length', len);
++    }
+   }
+ 
+   // populate ETag

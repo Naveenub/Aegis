@@ -1,0 +1,25 @@
+diff --git a/test/res.send.js b/test/res.send.js
+index f38ffde97769fd0355e6d4a002f3a10a2b6203cb..e765c8c60c1fed466d00d3eb8b444a36819b233c 100644
+--- a/test/res.send.js
++++ b/test/res.send.js
+@@ -616,5 +616,20 @@ describe('res', function(){
+           .expect(200, '', done);
+       })
+     });
++
++    it('should still generate an ETag', function(done){
++      var app = express();
++
++      app.use(function(_, res){
++        res.set('Transfer-Encoding', 'chunked').send('hello');
++      });
++
++      request(app)
++        .get('/')
++        .expect(utils.shouldNotHaveHeader('Content-Length'))
++        .expect(utils.shouldHaveHeader('Transfer-Encoding'))
++        .expect('ETag', 'W/"5-qvTGHdzF6KLavt4PO0gs2a6pQ00"')
++        .expect(200, 'hello', done);
++    })
+   })
+ })

@@ -1,0 +1,57 @@
+{
+  "ok": true,
+  "fingerprint": "a914a390c9d2efb6ad89d0565fb93d0eb99409f8f448b78c8689ff736c5d3547",
+  "verifiedAt": "2026-10-28T09:07:46.214Z",
+  "node": "v22.23.4",
+  "docker": null,
+  "steps": [
+    {
+      "label": "setup[0]",
+      "expect": "pass",
+      "exitCode": 0,
+      "timedOut": false,
+      "ok": true,
+      "seconds": 6
+    },
+    {
+      "label": "fail_to_pass @ base+tests (must FAIL)",
+      "expect": "fail",
+      "exitCode": 1,
+      "timedOut": false,
+      "ok": true,
+      "seconds": 1
+    },
+    {
+      "label": "pass_to_pass @ base+tests (must PASS)",
+      "expect": "pass",
+      "exitCode": 0,
+      "timedOut": false,
+      "ok": true,
+      "seconds": 0
+    },
+    {
+      "label": "setup[0]",
+      "expect": "pass",
+      "exitCode": 0,
+      "timedOut": false,
+      "ok": true,
+      "seconds": 4
+    },
+    {
+      "label": "fail_to_pass @ gold (must PASS)",
+      "expect": "pass",
+      "exitCode": 0,
+      "timedOut": false,
+      "ok": true,
+      "seconds": 0
+    },
+    {
+      "label": "pass_to_pass @ gold (must PASS)",
+      "expect": "pass",
+      "exitCode": 0,
+      "timedOut": false,
+      "ok": true,
+      "seconds": 1
+    }
+  ]
+}

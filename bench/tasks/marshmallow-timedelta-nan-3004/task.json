@@ -1,0 +1,22 @@
+{
+  "id": "marshmallow-timedelta-nan-3004",
+  "repo": "marshmallow-code/marshmallow",
+  "baseSha": "2d30a962a0a104f340e1c69d62b8bba0558027a0",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/marshmallow-code/marshmallow/pull/3004",
+    "mergedAt": "2026-08-21T16:12:33Z"
+  },
+  "prompt": "Deserializing the string 'nan' with fields.TimeDelta(fields.TimeDelta.DAYS) leaks a raw ValueError out of field.deserialize()/schema.load() instead of a ValidationError, so a schema fed untrusted input crashes rather than reporting an invalid field. Infinity values such as 'inf' and '-inf' should also be reported as normal validation errors using the field's standard 'invalid' message. Repro: fields.TimeDelta(fields.TimeDelta.DAYS).deserialize('nan'). Expected: ValidationError with the 'invalid' message, like other malformed values.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . pytest simplejson"
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_deserialization.py -q -k 'invalid_timedelta_field_deserialization'",
+  "pass_to_pass": ".venv/bin/python -m pytest tests -q --ignore=tests/test_deserialization.py",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

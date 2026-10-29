@@ -1,0 +1,35 @@
+diff --git a/AUTHORS.rst b/AUTHORS.rst
+index 9c954eca988f343df32591ee36df7f64fb97326e..3249fc2787e4991b45e791fe20d22adcd139e0ef 100644
+--- a/AUTHORS.rst
++++ b/AUTHORS.rst
+@@ -186,3 +186,4 @@ Contributors (chronological)
+ - Emmanuel Ferdman  `@emmanuel-ferdman  <https://github.com/emmanuel-ferdman>`_
+ - Fridayworks `@worksbyfriday  <https://github.com/worksbyfriday>`_
+ - `@rstar327 <https://github.com/rstar327>`_
++- Kadir Can Ozden  `@bysiber  <https://github.com/bysiber>`_
+diff --git a/CHANGELOG.rst b/CHANGELOG.rst
+index b6d871b5d6a046797df2d0a5f3835002ceea4f2b..427395ede94a5366421838af8ed81d547b0a781e 100644
+--- a/CHANGELOG.rst
++++ b/CHANGELOG.rst
+@@ -12,6 +12,8 @@ Bug fixes:
+   Thanks :user:`nosnickid` for the report and :user:`worksbyfriday` for the PR.
+ - Fix `marshmallow.validate.OneOf` emitting extra pairs when labels outnumber choices (:issue:`2869`).
+   Thanks: user:`T90REAL` for the report and :user:`rstar327` for the PR.
++- Fix behavior when passing a dot-delited attribute name to ``partial`` for a key with ``data_key`` set (:pr:`2903`).
++  Thanks :user:`bysiber` for the PR.
+ 
+ 
+ 4.2.2 (2026-02-04)
+diff --git a/src/marshmallow/schema.py b/src/marshmallow/schema.py
+index d4a853b242067d957c849c837ae8a56afb754bc2..4288f05096d9b28a50c9b1cb1fadbd3d380c5456 100644
+--- a/src/marshmallow/schema.py
++++ b/src/marshmallow/schema.py
+@@ -654,7 +654,7 @@ class Schema(metaclass=SchemaMeta):
+                 d_kwargs = {}
+                 # Allow partial loading of nested schemas.
+                 if partial_is_collection:
+-                    prefix = field_name + "."
++                    prefix = attr_name + "."
+                     len_prefix = len(prefix)
+                     sub_partial = [
+                         f[len_prefix:] for f in partial if f.startswith(prefix)

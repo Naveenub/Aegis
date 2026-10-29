@@ -100,7 +100,8 @@ Agent inputs include AST-level repo context (symbol tables, import/call graphs) 
 - **Inbound webhooks** (`webhook-receiver.js`) — signature-verified GitHub/GitLab push and PR/MR webhooks can trigger workflows, filtered by branch pattern.
 - **PR/MR automation** — `AEGIS_PR_PROVIDER` (`github` / `gitlab` / `bitbucket`) opens a pull/merge request after a workflow merges, targeting `AEGIS_PR_TARGET_BRANCH`.
 - **AST-based repo intelligence** (`repo-scanner.js`) — built on `acorn`; produces symbol tables and import/call graphs to give agents accurate repo context.
-- **Prompt eval harness** (`prompt-eval.js`, `npm run eval`) — scores each agent persona against golden cases using the real Claude API; runs as a CI gate so a bad persona edit is caught before it ships.
+- **Prompt eval harness** (`prompt-eval.js`, `npm run eval`) — scores each agent persona against golden cases using the real Claude API; runs as a CI gate so a bad persona edit is caught before it ships. It checks output *format* only; it is not evidence of outcomes.
+- **ROI benchmark** (`bench/`, `npm run bench`) — runs Aegis on real merged PRs from public repos and scores merge rate (verified by held-out tests), cost per merged PR, and net time saved. Harness and 8 verified tasks are included; **no published results yet** — see [`bench/README.md`](bench/README.md). A design-partner case-study generator (`npm run case-study`) and pilot protocol live in `docs-site/docs/case-studies/`.
 - **CLI** (`cli/claude.js`) — submits a task, polls `GET /workflows/:workflowId` to a terminal state, and writes a context snapshot to `.claude/context/jobs.json`.
 
 ---

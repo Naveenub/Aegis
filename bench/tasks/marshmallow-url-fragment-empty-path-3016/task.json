@@ -1,0 +1,22 @@
+{
+  "id": "marshmallow-url-fragment-empty-path-3016",
+  "repo": "marshmallow-code/marshmallow",
+  "baseSha": "3207be31474530f7c0685dfbd7b4faca5b35fbf5",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/marshmallow-code/marshmallow/pull/3016",
+    "mergedAt": "2026-08-08T14:24:08Z"
+  },
+  "prompt": "validate.URL rejects valid absolute URLs whose fragment directly follows the host with no path, for example 'http://example.org#fragment' or 'http://user@example.com#fragment'. RFC 3986 allows a fragment after an empty path, and links to a site root with an anchor are common. 'http://example.org/#fragment' is accepted today, so the behaviour is inconsistent. In relative mode a bare '#frag' is also rejected even though a bare '?query' is accepted. Expected: these values validate successfully, and values that were invalid before for other reasons are still rejected.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . pytest simplejson"
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_validate.py -q -k 'url'",
+  "pass_to_pass": ".venv/bin/python -m pytest tests -q --ignore=tests/test_validate.py",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}

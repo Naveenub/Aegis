@@ -1,0 +1,15 @@
+diff --git a/src/marshmallow/fields.py b/src/marshmallow/fields.py
+index c6e71f7067443dd3b5e80fc34d859cbe59829c54..69e8dbb197d97927ee60d45a56a603641812c96b 100644
+--- a/src/marshmallow/fields.py
++++ b/src/marshmallow/fields.py
+@@ -1581,7 +1581,9 @@ class TimeDelta(Field[dt.timedelta]):
+ 
+         try:
+             return dt.timedelta(**kwargs)
+-        except OverflowError as error:
++        except (OverflowError, ValueError) as error:
++            # OverflowError: value out of timedelta's range (e.g. infinity).
++            # ValueError: value is NaN.
+             raise self.make_error("invalid") from error
+ 
+ 

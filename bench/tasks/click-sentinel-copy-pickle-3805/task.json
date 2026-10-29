@@ -1,0 +1,22 @@
+{
+  "id": "click-sentinel-copy-pickle-3805",
+  "repo": "pallets/click",
+  "baseSha": "420c8fb44eeadb537cae69d2fee3796e808558dd",
+  "language": "python",
+  "source": {
+    "type": "pull_request",
+    "url": "https://github.com/pallets/click/pull/3805",
+    "mergedAt": "2026-08-29T06:53:55Z"
+  },
+  "prompt": "copy.deepcopy() and pickle fail on click Parameter, Option and Command objects. Repro: `import copy, click; copy.deepcopy(click.Option(['--name']))` or `pickle.loads(pickle.dumps(click.Option(['--name'])))` raises instead of returning an equivalent object, because the internal UNSET sentinel (click._utils.Sentinel, an Enum whose value is a bare object()) cannot round-trip through the default Enum copy/pickle machinery. Expected: copy.copy, copy.deepcopy and pickle round trips of a Sentinel member return the very same member (identity preserved), and duplicating an Option keeps its default as UNSET and its name.",
+  "setup": [
+    "python3 -m venv .venv && .venv/bin/pip install -q -e . pytest "
+  ],
+  "fail_to_pass": ".venv/bin/python -m pytest tests/test_utils/test_sentinel.py -q",
+  "pass_to_pass": ".venv/bin/python -m pytest tests -q --ignore=tests/test_utils/test_sentinel.py",
+  "timeoutSec": 900,
+  "baseline": {
+    "minutes": null,
+    "source": null
+  }
+}
