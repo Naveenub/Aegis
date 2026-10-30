@@ -108,6 +108,11 @@ export const api = {
     return res.blob();
   },
 
+  // billing
+  getBilling: (apiKey, tenantId) =>
+    request(`/tenants/${encodeURIComponent(tenantId)}/billing`, { apiKey }),
+  createPortalSession: (apiKey) => request('/billing/portal', { method: 'POST', apiKey }),
+
   // tenants
   listTenants: (apiKey) => request('/tenants', { apiKey }),
   createTenant: (apiKey, { tenantId, label }) =>

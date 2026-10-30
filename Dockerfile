@@ -14,6 +14,14 @@ FROM base AS deps
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
+# ── dashboard (React SPA → dashboard/dist, served by server.js at /app) ────────
+FROM node:20-alpine AS dashboard
+WORKDIR /dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+COPY dashboard/ ./
+RUN npm run build
+
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM base AS runtime
 
@@ -24,6 +32,7 @@ RUN apk add --no-cache git docker-cli
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+COPY --from=dashboard /dashboard/dist ./dashboard/dist
 
 # Non-root: agent-generated patches are already sandboxed via Docker in
 # sandbox.js; the host process itself still shouldn't run as root.

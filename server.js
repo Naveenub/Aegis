@@ -36,6 +36,7 @@
  *   GET    /metrics/json                       OTEL-compatible JSON export
  *   GET    /api/metrics                        Structured metrics (dashboard)
  *   GET    /dashboard                          Observability UI (HTML)
+ *   GET    /app/*                              React dashboard SPA (usage & billing, tenants, users; built from dashboard/)
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   GET    /                                   Marketing landing page (HTML)
  *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
@@ -69,7 +70,7 @@
  */
 
 import 'dotenv/config';
-import { readFileSync }  from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import express           from 'express';
@@ -1432,6 +1433,22 @@ app.get('/events', requireApiKey, (req, res) => {
 app.use(authRouter);
 app.use(repoRouter);
 
+// ─── React dashboard (dashboard/dist, built with `npm run build:dashboard`) ───
+// Mounted under /app because the SPA's own routes (/workflows, /tenants, …)
+// collide with API paths. Static assets are public; every data call the SPA
+// makes is authenticated by the API as usual.
+const DASHBOARD_DIST = join(__dirname, 'dashboard', 'dist');
+if (existsSync(join(DASHBOARD_DIST, 'index.html'))) {
+  app.use('/app', express.static(DASHBOARD_DIST, { index: false }));
+  app.get(['/app', '/app/*'], (req, res, next) => {
+    if (/\.[a-z0-9]+$/i.test(req.path)) return next(); // missing asset → 404, not index.html
+    res.set('Cache-Control', 'no-cache');
+    res.sendFile(join(DASHBOARD_DIST, 'index.html'));
+  });
+} else {
+  console.warn('[dashboard] dashboard/dist not found — /app is disabled. Run `npm run build:dashboard`.');
+}
+
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 
 app.use((_req, res) => {
@@ -1470,6 +1487,7 @@ async function start() {
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);
     console.info(`[server] Dashboard → http://localhost:${PORT}/dashboard`);
+    if (existsSync(join(DASHBOARD_DIST, 'index.html'))) console.info(`[server] Usage & billing UI → http://localhost:${PORT}/app/`);
   });
 }
 

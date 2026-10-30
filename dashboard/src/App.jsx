@@ -15,6 +15,7 @@ import Anomalies from './pages/Anomalies';
 import Tenants from './pages/Tenants';
 import Users from './pages/Users';
 import AuditLog from './pages/AuditLog';
+import Billing from './pages/Billing';
 
 function AuthedApp() {
   return (
@@ -34,6 +35,7 @@ function AuthedApp() {
                 <Route path="/traces" element={<Traces />} />
                 <Route path="/anomalies" element={<Anomalies />} />
                 <Route path="/tenants" element={<Tenants />} />
+                <Route path="/billing" element={<Billing />} />
                 <Route path="/users" element={<Users />} />
                 <Route path="/audit" element={<AuditLog />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
@@ -54,7 +56,7 @@ function Gate() {
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, '')}>
         <Gate />
       </BrowserRouter>
     </AuthProvider>

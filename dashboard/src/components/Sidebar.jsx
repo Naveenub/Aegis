@@ -8,6 +8,7 @@ const LINKS = [
   { to: '/dlq', label: 'Dead letters' },
   { to: '/traces', label: 'Traces' },
   { to: '/anomalies', label: 'Anomalies' },
+  { to: '/billing', label: 'Billing' },
   { to: '/tenants', label: 'Tenants & keys', permission: 'key.manage' },
   { to: '/users', label: 'Users', permission: 'user.manage' },
   { to: '/audit', label: 'Audit log', permission: 'audit.read' },

@@ -28,6 +28,7 @@
   "scripts": {
     "start": "node cli/claude.js",
     "server": "node server.js",
+    "build:dashboard": "npm --prefix dashboard ci && npm --prefix dashboard run build",
     "worker": "node workers/agent-worker.js",
     "dlq-worker": "node workers/dlq-worker.js",
     "lint": "eslint .",

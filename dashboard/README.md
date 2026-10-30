@@ -1,10 +1,10 @@
 # AEGIS Dashboard
 
-React 19 + Vite operator console for the AEGIS API. It is a standalone app; `server.js` does not serve it (the API's built-in `/dashboard` is a separate single-file page).
+React 19 + Vite operator console for the AEGIS API. `server.js` serves the built output at `/app/` (the API's built-in `/dashboard` is a separate single-file page). The app is built with `base: '/app/'`, so the dev server runs at `/app/` too.
 
 ## Pages
 
-Overview, Workflows (and workflow detail), Review Queue, DLQ, Traces, Anomalies, Tenants. Live metrics and workflows stream in over the API's `/events` SSE endpoint.
+Overview, Workflows (and workflow detail), Review Queue, DLQ, Traces, Anomalies, Billing, Tenants, Users, Audit log. Live metrics and workflows stream in over the API's `/events` SSE endpoint.
 
 ## Run
 
