@@ -1,5 +1,6 @@
 /** @type {import('eslint').Linter.Config} */
 module.exports = {
+  ignorePatterns: ['dashboard/dist/'],
   env: {
     es2022: true,
     node:   true,
@@ -10,7 +11,7 @@ module.exports = {
   },
   overrides: [
     {
-      files: ['api/client.js', 'dashboard/src/**/*.js'],
+      files: ['dashboard/src/**/*.js'],
       env: { browser: true },
     },
     {
