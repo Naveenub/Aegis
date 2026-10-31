@@ -141,6 +141,9 @@ import {
   failWorkflow,
   flagForReview,
   getReviewQueue,
+  getReviewRecord,
+  checkReviewResolvable,
+  consumeApprovedPatch,
   resolveReview,
 } from '../engine/workflow-store.js';
 
@@ -657,5 +660,136 @@ describe('resolveReview()', () => {
       const rec = await resolveReview(`wf-res-${resolution}`, 'step-1', resolution);
       expect(rec.status).toBe(resolution);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 12. Tenant-scoped review queue
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('getReviewQueue() — tenantId scoping', () => {
+  it('returns only the requested tenant\'s items', async () => {
+    await flagForReview('wf-t-1', 'step-1', { tenantId: 'acme' });
+    await flagForReview('wf-t-2', 'step-1', { tenantId: 'globex' });
+    const items = await getReviewQueue({ status: 'pending', tenantId: 'acme' });
+    expect(items.map(i => i.workflowId)).toEqual(['wf-t-1']);
+  });
+
+  it('never returns another tenant\'s patch', async () => {
+    await flagForReview('wf-t-3', 'step-1', { tenantId: 'globex', patch: 'SECRET' });
+    const items = await getReviewQueue({ status: 'pending', tenantId: 'acme' });
+    expect(JSON.stringify(items)).not.toContain('SECRET');
+  });
+
+  it('hides records that carry no tenantId from every tenant', async () => {
+    await flagForReview('wf-t-4', 'step-1', {});
+    expect(await getReviewQueue({ status: 'pending', tenantId: 'acme' })).toEqual([]);
+  });
+
+  it('applies the limit after filtering, so other tenants cannot crowd a tenant out', async () => {
+    await flagForReview('wf-t-5', 'step-1', { tenantId: 'acme', flaggedAt: 1 });
+    for (let i = 0; i < 5; i++) {
+      await flagForReview(`wf-t-6-${i}`, 'step-1', { tenantId: 'globex', flaggedAt: 100 + i });
+    }
+    const items = await getReviewQueue({ status: 'pending', tenantId: 'acme', limit: 2 });
+    expect(items.map(i => i.workflowId)).toEqual(['wf-t-5']);
+  });
+
+  it('omitting tenantId still returns every tenant (internal DLQ sweeper)', async () => {
+    await flagForReview('wf-t-7', 'step-1', { tenantId: 'acme' });
+    await flagForReview('wf-t-8', 'step-1', { tenantId: 'globex' });
+    expect(await getReviewQueue({ status: 'pending' })).toHaveLength(2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 13. getReviewRecord() / checkReviewResolvable()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('getReviewRecord()', () => {
+  it('returns the stored record', async () => {
+    await flagForReview('wf-rr-1', 'step-1', { tenantId: 'acme' });
+    const rec = await getReviewRecord('wf-rr-1', 'step-1');
+    expect(rec.tenantId).toBe('acme');
+  });
+
+  it('returns null when there is no record', async () => {
+    expect(await getReviewRecord('wf-ghost', 'step-ghost')).toBeNull();
+  });
+});
+
+describe('checkReviewResolvable()', () => {
+  const held = (over = {}) => ({
+    workflowId: 'wf', stepId: 's', status: 'pending', tenantId: 'acme',
+    kind: 'approval', patch: 'PATCH-BODY', ...over,
+  });
+
+  it('allows the owning tenant to resolve a pending item', () => {
+    for (const r of ['approve', 'retrying', 'skip', 'escalate']) {
+      expect(checkReviewResolvable(held(), 'acme', r)).toBeNull();
+    }
+  });
+
+  it('404s for a missing record', () => {
+    expect(checkReviewResolvable(null, 'acme', 'skip').status).toBe(404);
+  });
+
+  it('404s for another tenant\'s record — same answer as a missing one', () => {
+    expect(checkReviewResolvable(held({ tenantId: 'globex' }), 'acme', 'escalate'))
+      .toEqual(checkReviewResolvable(null, 'acme', 'escalate'));
+  });
+
+  it('404s for a legacy record with no tenantId (fail closed)', () => {
+    expect(checkReviewResolvable(held({ tenantId: undefined }), 'acme', 'skip').status).toBe(404);
+  });
+
+  it('404s when the caller has no tenant, even if the record has none', () => {
+    expect(checkReviewResolvable(held({ tenantId: undefined }), undefined, 'skip').status).toBe(404);
+  });
+
+  it('409s once the item is already resolved', () => {
+    expect(checkReviewResolvable(held({ status: 'skip' }), 'acme', 'escalate').status).toBe(409);
+  });
+
+  it('refuses to approve a DLQ-held failure (no approval kind)', () => {
+    expect(checkReviewResolvable(held({ kind: undefined, error: 'tests failed' }), 'acme', 'approve').status).toBe(400);
+  });
+
+  it('refuses to approve an approval hold that carries no patch', () => {
+    expect(checkReviewResolvable(held({ patch: undefined }), 'acme', 'approve').status).toBe(400);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 14. consumeApprovedPatch()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('consumeApprovedPatch()', () => {
+  it('returns the approved patch', async () => {
+    await flagForReview('wf-ap-1', 'step-1', { tenantId: 'acme', kind: 'approval', patch: 'PATCH-BODY' });
+    await resolveReview('wf-ap-1', 'step-1', 'approved');
+    expect(await consumeApprovedPatch('wf-ap-1', 'step-1')).toBe('PATCH-BODY');
+  });
+
+  it('hands the patch over only once', async () => {
+    await flagForReview('wf-ap-2', 'step-1', { tenantId: 'acme', kind: 'approval', patch: 'PATCH-BODY' });
+    await resolveReview('wf-ap-2', 'step-1', 'approved');
+    await consumeApprovedPatch('wf-ap-2', 'step-1');
+    expect(await consumeApprovedPatch('wf-ap-2', 'step-1')).toBeNull();
+  });
+
+  it('returns null while the item is still pending', async () => {
+    await flagForReview('wf-ap-3', 'step-1', { tenantId: 'acme', kind: 'approval', patch: 'PATCH-BODY' });
+    expect(await consumeApprovedPatch('wf-ap-3', 'step-1')).toBeNull();
+  });
+
+  it.each(['retrying', 'skip', 'escalate'])('returns null after a %s resolution', async (resolution) => {
+    await flagForReview(`wf-ap-${resolution}`, 'step-1', { tenantId: 'acme', kind: 'approval', patch: 'PATCH-BODY' });
+    await resolveReview(`wf-ap-${resolution}`, 'step-1', resolution);
+    expect(await consumeApprovedPatch(`wf-ap-${resolution}`, 'step-1')).toBeNull();
+  });
+
+  it('returns null when there is no record', async () => {
+    expect(await consumeApprovedPatch('wf-ghost', 'step-ghost')).toBeNull();
   });
 });

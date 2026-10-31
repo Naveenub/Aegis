@@ -56,15 +56,19 @@
  *     }
  *
  *   Human resolves via:
- *     POST /review/:workflowId/:stepId/resolve  { resolution: 'retrying' }
- *   which re-queues the step.  On the second pass the patch has already been
- *   AI-approved and is idempotency-checked, so it applies immediately.
+ *     POST /review-queue/resolve  { workflowId, stepId, resolution: 'approve' }
+ *   which re-queues the step.  The worker then applies the exact patch that was
+ *   held (consumeApprovedPatch) instead of regenerating one, and skips the gate
+ *   for it.  Any other resolution ('retrying', 'skip', 'escalate') never applies
+ *   the held patch; 'retrying' regenerates and is gated again.
  *
  * ── Step-level override ───────────────────────────────────────────────────────
  *
- *   A planner step may declare  requiresApproval: true  to force human
- *   sign-off regardless of the global MODE, or  requiresApproval: false
- *   to skip the gate for that step even in approval mode.
+ *   A step may declare  requiresApproval: true  to force human sign-off
+ *   regardless of the global MODE.  A step can never waive the gate:
+ *   requiresApproval: false is ignored.  Step data comes from the planner (which
+ *   reads untrusted repo content) and from templates, so it must not be able to
+ *   switch off a control the operator turned on.
  */
 
 import { logger } from './logger.js';
@@ -96,8 +100,8 @@ const GLOBAL_APPROVAL_REQUIRED =
  *   { reason, mode } -- patch must be held; pass this object to flagForReview
  */
 export function needsApproval(step) {
-  // Step-level override takes precedence over the global setting.
-  if (step.requiresApproval === false) return null;
+  // A step may add the gate (true) but never remove it: `false` falls through
+  // to the global setting.
   if (step.requiresApproval === true || GLOBAL_APPROVAL_REQUIRED) {
     return {
       reason  : step.requiresApproval === true

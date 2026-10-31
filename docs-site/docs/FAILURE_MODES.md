@@ -25,7 +25,7 @@ Failed steps land in a per-tenant DLQ. The worker re-queues each into the
 CRITICAL lane up to `DLQ_MAX_RETRIES` (default 2) with exponential backoff from
 `DLQ_BASE_DELAY_MS` (default 30 s, capped at 5 min), then writes a
 `needs-review` record. A sweep every 15 min re-alerts on unresolved items.
-Humans resolve via `POST /review-queue/resolve` (`retrying`, `skip`, `escalate`).
+Humans resolve via `POST /review-queue/resolve` (`retrying`, `skip`, `escalate`; `approve` applies only to a patch held by the approval gate, not to a DLQ escalation).
 
 | # | Failure mode | Behavior today | Status |
 |---|---|---|---|

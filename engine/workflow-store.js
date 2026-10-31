@@ -402,20 +402,87 @@ export async function flagForReview(workflowId, stepId, details = {}) {
  * @param {object} opts
  * @param {number} [opts.limit=50]   - max items to return
  * @param {string} [opts.status]     - filter by status (default: 'pending')
+ * @param {string} [opts.tenantId]   - only this tenant's items. Omit ONLY for
+ *                                     internal cross-tenant callers (DLQ sweeper);
+ *                                     every API-facing caller must pass it.
  * @returns {object[]} review records
  */
-export async function getReviewQueue({ limit = 50, status = 'pending' } = {}) {
-  // Retrieve keys in reverse chronological order (highest score = most recent)
-  const keys = await redis.zrevrange(REVIEW_INDEX, 0, limit - 1);
+export async function getReviewQueue({ limit = 50, status = 'pending', tenantId } = {}) {
+  const scoped = tenantId !== undefined;
+  // A tenant-scoped read filters before limiting; otherwise other tenants' newer
+  // items would fill the window and hide this tenant's.
+  const keys = await redis.zrevrange(REVIEW_INDEX, 0, scoped ? -1 : limit - 1);
   if (!keys.length) return [];
 
   const pipeline = redis.pipeline();
   for (const key of keys) pipeline.get(key);
   const results = await pipeline.exec();
 
-  return results
+  const items = results
     .map(([err, raw]) => (err || !raw ? null : JSON.parse(raw)))
-    .filter(r => r !== null && (!status || r.status === status));
+    .filter(r => r !== null && (!status || r.status === status) && (!scoped || r.tenantId === tenantId));
+  return scoped ? items.slice(0, limit) : items;
+}
+
+/**
+ * Fetch one review record, or null when there is none.
+ *
+ * @param {string} workflowId
+ * @param {string} stepId
+ * @returns {Promise<object|null>}
+ */
+export async function getReviewRecord(workflowId, stepId) {
+  const raw = await redis.get(`${REVIEW_PREFIX}${workflowId}:${stepId}`);
+  return raw ? JSON.parse(raw) : null;
+}
+
+/**
+ * Decide whether `resolution` may be applied to a review record on behalf of
+ * `tenantId`. Returns null when it may, otherwise { status, error } for the HTTP
+ * layer. A missing record, a record from another tenant, and a legacy record
+ * with no tenantId are all the same 404, so existence is never disclosed.
+ *
+ * @param {object|null} record
+ * @param {string}      tenantId
+ * @param {string}      resolution  - 'approve' | 'retrying' | 'skip' | 'escalate'
+ * @returns {{status: number, error: string}|null}
+ */
+export function checkReviewResolvable(record, tenantId, resolution) {
+  if (!record || !tenantId || record.tenantId !== tenantId) {
+    return { status: 404, error: 'No such review item.' };
+  }
+  if (record.status !== 'pending') {
+    return { status: 409, error: `Review item is already resolved (${record.status}).` };
+  }
+  if (resolution === 'approve' && !(record.kind === 'approval' && typeof record.patch === 'string')) {
+    return { status: 400, error: 'Only a patch held by the approval gate can be approved.' };
+  }
+  return null;
+}
+
+/**
+ * Hand the worker the patch a human approved — once.
+ *
+ * Returns the patch stored on an approved, not-yet-consumed review record and
+ * marks it consumed, or null when there is nothing to hand over. The worker
+ * applies exactly this patch instead of regenerating one, so what lands is what
+ * the reviewer saw.
+ *
+ * @param {string} workflowId
+ * @param {string} stepId
+ * @returns {Promise<string|null>}
+ */
+export async function consumeApprovedPatch(workflowId, stepId) {
+  const reviewKey = `${REVIEW_PREFIX}${workflowId}:${stepId}`;
+  const raw = await redis.get(reviewKey);
+  if (!raw) return null;
+
+  const record = JSON.parse(raw);
+  if (record.status !== 'approved' || record.consumedAt || typeof record.patch !== 'string') return null;
+
+  record.consumedAt = Date.now();
+  await redis.set(reviewKey, JSON.stringify(record));
+  return record.patch;
 }
 
 /**

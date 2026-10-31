@@ -21,8 +21,8 @@ Auth: `Authorization: Bearer <key>` where the key is `AEGIS_API_KEY_{TENANTID}` 
 | GET | `/concurrency/:workflowId` | Current concurrency slot usage |
 | GET | `/jobs`, `/jobs/:jobId` | Persisted job records |
 | GET | `/traces`, `/traces/:traceId` | Workflow execution traces |
-| GET | `/review-queue` | Steps held for human approval |
-| POST | `/review-queue/resolve` | Approve or reject a held step |
+| GET | `/review-queue` | The caller's tenant's held steps (approval holds and DLQ escalations) |
+| POST | `/review-queue/resolve` | Resolve a pending item: `approve` (applies the exact held patch; approval holds only), `retrying`, `skip` or `escalate`. 404 for another tenant's item, 409 if already resolved |
 | GET | `/metrics` | Prometheus text-format export |
 | GET | `/metrics/json` | OTEL-compatible JSON export |
 | GET | `/dashboard` | SSE live dashboard (HTML) |

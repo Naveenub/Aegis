@@ -313,7 +313,7 @@
         <div class="card">
           <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
           <h3>Approval-gated</h3>
-          <p>In approval mode every patch is held in a review queue before it touches the worktree. A webhook alerts your reviewers, and anyone with the member role or above resolves it — retry, skip or escalate, with a note. Any single step can also demand sign-off.</p>
+          <p>In approval mode every patch is held in a review queue before it touches the worktree. A webhook alerts your reviewers, and anyone with the member role or above resolves it — approve, retry, skip or escalate, with a note. Approve applies the exact patch the reviewer saw. Any single step can also demand sign-off.</p>
           <span class="src">engine/approval-gate.js</span>
         </div>
         <div class="card">
@@ -381,7 +381,7 @@
       <ul class="limits">
         <li>Not SOC 2 certified. The control map and roadmap are public; status is on the <a href="/security">security page</a>.</li>
         <li>SSO is OpenID Connect (Okta, Entra ID, Google Workspace, Auth0, Keycloak). SAML needs an OIDC bridge.</li>
-        <li>Approval mode is a deployment-wide setting today, not a per-tenant policy. Individual steps can override it.</li>
+        <li>Approval mode is a deployment-wide setting today, not a per-tenant policy. A step can add the gate for itself but can never waive it.</li>
         <li>The audit log can't be pruned — that is what makes it tamper-evident. Zero-retention tenants get task text redacted before it is hashed.</li>
       </ul>
       <p class="fine">Details: <a href="/security">Security</a> · <a href="/subprocessors">Subprocessors</a> · <a href="/dpa">DPA</a> · <a href="/privacy">Privacy</a></p>

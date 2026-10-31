@@ -4,6 +4,8 @@ import { useAuth } from '../context/AuthContext';
 import DataTable from '../components/DataTable';
 
 const RESOLUTIONS = ['retrying', 'skip', 'escalate'];
+// Only a patch held by the approval gate can be approved (the server enforces it too).
+const resolutionsFor = (item) => (item.kind === 'approval' ? ['approve', ...RESOLUTIONS] : RESOLUTIONS);
 
 export default function ReviewQueue() {
   const { apiKey, can } = useAuth();
@@ -38,7 +40,7 @@ export default function ReviewQueue() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div style={{ display: 'flex', gap: 8 }}>
-        {['pending', 'approved', 'rejected'].map((s) => (
+        {['pending', 'approved', 'skip', 'escalate'].map((s) => (
           <button
             key={s}
             onClick={() => setStatus(s)}
@@ -65,7 +67,18 @@ export default function ReviewQueue() {
           { key: 'workflowId', header: 'Workflow', mono: true },
           { key: 'stepId', header: 'Step', mono: true },
           { key: 'agent', header: 'Agent', mono: true },
-          { key: 'error', header: 'Error', wrap: true, render: (r) => <span style={{ color: 'var(--danger)' }}>{r.error}</span> },
+          { key: 'error', header: 'Error / reason', wrap: true, render: (r) => <span style={{ color: r.error ? 'var(--danger)' : 'var(--text-dim)' }}>{r.error ?? r.reason}</span> },
+          {
+            key: 'patch',
+            header: 'Patch',
+            wrap: true,
+            render: (r) => (r.patch ? (
+              <details>
+                <summary style={{ cursor: 'pointer', fontSize: 12 }}>view</summary>
+                <pre style={{ maxWidth: 520, overflow: 'auto', fontSize: 11, margin: '6px 0 0' }}>{r.patch}</pre>
+              </details>
+            ) : null),
+          },
           ...(!can('review.resolve') ? [] : [{
             key: 'resolve',
             header: 'Resolve',
@@ -73,7 +86,7 @@ export default function ReviewQueue() {
               const busy = busyKey === `${r.workflowId}:${r.stepId}`;
               return (
                 <div style={{ display: 'flex', gap: 6 }}>
-                  {RESOLUTIONS.map((res) => (
+                  {resolutionsFor(r).map((res) => (
                     <button
                       key={res}
                       disabled={busy}

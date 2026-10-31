@@ -33,7 +33,7 @@ import { runReviewPipeline } from './review-system.js';
 import { runTests } from './test-runner.js';
 import { storeMemory } from './vector-memory.js';
 import { createJob, updateJob, incrementRetries } from './job-store.js';
-import { updateStep, getRunnableSteps, getWorkflowStatus, isWorkflowTimedOut, cancelWorkflow, flagForReview, completeWorkflow, } from './workflow-store.js';
+import { updateStep, getRunnableSteps, getWorkflowStatus, isWorkflowTimedOut, cancelWorkflow, flagForReview, consumeApprovedPatch, completeWorkflow, } from './workflow-store.js';
 import { resolvePolicy, calcDelay, agentForAttempt } from './retry-policy.js';
 import { needsApproval, notifyApprovalRequired } from './approval-gate.js';
 import { notifyWorkflowStatus } from './notifier.js';
@@ -570,13 +570,17 @@ export function getWorker(tenantId) {
               : `Fix the error in the "Previous error output" section (attempt ${attempt}, agent: ${activeAgent}).`;
 
           await ensureTenantRepo(tenant); // multi-repo: clone/refresh before the agent reads it
-          const result = await runAgent(
-            activeAgent,
-            taskDescription,
-            agentContext,
-            tenant,
-            scanRootFor(tenant)
-          );
+          // A patch a human approved is applied as approved, never regenerated.
+          const approvedPatch = attempt === 1 ? await consumeApprovedPatch(workflowId, step.id) : null;
+          const result = approvedPatch
+            ? `PATCH:${approvedPatch}`
+            : await runAgent(
+                activeAgent,
+                taskDescription,
+                agentContext,
+                tenant,
+                scanRootFor(tenant)
+              );
 
           if (!result.includes('PATCH:')) {
             await recordFailure(job.id);
@@ -610,7 +614,9 @@ export function getWorker(tenantId) {
 
             // The patch is model output derived from untrusted content: pass it fenced
             // (context.patch), not as the trusted Task.
-            const aiReview = await runAgent(
+            // review-guard approved this patch before it was held for a human, so an
+            // approved patch is not put to a second, non-deterministic model verdict.
+            const aiReview = approvedPatch ? 'APPROVED' : await runAgent(
               'review-guard',
               'Review the patch in "Previous patch attempt" and answer APPROVED or REJECTED.',
               { patch, workflowId }, tenant, cwd
@@ -636,10 +642,12 @@ export function getWorker(tenantId) {
             }
 
             // ─── Approval gate ────────────────────────────────────────────────
-            const gate = needsApproval(step);
+            const gate = approvedPatch ? null : needsApproval(step);
             if (gate) {
               await flagForReview(workflowId, step.id, {
                 ...gate,
+                kind       : 'approval',
+                tenantId   : tenant,
                 patch,
                 agent      : activeAgent,
                 description: step.description,
@@ -743,6 +751,7 @@ export function getWorker(tenantId) {
                   await completeWorkflow(workflowId);
                 } else {
                   await flagForReview(workflowId, 'merge', {
+                    tenantId: tenant,
                     reason: 'merge-conflict',
                     description: 'Workflow completed but could not be merged into the tenant base branch due to conflicts with a concurrent workflow. Auto-rebase was attempted and also failed — manual resolution required.',
                     conflicts: mergeResult.conflicts,

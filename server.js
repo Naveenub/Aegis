@@ -36,7 +36,6 @@
  *   GET    /metrics/json                       OTEL-compatible JSON export
  *   GET    /api/metrics                        Structured metrics (dashboard)
  *   GET    /dashboard                          Observability UI (HTML)
- *   GET    /app/*                              React dashboard SPA (usage & billing, tenants, users; built from dashboard/)
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   GET    /                                   Marketing landing page (HTML)
  *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
@@ -70,9 +69,10 @@
  */
 
 import 'dotenv/config';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync }  from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { createHash } from 'crypto';
 import express           from 'express';
 
 // ─── Engine imports ───────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ import { saveTemplate, getTemplate, getTemplateVersions, diffTemplateTasks } fro
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
-import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
+import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, getReviewRecord, checkReviewResolvable, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
@@ -725,16 +725,19 @@ app.get('/traces/:traceId', requireApiKey, async (req, res) => {
 
 /**
  * GET /review-queue
- * Return pending (or filtered) human-review items.
+ * Return the authenticated tenant's pending (or filtered) human-review items.
  *
- * Query: ?status=pending|approved|rejected&limit=<n>
+ * Query: ?status=pending|approved|skip|escalate|retrying&limit=<n>&tenantId=<id>
  */
-app.get('/review-queue', requireApiKey, async (req, res) => {
-  const status = req.query.status ?? 'pending';
-  const limit  = parseInt(req.query.limit ?? '50', 10);
+app.get('/review-queue', (req, res, next) => requireApiKey(req, res, next, req.query.tenantId), async (req, res) => {
+  const status   = req.query.status ?? 'pending';
+  const limit    = parseInt(req.query.limit ?? '50', 10);
+  const tenantId = req.query.tenantId ?? req.resolvedTenantId;
+
+  if (!assertTenantAccess(req, tenantId, res)) return;
 
   try {
-    const items = await getReviewQueue({ status, limit });
+    const items = await getReviewQueue({ status, limit, tenantId });
     res.json({ items });
   } catch (err) {
     console.error('[GET /review-queue]', err);
@@ -746,7 +749,13 @@ app.get('/review-queue', requireApiKey, async (req, res) => {
  * POST /review-queue/resolve
  * Resolve a queued human-review item.
  *
- * Body: { workflowId, stepId, resolution: 'retrying'|'skip'|'escalate', note?: string, tenantId?: string }
+ * Body: { workflowId, stepId, resolution: 'approve'|'retrying'|'skip'|'escalate', note?: string, tenantId?: string }
+ *
+ * The item must belong to the caller's tenant and still be pending.
+ *
+ *   approve   — only for a patch held by the approval gate. Re-queues the step;
+ *               the worker applies the exact held patch (no regeneration). The
+ *               audit event carries the patch's SHA-256.
  *
  *   retrying  — reset the step and re-queue it at CRITICAL priority so the
  *               agent-worker picks it up immediately for a fresh attempt.
@@ -757,8 +766,8 @@ app.get('/review-queue', requireApiKey, async (req, res) => {
  *   escalate  — cancel the workflow entirely and persist the human note so
  *               operators have a permanent record of why it was escalated.
  */
-app.post('/review-queue/resolve', requireApiKey, requirePermission('review.resolve'), async (req, res) => {
-  const { workflowId, stepId, resolution, note, tenantId } = req.body ?? {};
+app.post('/review-queue/resolve', (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId), requirePermission('review.resolve'), async (req, res) => {
+  const { workflowId, stepId, resolution, note } = req.body ?? {};
 
   if (!workflowId || !stepId || !resolution) {
     return res.status(400).json({
@@ -766,19 +775,25 @@ app.post('/review-queue/resolve', requireApiKey, requirePermission('review.resol
     });
   }
 
-  if (!['retrying', 'skip', 'escalate'].includes(resolution)) {
+  if (!['approve', 'retrying', 'skip', 'escalate'].includes(resolution)) {
     return res.status(400).json({
-      error: '`resolution` must be "retrying", "skip", or "escalate".',
+      error: '`resolution` must be "approve", "retrying", "skip", or "escalate".',
     });
   }
 
   try {
+    const effectiveTenant = req.resolvedTenantId;
+
+    // Without this check any member key could re-queue, skip or cancel another
+    // tenant's workflow just by naming it.
+    const record = await getReviewRecord(workflowId, stepId);
+    const problem = checkReviewResolvable(record, effectiveTenant, resolution);
+    if (problem) return res.status(problem.status).json({ error: problem.error });
+
     // 1. Persist the resolution in the review record regardless of action taken.
-    await resolveReview(workflowId, stepId, resolution, note ?? '');
+    await resolveReview(workflowId, stepId, resolution === 'approve' ? 'approved' : resolution, note ?? '');
 
-    const effectiveTenant = tenantId ?? req.resolvedTenantId ?? 'default';
-
-    if (resolution === 'retrying') {
+    if (resolution === 'retrying' || resolution === 'approve') {
       // Reset attempt counter and re-queue into the CRITICAL lane.
       const resetStep = await resetStepForRetry(workflowId, stepId);
       if (!resetStep) {
@@ -800,7 +815,11 @@ app.post('/review-queue/resolve', requireApiKey, requirePermission('review.resol
       action: 'review.resolved',
       resourceType: 'workflowStep',
       resourceId: `${workflowId}/${stepId}`,
-      detail: { resolution, note: note ?? '' },
+      detail: {
+        resolution,
+        note: note ?? '',
+        ...(resolution === 'approve' && { patchSha256: createHash('sha256').update(record.patch).digest('hex') }),
+      },
     }).catch(err => console.error('[audit] review.resolved', err));
 
     res.json({ ok: true, workflowId, stepId, resolution });
@@ -1433,22 +1452,6 @@ app.get('/events', requireApiKey, (req, res) => {
 app.use(authRouter);
 app.use(repoRouter);
 
-// ─── React dashboard (dashboard/dist, built with `npm run build:dashboard`) ───
-// Mounted under /app because the SPA's own routes (/workflows, /tenants, …)
-// collide with API paths. Static assets are public; every data call the SPA
-// makes is authenticated by the API as usual.
-const DASHBOARD_DIST = join(__dirname, 'dashboard', 'dist');
-if (existsSync(join(DASHBOARD_DIST, 'index.html'))) {
-  app.use('/app', express.static(DASHBOARD_DIST, { index: false }));
-  app.get(['/app', '/app/*'], (req, res, next) => {
-    if (/\.[a-z0-9]+$/i.test(req.path)) return next(); // missing asset → 404, not index.html
-    res.set('Cache-Control', 'no-cache');
-    res.sendFile(join(DASHBOARD_DIST, 'index.html'));
-  });
-} else {
-  console.warn('[dashboard] dashboard/dist not found — /app is disabled. Run `npm run build:dashboard`.');
-}
-
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 
 app.use((_req, res) => {
@@ -1487,7 +1490,6 @@ async function start() {
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);
     console.info(`[server] Dashboard → http://localhost:${PORT}/dashboard`);
-    if (existsSync(join(DASHBOARD_DIST, 'index.html'))) console.info(`[server] Usage & billing UI → http://localhost:${PORT}/app/`);
   });
 }
 

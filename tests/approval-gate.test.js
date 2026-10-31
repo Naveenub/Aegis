@@ -107,25 +107,30 @@ describe('needsApproval() — step.requiresApproval = true', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 3. Step-level requiresApproval: false (opt-out)
+// 3. Step-level requiresApproval: false cannot waive the gate
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('needsApproval() — step.requiresApproval = false', () => {
-  it('returns null even when global approval mode is active', async () => {
+  it('is ignored when global approval mode is active', async () => {
     const { needsApproval } = await importWithEnv({
       CLAUDE_AUTONOMY: 'false',
       MODE: 'approval',
     });
-    expect(needsApproval(step({ requiresApproval: false }))).toBeNull();
+    expect(needsApproval(step({ requiresApproval: false }))).not.toBeNull();
   });
 
-  it('step opt-out beats MODE=approval', async () => {
+  it('cannot waive MODE=approval', async () => {
     const { needsApproval } = await importWithEnv({ MODE: 'approval' });
-    expect(needsApproval(step({ requiresApproval: false }))).toBeNull();
+    expect(needsApproval(step({ requiresApproval: false }))).not.toBeNull();
   });
 
-  it('step opt-out beats CLAUDE_AUTONOMY=false', async () => {
+  it('cannot waive CLAUDE_AUTONOMY=false', async () => {
     const { needsApproval } = await importWithEnv({ CLAUDE_AUTONOMY: 'false' });
+    expect(needsApproval(step({ requiresApproval: false }))).not.toBeNull();
+  });
+
+  it('changes nothing in autonomous mode', async () => {
+    const { needsApproval } = await importWithEnv({ CLAUDE_AUTONOMY: 'true', MODE: 'autonomous' });
     expect(needsApproval(step({ requiresApproval: false }))).toBeNull();
   });
 });
@@ -209,12 +214,12 @@ describe('needsApproval() — combined env vars', () => {
     expect(needsApproval(step({ requiresApproval: true }))).not.toBeNull();
   });
 
-  it('step requiresApproval=false overrides approval global — no approval needed', async () => {
+  it('step requiresApproval=false does not override approval global — approval still fires', async () => {
     const { needsApproval } = await importWithEnv({
       CLAUDE_AUTONOMY: 'false',
       MODE: 'approval',
     });
-    expect(needsApproval(step({ requiresApproval: false }))).toBeNull();
+    expect(needsApproval(step({ requiresApproval: false }))).not.toBeNull();
   });
 });
 
