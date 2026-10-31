@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import crypto from 'crypto';
 import express from 'express';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 
 process.env.AEGIS_SLACK_SIGNING_SECRET = 'slack-secret';
 process.env.AEGIS_OAUTH_STATE_SECRET = 'x'.repeat(40);
@@ -219,5 +221,45 @@ describe('Marketplace purchases', () => {
     installLookup(404);
     expect((await (await send(ev('purchased', 'Team', 'nobody'))).json()).reason).toBe('no linked tenant');
     expect(reg.setTier).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /tenants/:id/triggers reports the GitHub permission state', () => {
+  const get = async () => (await realFetch(`${base}/tenants/acme/triggers`)).json();
+  const perm = (permissions) => { outboundHandler = () => ({ ok: true, status: 200, json: async () => ({ permissions, html_url: 'https://github.com/organizations/acme/settings/installations/7' }) }); };
+
+  it('missing → label trigger inactive, comments off, approve URL given', async () => {
+    perm({ contents: 'write' });
+    const j = await get();
+    expect(j.githubIssues).toMatchObject({ issues: 'missing', labelTrigger: expect.stringContaining('inactive'), settingsUrl: expect.stringContaining('/installations/7') });
+    expect(j.githubIssues.statusComments).toContain('PR still links');
+  });
+  it('read → trigger active, comments off', async () => {
+    perm({ issues: 'read' });
+    expect((await get()).githubIssues).toMatchObject({ issues: 'read', labelTrigger: 'active' });
+  });
+  it('write → both active', async () => {
+    perm({ issues: 'write' });
+    expect((await get()).githubIssues).toMatchObject({ issues: 'write', statusComments: 'active' });
+  });
+});
+
+describe('scripts/smoke-triggers.js', () => {
+  it('passes against a correctly configured instance', async () => {
+    S.jsec.set('acme', 'tok');
+    const run = promisify(execFile);
+    const { stdout } = await run('node', ['scripts/smoke-triggers.js'], {
+      env: { ...process.env, BASE_URL: base, TENANT: 'acme', JIRA_TOKEN: 'tok', AEGIS_API_KEY: 'k',
+        AEGIS_SLACK_SIGNING_SECRET: 'slack-secret', AEGIS_GITHUB_MARKETPLACE_WEBHOOK_SECRET: 'mkt-secret' },
+    });
+    expect(stdout).not.toContain('FAIL');
+    expect(stdout.match(/PASS/g).length).toBe(7);
+  });
+  it('exits non-zero when a secret is wrong', async () => {
+    S.jsec.set('acme', 'tok');
+    const run = promisify(execFile);
+    await expect(run('node', ['scripts/smoke-triggers.js'], {
+      env: { ...process.env, BASE_URL: base, AEGIS_SLACK_SIGNING_SECRET: 'not-the-secret' },
+    })).rejects.toMatchObject({ code: 1 });
   });
 });

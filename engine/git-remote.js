@@ -56,6 +56,7 @@
 import { spawnSync } from 'child_process';
 import path from 'path';
 import { multiRepoMode, getRepoAccess, pushFromTenantRepo } from './tenant-repo.js';
+import { loadOrigin } from './trigger-store.js';
 
 const REPO_ROOT = path.resolve(process.env.AEGIS_REPO_ROOT ?? process.cwd());
 
@@ -322,9 +323,18 @@ async function _pushAndOpenPRForTenant(workflowId, tenantId, mergeResult) {
     ? '\n\n> ℹ️ Conflicts were resolved automatically via `git rebase`.'
     : '';
 
+  // Link the triggering issue/ticket from the PR itself. Works without the
+  // App's Issues permission (PR bodies need only Pull requests: write).
+  let linkNote = '';
+  try {
+    const o = await loadOrigin(workflowId);
+    if (o?.type === 'github' && `${o.owner}/${o.repo}` === fullName) linkNote = `\n\nCloses #${Number(o.number)}`;
+    else if (o?.type === 'jira' && /^[A-Z][A-Z0-9_]+-\d+$/.test(o.key)) linkNote = `\n\nJira: ${o.key}`;
+  } catch { /* link is cosmetic */ }
+
   const params = {
     title: `Aegis: workflow ${workflowId}`,
-    body:  `Automated changes produced by Aegis workflow \`${workflowId}\`.${resolvedNote}`,
+    body:  `Automated changes produced by Aegis workflow \`${workflowId}\`.${resolvedNote}${linkNote}`,
     head:  branchToPush,
     base:  repoCfg.targetBranch || repoCfg.defaultBranch,
     repo:  fullName,

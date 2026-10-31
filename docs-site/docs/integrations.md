@@ -11,7 +11,8 @@ Besides REST, the CLI and SCM push webhooks, Aegis starts workflows from a GitHu
 2. Set the `AEGIS_GITHUB_APP_*` variables; connect a repo via `POST /tenants/:id/repo/connect`.
 3. Add the `aegis` label to an issue in the connected repo. Aegis comments on the issue when it starts and when it finishes (with the PR link).
 
-Existing installs must accept the new **Issues: write** permission (a GitHub-side approval Aegis cannot grant). Until then the run still happens, the comment is skipped, and `GET /tenants/:id/triggers` shows `lastOriginProblem` so it is visible rather than silent.
+**Existing installs.** GitHub only gives an installed App a new permission when the owner approves it, and the `issues` event is not delivered at all without Issues access. `GET /tenants/:id/triggers` shows `githubIssues` (`write` / `read` / `missing`), whether the label trigger and status comments are active, and the `settingsUrl` where the owner approves the request. Without Issues: write the label trigger still runs but status comments are skipped; the PR body carries `Closes #N`, so the issue links to the PR either way.
+
 Change the label: `PUT /tenants/:id/triggers {"githubLabel":"ai-fix"}`.
 
 ## Slack
@@ -41,6 +42,10 @@ Change the label: `PUT /tenants/:id/triggers {"githubLabel":"ai-fix"}`.
 | `AEGIS_JIRA_ALLOWED_HOSTS` | Extra Jira hosts allowed for write-back (self-hosted) |
 | `AEGIS_GITHUB_MARKETPLACE_WEBHOOK_SECRET` | Verifies Marketplace purchase webhooks (fails closed when unset) |
 | `AEGIS_GITHUB_MARKETPLACE_PLANS` | JSON map of Marketplace plan name → Aegis tier |
+
+## Verify a deployment
+
+`node scripts/smoke-triggers.js` checks a live instance without starting workflows: Slack and Marketplace signature rejection and acceptance, Jira token rejection and a no-op event, and the per-tenant config (GitHub permission state, Slack bot token, Jira write-back). Set `BASE_URL`, plus whichever of `AEGIS_SLACK_SIGNING_SECRET`, `AEGIS_GITHUB_MARKETPLACE_WEBHOOK_SECRET`, `TENANT`, `JIRA_TOKEN`, `AEGIS_API_KEY` apply; sections without inputs are skipped. Add `--fire-jira` to send a real trigger event (this starts a workflow). Exit code 1 on any failure.
 
 ## Marketplace
 

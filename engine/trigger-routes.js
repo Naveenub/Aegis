@@ -29,9 +29,9 @@ import {
   unlinkSlack, rotateJiraSecret, getJiraSecret, deleteJiraSecret, claimOnce,
   bindSlackTeam, saveSlackBotToken, saveJiraCreds, deleteJiraCreds,
 } from './trigger-store.js';
-import { assertJiraBaseUrl } from './trigger-origin.js';
+import { assertJiraBaseUrl, installationIssuesPermission } from './trigger-origin.js';
 import { signOAuthState, verifyOAuthState, oauthStateConfigured } from './oauth-state.js';
-import { consumeStateNonce } from './repo-store.js';
+import { consumeStateNonce, getRepoConfig } from './repo-store.js';
 import { tokenVaultConfigured } from './token-vault.js';
 import {
   verifySlackSignature, verifyJiraRequest, parseSlackCommand, parseJiraEvent,
@@ -135,8 +135,20 @@ const audit = (req, tenantId, action, detail = {}) =>
 
 triggerRouter.get('/tenants/:id/triggers', ...guard, async (req, res) => {
   if (!assertTenantAccess(req, req.params.id, res)) return;
-  try { res.json(await getTriggerConfig(req.params.id)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const cfg = await getTriggerConfig(req.params.id);
+    const repo = await getRepoConfig(req.params.id);
+    // Existing App installs only gain a permission when the owner approves it; show where it stands.
+    const github = repo?.installationId ? await installationIssuesPermission(repo.installationId) : null;
+    res.json({
+      ...cfg,
+      githubIssues: github && {
+        ...github,
+        labelTrigger: github.issues === 'write' || github.issues === 'read' ? 'active' : github.issues === 'missing' ? 'inactive — approve the Issues permission' : 'unknown',
+        statusComments: github.issues === 'write' ? 'active' : github.issues === 'unknown' ? 'unknown' : 'off — PR still links the issue',
+      },
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 triggerRouter.put('/tenants/:id/triggers', express.json(), ...guard, async (req, res) => {

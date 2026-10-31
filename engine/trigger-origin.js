@@ -51,6 +51,23 @@ export async function commentOnIssue({ installationId, owner, repo, number }, bo
   if (!res.ok) { const e = new Error(`comment HTTP ${res.status}`); e.status = res.status; throw e; }
 }
 
+/**
+ * What the installation has actually been granted for Issues.
+ * `issues` events (the label trigger) need at least read; status comments need write.
+ * @returns {Promise<{ issues: 'write'|'read'|'missing'|'unknown', settingsUrl?: string }>}
+ */
+export async function installationIssuesPermission(installationId) {
+  try {
+    const res = await fetch(`${apiBase()}/app/installations/${installationId}`, {
+      headers: { Authorization: `Bearer ${appJwt()}`, Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) return { issues: 'unknown' };
+    const d = await res.json();
+    const lvl = d.permissions?.issues;
+    return { issues: lvl === 'write' ? 'write' : lvl === 'read' ? 'read' : 'missing', settingsUrl: d.html_url };
+  } catch { return { issues: 'unknown' }; }
+}
+
 // ─── Slack ───────────────────────────────────────────────────────────────────
 
 export async function postSlackResponse(responseUrl, text, inChannel = false) {
