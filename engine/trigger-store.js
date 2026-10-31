@@ -13,6 +13,7 @@
 import IORedis from 'ioredis';
 import { randomBytes } from 'crypto';
 import { assertTenantId } from './tenant.js';
+import { seal, open } from './token-vault.js';
 
 const redis = new IORedis(process.env.REDIS_URL || undefined, {
   lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 1,
@@ -26,6 +27,9 @@ const LINK  = (c) => `aegis:trigger:slack-link:${c}`;
 const JSEC  = (t) => `aegis:trigger:jira-secret:${t}`;
 const DEDUP = (k) => `aegis:trigger:dedup:${k}`;
 const ORIG  = (w) => `aegis:trigger:origin:${w}`;
+const JCRED = (t) => `aegis:trigger:jira-cred:${t}`;   // sealed { baseUrl, email, apiToken }
+const SBOT  = (t) => `aegis:trigger:slack-bot:${t}`;   // sealed bot token
+const aad   = (t, k) => `${t}:trigger:${k}`;
 
 const csv = (s) => String(s ?? '').split(',').map(x => x.trim()).filter(Boolean);
 
@@ -39,6 +43,9 @@ export async function getTriggerConfig(tenantId) {
     slackAllowedUsers: csv(h.slackAllowedUsers),
     slackTeamId: h.slackTeamId || null,
     jiraConfigured: Boolean(await redis.get(JSEC(tenantId))),
+    jiraWriteBack: Boolean(await redis.get(JCRED(tenantId))),
+    slackBot: Boolean(await redis.get(SBOT(tenantId))),
+    lastOriginProblem: h.lastOriginProblem ? JSON.parse(h.lastOriginProblem) : null,
   };
 }
 
@@ -75,12 +82,10 @@ export async function createSlackLinkCode(tenantId) {
   return code;
 }
 
-/** Consume a code; bind teamId → tenant. Throws code=TEAM_TAKEN if another tenant owns the team. */
-export async function consumeSlackLinkCode(code, teamId) {
-  if (!/^[A-F0-9]{10}$/.test(String(code))) return null;
-  const tenantId = await redis.getdel(LINK(code));
-  if (!tenantId) return null;
-  if (!/^[A-Z0-9]{2,20}$/.test(String(teamId))) return null;
+/** Bind a (verified) Slack team to a tenant. Throws code=TEAM_TAKEN if another tenant owns it. */
+export async function bindSlackTeam(tenantId, teamId) {
+  assertTenantId(tenantId);
+  if (!/^[A-Z0-9]{2,20}$/.test(String(teamId))) throw new Error('Invalid Slack team id.');
   const claimed = await redis.set(TEAM(teamId), tenantId, 'NX');
   if (!claimed && (await redis.get(TEAM(teamId))) !== tenantId) {
     const e = new Error('This Slack workspace is already linked to another tenant.');
@@ -90,6 +95,14 @@ export async function consumeSlackLinkCode(code, teamId) {
   const prev = await redis.hget(CFG(tenantId), 'slackTeamId');
   if (prev && prev !== teamId) await redis.del(TEAM(prev));
   await redis.hset(CFG(tenantId), { slackTeamId: teamId });
+}
+
+/** Consume a code; bind teamId → tenant. Returns tenantId, or null for an invalid/expired code. */
+export async function consumeSlackLinkCode(code, teamId) {
+  if (!/^[A-F0-9]{10}$/.test(String(code))) return null;
+  const tenantId = await redis.getdel(LINK(code));
+  if (!tenantId) return null;
+  await bindSlackTeam(tenantId, teamId);
   return tenantId;
 }
 
@@ -102,6 +115,7 @@ export async function unlinkSlack(tenantId) {
   const team = await redis.hget(CFG(tenantId), 'slackTeamId');
   if (team) await redis.del(TEAM(team));
   await redis.hdel(CFG(tenantId), 'slackTeamId');
+  await redis.del(SBOT(tenantId));
 }
 
 // ── Jira secret ──
@@ -135,4 +149,44 @@ export async function saveOrigin(workflowId, origin) {
 export async function loadOrigin(workflowId) {
   const raw = await redis.get(ORIG(workflowId));
   try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+}
+
+// ── Sealed per-tenant credentials (write-back) ──
+
+export async function saveSlackBotToken(tenantId, token) {
+  assertTenantId(tenantId);
+  await redis.set(SBOT(tenantId), seal(token, aad(tenantId, 'slack-bot')));
+}
+export async function loadSlackBotToken(tenantId) {
+  assertTenantId(tenantId);
+  const v = await redis.get(SBOT(tenantId));
+  return v ? open(v, aad(tenantId, 'slack-bot')) : null;
+}
+
+export async function saveJiraCreds(tenantId, creds) {
+  assertTenantId(tenantId);
+  await redis.set(JCRED(tenantId), seal(JSON.stringify(creds), aad(tenantId, 'jira-cred')));
+}
+export async function loadJiraCreds(tenantId) {
+  assertTenantId(tenantId);
+  const v = await redis.get(JCRED(tenantId));
+  return v ? JSON.parse(open(v, aad(tenantId, 'jira-cred'))) : null;
+}
+export async function deleteJiraCreds(tenantId) {
+  assertTenantId(tenantId);
+  await redis.del(JCRED(tenantId));
+}
+
+/** Surfaced in GET /tenants/:id/triggers so a missing permission is visible, not silent. */
+export async function noteOriginProblem(tenantId, kind, detail = '') {
+  try {
+    assertTenantId(tenantId);
+    await redis.hset(CFG(tenantId), { lastOriginProblem: JSON.stringify({ kind, detail: String(detail).slice(0, 200), at: Date.now() }) });
+  } catch { /* best effort */ }
+}
+export async function clearOriginProblem(tenantId, kind) {
+  try {
+    const raw = await redis.hget(CFG(tenantId), 'lastOriginProblem');
+    if (raw && JSON.parse(raw).kind === kind) await redis.hdel(CFG(tenantId), 'lastOriginProblem');
+  } catch { /* best effort */ }
 }

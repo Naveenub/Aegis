@@ -9,6 +9,10 @@
  *   DELETE /tenants/:id/triggers/slack               unlink workspace
  *   POST   /tenants/:id/triggers/jira/secret         → { secret, url } (shown once; rotates)
  *   DELETE /tenants/:id/triggers/jira                remove secret (disables Jira trigger)
+ *   PUT    /tenants/:id/triggers/jira/credentials    { baseUrl, email, apiToken } → enables Jira comments
+ *   DELETE /tenants/:id/triggers/jira/credentials
+ *   GET    /tenants/:id/triggers/slack/install       → { url } (OAuth install; enables replies after 30 min)
+ *   GET    /slack/oauth/callback                     Slack redirect (signed single-use state)
  *
  * GitHub issue-label events arrive on /webhooks/github-app (repo-routes.js).
  *
@@ -23,7 +27,12 @@ import { recordAuditEvent } from './audit-log.js';
 import {
   getTriggerConfig, setTriggerConfig, createSlackLinkCode, consumeSlackLinkCode, tenantForSlackTeam,
   unlinkSlack, rotateJiraSecret, getJiraSecret, deleteJiraSecret, claimOnce,
+  bindSlackTeam, saveSlackBotToken, saveJiraCreds, deleteJiraCreds,
 } from './trigger-store.js';
+import { assertJiraBaseUrl } from './trigger-origin.js';
+import { signOAuthState, verifyOAuthState, oauthStateConfigured } from './oauth-state.js';
+import { consumeStateNonce } from './repo-store.js';
+import { tokenVaultConfigured } from './token-vault.js';
 import {
   verifySlackSignature, verifyJiraRequest, parseSlackCommand, parseJiraEvent,
   buildSlackTask, buildJiraTask, launchTrigger,
@@ -76,7 +85,7 @@ triggerWebhookRouter.post('/slack/command', raw, async (req, res) => {
     try { task = buildSlackTask(cmd.text); }
     catch { return res.json(ephemeral('Blocked: the text looks like a prompt-injection attempt. Rephrase the request.')); }
 
-    const origin = { type: 'slack', responseUrl: cmd.responseUrl, expiresAt: Date.now() + 25 * 60_000 };
+    const origin = { type: 'slack', tenantId, channelId: cmd.channelId, responseUrl: cmd.responseUrl, expiresAt: Date.now() + 25 * 60_000 };
     const r = await launchTrigger({ tenantId, source: 'slack', task, origin, ref: `${cmd.teamId}/${cmd.userId}` });
     return res.json(ephemeral(r.accepted ? '🛡️ Request received — planning now. I\'ll reply here with the workflow ID.' : `❌ ${r.reason}`));
   } catch (err) {
@@ -108,7 +117,7 @@ triggerWebhookRouter.post('/jira/:tenantId', raw, async (req, res) => {
     try { task = buildJiraTask(jira); }
     catch { return res.status(200).json({ accepted: false, reason: 'blocked' }); }
 
-    const r = await launchTrigger({ tenantId, source: 'jira', task, ref: jira.key });
+    const r = await launchTrigger({ tenantId, source: 'jira', task, origin: { type: 'jira', tenantId, key: jira.key }, ref: jira.key });
     return res.status(r.accepted ? 202 : 402).json(r);
   } catch (err) {
     console.error('[webhook/jira]', err);
@@ -165,4 +174,86 @@ triggerRouter.delete('/tenants/:id/triggers/jira', ...guard, async (req, res) =>
   if (!assertTenantAccess(req, req.params.id, res)) return;
   try { await deleteJiraSecret(req.params.id); audit(req, req.params.id, 'trigger.jira.disabled'); res.json({ status: 'disabled' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Jira write-back credentials ─────────────────────────────────────────────
+
+triggerRouter.put('/tenants/:id/triggers/jira/credentials', express.json(), ...guard, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  if (!tokenVaultConfigured()) return res.status(501).json({ error: 'Token vault is not configured (see AEGIS_TOKEN_VAULT_KEY).' });
+  const { baseUrl, email, apiToken } = req.body ?? {};
+  try {
+    if (typeof email !== 'string' || !email.includes('@') || typeof apiToken !== 'string' || apiToken.length < 8) {
+      throw new Error('`email` and `apiToken` are required.');
+    }
+    await saveJiraCreds(req.params.id, { baseUrl: assertJiraBaseUrl(baseUrl), email, apiToken });
+    audit(req, req.params.id, 'trigger.jira.credentials_set');
+    res.json({ status: 'saved' });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+triggerRouter.delete('/tenants/:id/triggers/jira/credentials', ...guard, async (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  try { await deleteJiraCreds(req.params.id); audit(req, req.params.id, 'trigger.jira.credentials_removed'); res.json({ status: 'removed' }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Slack OAuth install (verified team binding + bot token) ─────────────────
+
+const slackOAuthReady = () =>
+  (process.env.AEGIS_SLACK_CLIENT_ID ?? '').trim() && (process.env.AEGIS_SLACK_CLIENT_SECRET ?? '').trim() &&
+  (process.env.AEGIS_PUBLIC_URL ?? '').trim() && oauthStateConfigured() && tokenVaultConfigured();
+
+const slackRedirectUri = () => `${process.env.AEGIS_PUBLIC_URL.trim().replace(/\/$/, '')}/slack/oauth/callback`;
+
+triggerRouter.get('/tenants/:id/triggers/slack/install', ...guard, (req, res) => {
+  if (!assertTenantAccess(req, req.params.id, res)) return;
+  if (!slackOAuthReady()) {
+    return res.status(501).json({ error: 'Set AEGIS_SLACK_CLIENT_ID, AEGIS_SLACK_CLIENT_SECRET, AEGIS_PUBLIC_URL, AEGIS_OAUTH_STATE_SECRET and the token-vault key.' });
+  }
+  const q = new URLSearchParams({
+    client_id: process.env.AEGIS_SLACK_CLIENT_ID.trim(),
+    scope: 'commands,chat:write,chat:write.public',
+    redirect_uri: slackRedirectUri(),
+    state: signOAuthState(req.params.id, 'slack'),
+  });
+  res.json({ url: `https://slack.com/oauth/v2/authorize?${q}` });
+});
+
+triggerRouter.get('/slack/oauth/callback', async (req, res) => {
+  if (!slackOAuthReady()) return res.status(501).json({ error: 'Slack OAuth is not configured.' });
+  const { code, state, error } = req.query;
+  try {
+    const { tenantId, nonce } = verifyOAuthState(state, 'slack');
+    if (!(await consumeStateNonce(nonce))) return res.status(400).json({ error: 'State already used.' });
+    if (error) return res.status(400).json({ error: 'Authorization was not granted.' });
+    if (typeof code !== 'string' || !code) return res.status(400).json({ error: 'Missing authorization code.' });
+
+    const r = await fetch('https://slack.com/api/oauth.v2.access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.AEGIS_SLACK_CLIENT_ID.trim(),
+        client_secret: process.env.AEGIS_SLACK_CLIENT_SECRET.trim(),
+        code, redirect_uri: slackRedirectUri(),
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!d.ok || !d.access_token || !d.team?.id) return res.status(400).json({ error: 'Slack rejected the authorization code.' });
+
+    await bindSlackTeam(tenantId, d.team.id);          // team id comes from Slack, not the caller
+    await saveSlackBotToken(tenantId, d.access_token);
+    recordAuditEvent(tenantId, {
+      actorId: `slack-oauth:${d.team.id}`, actorType: 'trigger', action: 'trigger.slack.installed',
+      resourceType: 'tenant', resourceId: tenantId, detail: { teamId: d.team.id },
+    }).catch(() => {});
+
+    const dest = process.env.AEGIS_POST_CONNECT_URL;
+    if (dest) return res.redirect(`${dest}${dest.includes('?') ? '&' : '?'}slack=connected`);
+    res.json({ tenantId, status: 'connected' });
+  } catch (err) {
+    const http = /state/i.test(err.message) || err.code === 'TEAM_TAKEN' ? 400 : 500;
+    console.error('[slack/callback]', err.message);
+    res.status(http).json({ error: err.message });
+  }
 });

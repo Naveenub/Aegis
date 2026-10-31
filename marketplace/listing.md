@@ -20,7 +20,8 @@ Aegis plans the fix with a multi-agent workflow, writes the change in an isolate
 2. Valid publisher contact info; logo, feature card, screenshots; description free of errors.
 3. App webhook URL live: `https://YOUR_HOST/webhooks/github-app`.
 4. Accept the GitHub Marketplace Developer Agreement.
-5. Paid plans only: verified publisher + ≥100 installations + handle `marketplace_purchase` events (not implemented yet).
+5. Paid plans only: verified publisher + ≥100 installations (GitHub-side, not code). `marketplace_purchase` events are handled at `/webhooks/github-marketplace`.
+6. Listing webhook URL: `https://YOUR_HOST/webhooks/github-marketplace`, secret = `AEGIS_GITHUB_MARKETPLACE_WEBHOOK_SECRET`.
 
 **URLs to fill in**
 - Support / privacy / terms: publish `landing/privacy.html`, `landing/terms.html`, `landing/security.html` at public URLs

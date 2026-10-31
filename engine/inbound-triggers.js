@@ -67,11 +67,11 @@ export function parseIssueLabeled(payload, wantedLabel) {
   };
 }
 
-/** Slack slash command form body → { teamId, userId, text, responseUrl, triggerId } */
+/** Slack slash command form body → { teamId, userId, channelId, text, responseUrl, triggerId } */
 export function parseSlackCommand(rawBody) {
   const p = new URLSearchParams(rawBody.toString('utf-8'));
   return {
-    teamId: p.get('team_id') ?? '', userId: p.get('user_id') ?? '',
+    teamId: p.get('team_id') ?? '', userId: p.get('user_id') ?? '', channelId: p.get('channel_id') ?? '',
     text: (p.get('text') ?? '').trim(), responseUrl: p.get('response_url') ?? '',
     triggerId: p.get('trigger_id') ?? '',
   };
@@ -177,7 +177,7 @@ export async function launchTrigger({ tenantId, source, task, origin, ref }) {
         actorId: `trigger:${source}`, actorType: 'trigger', action: 'workflow.submitted',
         resourceType: 'workflow', resourceId: workflowId, detail: { source, ref },
       }).catch(() => {});
-      if (origin) await sendToOrigin(origin, `🛡️ Aegis started workflow \`${workflowId}\`. I'll report here when it finishes.`);
+      if (origin) await sendToOrigin(origin, `🛡️ Aegis started workflow ${workflowId}. I'll report here when it finishes.`);
     } catch (err) {
       console.error(`[trigger/${source}] ${ref}:`, err.message);
       if (origin) await sendToOrigin(origin, `❌ ${friendly(err)}`);
@@ -202,7 +202,7 @@ export async function handleIssueLabeled(tenantId, payload, deliveryId, labelWan
   if (deliveryId && !(await claimOnce(`gh:${deliveryId}`, 86400))) return { accepted: false, reason: 'duplicate delivery' };
   if (!(await claimOnce(`gh-issue:${issue.owner}/${issue.repo}#${issue.number}`, 900))) return { accepted: false, reason: 'already running for this issue' };
 
-  const origin = { type: 'github', installationId: repoCfg.installationId, owner: issue.owner, repo: issue.repo, number: issue.number };
+  const origin = { type: 'github', tenantId, installationId: repoCfg.installationId, owner: issue.owner, repo: issue.repo, number: issue.number };
   let task;
   try { task = buildIssueTask(issue); }
   catch (err) { await sendToOrigin(origin, `❌ ${friendly(err)}`); return { accepted: false, reason: 'blocked' }; }

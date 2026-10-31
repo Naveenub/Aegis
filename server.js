@@ -104,6 +104,7 @@ import { renderSubprocessorsPage, publicSubprocessors } from './engine/complianc
 import { webhookRouter }                     from './engine/webhook-receiver.js';
 import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
 import { triggerRouter, triggerWebhookRouter } from './engine/trigger-routes.js';
+import { marketplaceRouter } from './engine/marketplace.js';
 import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
@@ -1421,6 +1422,7 @@ app.get('/events', requireApiKey, (req, res) => {
     app.use('/webhooks', stripeWebhookRouter);
     app.use('/webhooks', githubAppWebhookRouter); // raw body — must precede webhookRouter
     app.use('/webhooks', triggerWebhookRouter);   // Slack + Jira inbound triggers (raw body)
+    app.use('/webhooks', marketplaceRouter);      // GitHub Marketplace purchases (raw body)
 
 // ─── Inbound webhooks (GitHub / GitLab → trigger workflows) ──────────────────
     //
