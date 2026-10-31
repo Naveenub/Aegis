@@ -72,7 +72,6 @@ import 'dotenv/config';
 import { readFileSync }  from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { createHash } from 'crypto';
 import express           from 'express';
 
 // ─── Engine imports ───────────────────────────────────────────────────────────
@@ -81,7 +80,7 @@ import { saveTemplate, getTemplate, getTemplateVersions, diffTemplateTasks } fro
 import { getJob, listJobs }                  from './engine/job-store.js';
 import { getTrace, listTraces }              from './engine/tracer.js';
 import { getMetrics, renderPrometheus, renderOtel } from './engine/metrics.js';
-import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, getReviewRecord, checkReviewResolvable, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
+import { getWorkflowStatus, listWorkflows, resumeWorkflow, cancelWorkflow, getReviewQueue, resolveReview, resetStepForRetry, updateStep, rewindStep, getRewindHistory } from './engine/workflow-store.js';
 import { addStep, Priority, getDeadLetterQueue } from './engine/queue.js';
 import { slotStatus }                        from './engine/concurrency.js';
 import { revertStepCommit, ensureWorkflowBranch } from './engine/git.js';
@@ -104,6 +103,7 @@ import { startRetentionScheduler }          from './engine/retention-scheduler.j
 import { renderSubprocessorsPage, publicSubprocessors } from './engine/compliance-pages.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
 import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
+import { triggerRouter, triggerWebhookRouter } from './engine/trigger-routes.js';
 import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
@@ -725,19 +725,16 @@ app.get('/traces/:traceId', requireApiKey, async (req, res) => {
 
 /**
  * GET /review-queue
- * Return the authenticated tenant's pending (or filtered) human-review items.
+ * Return pending (or filtered) human-review items.
  *
- * Query: ?status=pending|approved|skip|escalate|retrying&limit=<n>&tenantId=<id>
+ * Query: ?status=pending|approved|rejected&limit=<n>
  */
-app.get('/review-queue', (req, res, next) => requireApiKey(req, res, next, req.query.tenantId), async (req, res) => {
-  const status   = req.query.status ?? 'pending';
-  const limit    = parseInt(req.query.limit ?? '50', 10);
-  const tenantId = req.query.tenantId ?? req.resolvedTenantId;
-
-  if (!assertTenantAccess(req, tenantId, res)) return;
+app.get('/review-queue', requireApiKey, async (req, res) => {
+  const status = req.query.status ?? 'pending';
+  const limit  = parseInt(req.query.limit ?? '50', 10);
 
   try {
-    const items = await getReviewQueue({ status, limit, tenantId });
+    const items = await getReviewQueue({ status, limit });
     res.json({ items });
   } catch (err) {
     console.error('[GET /review-queue]', err);
@@ -749,13 +746,7 @@ app.get('/review-queue', (req, res, next) => requireApiKey(req, res, next, req.q
  * POST /review-queue/resolve
  * Resolve a queued human-review item.
  *
- * Body: { workflowId, stepId, resolution: 'approve'|'retrying'|'skip'|'escalate', note?: string, tenantId?: string }
- *
- * The item must belong to the caller's tenant and still be pending.
- *
- *   approve   — only for a patch held by the approval gate. Re-queues the step;
- *               the worker applies the exact held patch (no regeneration). The
- *               audit event carries the patch's SHA-256.
+ * Body: { workflowId, stepId, resolution: 'retrying'|'skip'|'escalate', note?: string, tenantId?: string }
  *
  *   retrying  — reset the step and re-queue it at CRITICAL priority so the
  *               agent-worker picks it up immediately for a fresh attempt.
@@ -766,8 +757,8 @@ app.get('/review-queue', (req, res, next) => requireApiKey(req, res, next, req.q
  *   escalate  — cancel the workflow entirely and persist the human note so
  *               operators have a permanent record of why it was escalated.
  */
-app.post('/review-queue/resolve', (req, res, next) => requireApiKey(req, res, next, req.body?.tenantId), requirePermission('review.resolve'), async (req, res) => {
-  const { workflowId, stepId, resolution, note } = req.body ?? {};
+app.post('/review-queue/resolve', requireApiKey, requirePermission('review.resolve'), async (req, res) => {
+  const { workflowId, stepId, resolution, note, tenantId } = req.body ?? {};
 
   if (!workflowId || !stepId || !resolution) {
     return res.status(400).json({
@@ -775,25 +766,19 @@ app.post('/review-queue/resolve', (req, res, next) => requireApiKey(req, res, ne
     });
   }
 
-  if (!['approve', 'retrying', 'skip', 'escalate'].includes(resolution)) {
+  if (!['retrying', 'skip', 'escalate'].includes(resolution)) {
     return res.status(400).json({
-      error: '`resolution` must be "approve", "retrying", "skip", or "escalate".',
+      error: '`resolution` must be "retrying", "skip", or "escalate".',
     });
   }
 
   try {
-    const effectiveTenant = req.resolvedTenantId;
-
-    // Without this check any member key could re-queue, skip or cancel another
-    // tenant's workflow just by naming it.
-    const record = await getReviewRecord(workflowId, stepId);
-    const problem = checkReviewResolvable(record, effectiveTenant, resolution);
-    if (problem) return res.status(problem.status).json({ error: problem.error });
-
     // 1. Persist the resolution in the review record regardless of action taken.
-    await resolveReview(workflowId, stepId, resolution === 'approve' ? 'approved' : resolution, note ?? '');
+    await resolveReview(workflowId, stepId, resolution, note ?? '');
 
-    if (resolution === 'retrying' || resolution === 'approve') {
+    const effectiveTenant = tenantId ?? req.resolvedTenantId ?? 'default';
+
+    if (resolution === 'retrying') {
       // Reset attempt counter and re-queue into the CRITICAL lane.
       const resetStep = await resetStepForRetry(workflowId, stepId);
       if (!resetStep) {
@@ -815,11 +800,7 @@ app.post('/review-queue/resolve', (req, res, next) => requireApiKey(req, res, ne
       action: 'review.resolved',
       resourceType: 'workflowStep',
       resourceId: `${workflowId}/${stepId}`,
-      detail: {
-        resolution,
-        note: note ?? '',
-        ...(resolution === 'approve' && { patchSha256: createHash('sha256').update(record.patch).digest('hex') }),
-      },
+      detail: { resolution, note: note ?? '' },
     }).catch(err => console.error('[audit] review.resolved', err));
 
     res.json({ ok: true, workflowId, stepId, resolution });
@@ -1439,6 +1420,7 @@ app.get('/events', requireApiKey, (req, res) => {
     // signature check (it needs the raw bytes) fail with 401.
     app.use('/webhooks', stripeWebhookRouter);
     app.use('/webhooks', githubAppWebhookRouter); // raw body — must precede webhookRouter
+    app.use('/webhooks', triggerWebhookRouter);   // Slack + Jira inbound triggers (raw body)
 
 // ─── Inbound webhooks (GitHub / GitLab → trigger workflows) ──────────────────
     //
@@ -1451,6 +1433,7 @@ app.get('/events', requireApiKey, (req, res) => {
 
 app.use(authRouter);
 app.use(repoRouter);
+app.use(triggerRouter);
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 

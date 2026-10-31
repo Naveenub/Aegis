@@ -13,7 +13,7 @@
  *                                         → 200 { status, provider, note? }. For GitHub the App
  *                                         stays installed on the customer's account — only the
  *                                         customer can uninstall it (GitHub → Settings → Applications).
- *   POST   /webhooks/github-app           installation lifecycle (githubAppWebhookRouter)
+ *   POST   /webhooks/github-app           installation lifecycle + issues.labeled trigger (githubAppWebhookRouter)
  *
  * GitLab / Bitbucket have no installation-revocation webhook: a revoked grant
  * is detected on the next token refresh, which marks the repo `revoked`.
@@ -38,6 +38,8 @@ import { ensureTenantRepo, removeTenantRepoFiles, multiRepoMode, assertRepoName 
 import { getProvider, PROVIDER_NAMES } from './providers/index.js';
 import { signOAuthState, verifyOAuthState } from './oauth-state.js';
 import { saveCreds, loadCreds } from './cred-store.js';
+import { handleIssueLabeled } from './inbound-triggers.js';
+import { getTriggerConfig } from './trigger-store.js';
 
 export const repoRouter = express.Router();
 export const githubAppWebhookRouter = express.Router();
@@ -299,6 +301,10 @@ githubAppWebhookRouter.post('/github-app', express.raw({ type: '*/*', limit: '2m
         } else if (p.action === 'unsuspend') {
           await setRepoStatus(tenantId, 'connected');
         }
+      } else if (event === 'issues' && p.action === 'labeled') {
+        // Issue-label trigger: acks fast; planning runs in the background.
+        const { githubLabel } = await getTriggerConfig(tenantId);
+        await handleIssueLabeled(tenantId, p, req.get('x-github-delivery'), githubLabel);
       } else if (event === 'installation_repositories' && p.action === 'removed') {
         const c = await getRepoConfig(tenantId);
         if ((p.repositories_removed ?? []).some(r => r.full_name === `${c?.owner}/${c?.repo}`)) {

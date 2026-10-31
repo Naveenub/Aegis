@@ -26,8 +26,15 @@ const DISCORD_WEBHOOK = process.env.AEGIS_DISCORD_WEBHOOK ?? '';
  * @param {string} ctx.workflowId
  * @param {string} [ctx.tenantId]
  * @param {string} ctx.message      - human-readable summary
+ * @param {string} [ctx.prUrl]      - opened PR/MR URL, when any
  */
-export async function notifyWorkflowStatus(status, { workflowId, tenantId, message }) {
+export async function notifyWorkflowStatus(status, { workflowId, tenantId, message, prUrl }) {
+  // Close the loop with whoever triggered the run (GitHub issue / Slack). Best-effort.
+  try {
+    const { reportToOrigin } = await import('./trigger-origin.js');
+    await reportToOrigin(workflowId, status, { message, prUrl });
+  } catch { /* never affects workflow execution */ }
+
   if (!SLACK_WEBHOOK && !DISCORD_WEBHOOK) return;
 
   const emoji = status === 'completed' ? ':white_check_mark:' : ':x:';

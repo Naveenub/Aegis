@@ -250,10 +250,11 @@ webhookRouter.post('/github', async (req, res) => {
   }
 
   try {
-    const tenant = webhookTenant();
-    const task   = buildTask(parsed, 'github');
-    const result = await runSystem(task, tenant);
-    return res.status(202).json({ accepted: true, workflowId: result.workflowId });
+    const tenantId = webhookTenant();
+    const task     = buildTask(parsed, 'github');
+    // Planning can exceed the provider's webhook timeout: ack now, run in the background.
+    runSystem(task, { tenantId }).catch(err => console.error('[webhook/github] runSystem error:', err));
+    return res.status(202).json({ accepted: true, queued: true });
   } catch (err) {
     console.error('[webhook/github] runSystem error:', err);
     return res.status(500).json({ error: 'Failed to start workflow.' });
@@ -281,10 +282,11 @@ webhookRouter.post('/gitlab', async (req, res) => {
   }
 
   try {
-    const tenant = webhookTenant();
-    const task   = buildTask(parsed, 'gitlab');
-    const result = await runSystem(task, tenant);
-    return res.status(202).json({ accepted: true, workflowId: result.workflowId });
+    const tenantId = webhookTenant();
+    const task     = buildTask(parsed, 'gitlab');
+    // Planning can exceed the provider's webhook timeout: ack now, run in the background.
+    runSystem(task, { tenantId }).catch(err => console.error('[webhook/gitlab] runSystem error:', err));
+    return res.status(202).json({ accepted: true, queued: true });
   } catch (err) {
     console.error('[webhook/gitlab] runSystem error:', err);
     return res.status(500).json({ error: 'Failed to start workflow.' });

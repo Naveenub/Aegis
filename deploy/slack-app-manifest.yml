@@ -1,0 +1,21 @@
+display_information:
+  name: Aegis
+  description: Run Aegis workflows from Slack with /aegis.
+features:
+  bot_user:
+    display_name: Aegis
+    always_online: false
+  slash_commands:
+    - command: /aegis
+      url: https://YOUR_HOST/webhooks/slack/command
+      description: Run an Aegis workflow on your linked repo
+      usage_hint: "<describe the change> | link <code>"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - commands
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

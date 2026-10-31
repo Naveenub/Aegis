@@ -1,0 +1,19 @@
+{
+  "name": "Aegis",
+  "url": "https://YOUR_HOST",
+  "description": "Label a GitHub issue and Aegis plans, fixes, tests and opens a pull request.",
+  "public": true,
+  "hook_attributes": { "url": "https://YOUR_HOST/webhooks/github-app", "active": true },
+  "redirect_url": "https://YOUR_HOST/github/callback",
+  "callback_urls": ["https://YOUR_HOST/github/callback"],
+  "setup_url": "https://YOUR_HOST/github/callback",
+  "request_oauth_on_install": true,
+  "setup_on_update": false,
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write"
+  },
+  "default_events": ["issues"]
+}
