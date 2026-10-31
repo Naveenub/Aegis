@@ -104,6 +104,21 @@
       <select id="tier" name="tier"></select>
       <p id="tier-hint" class="hint"></p>
     </div>
+    <div id="tax-fields" class="hidden">
+      <div class="field">
+        <label for="country">Billing country</label>
+        <input id="country" name="country" type="text" maxlength="2" placeholder="IN" autocomplete="country" spellcheck="false">
+        <p class="hint">Two-letter code, e.g. <code>IN</code>, <code>US</code>. Used to calculate tax.</p>
+      </div>
+      <div class="field">
+        <label for="state">State <span class="hint">(India only — code such as <code>KA</code>)</span></label>
+        <input id="state" name="state" type="text" maxlength="3" autocomplete="address-level1" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="gstin">GSTIN <span class="hint">(optional)</span></label>
+        <input id="gstin" name="gstin" type="text" maxlength="15" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
     <p class="hint" style="margin:0 0 16px">By continuing you agree to the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
     <button id="account-submit" class="btn" type="submit" disabled>Continue to payment</button>
   </form>
@@ -223,8 +238,10 @@
   function isFree(tier) { return tier === 'free'; }
 
   // Button and hint follow the selected plan: the free plan skips payment entirely.
+  var taxOn = false;
   function syncPlanUi() {
     var free = isFree($('tier').value);
+    show('tax-fields', taxOn && !free);
     $('account-submit').textContent = free ? 'Create free account' : 'Continue to payment';
     $('tier-hint').textContent = free
       ? 'No card needed. The free plan has hard monthly limits and no overage; upgrade any time.'
@@ -244,6 +261,7 @@
       return res.json();
     }).then(function (cfg) {
       stripe = Stripe(cfg.publishableKey);
+      taxOn = cfg.taxMode && cfg.taxMode !== 'off';
       var select = $('tier');
       cfg.tiers.forEach(function (t) {
         var opt = document.createElement('option');
@@ -275,7 +293,10 @@
       body: JSON.stringify({
         email: $('email').value.trim(),
         tenantId: $('tenantId').value.trim(),
-        tier: $('tier').value
+        tier: $('tier').value,
+        billingAddress: taxOn && !isFree($('tier').value)
+          ? { country: $('country').value.trim(), state: $('state').value.trim() } : undefined,
+        taxId: taxOn && $('gstin').value.trim() ? $('gstin').value.trim() : undefined
       })
     }).then(function (res) {
       return res.json().then(function (body) { return { ok: res.ok, status: res.status, body: body }; });

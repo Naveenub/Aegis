@@ -36,6 +36,7 @@
  *   GET    /metrics/json                       OTEL-compatible JSON export
  *   GET    /api/metrics                        Structured metrics (dashboard)
  *   GET    /dashboard                          Observability UI (HTML)
+ *   GET    /app/*                              React dashboard SPA (usage & billing, tenants, users; built from dashboard/)
  *   GET    /events                             SSE live-push stream (metrics + workflows)
  *   GET    /                                   Marketing landing page (HTML)
  *   GET    /get-started                        Self-serve signup page (Stripe.js, HTML)
@@ -44,6 +45,7 @@
  *   GET|PUT /tenants/:id/retention             Retention policy + zero-retention mode
  *   POST   /tenants/:id/data-deletion          Delete workspace content on request
  *   GET    /signup/config                      Public signup config (Stripe publishable key)
+ *   GET    /status                             Public dependency status (503 on outage)
  *   POST   /signup                             Self-serve signup (Stripe customer+sub, tenant, API key)
  *   POST   /billing/portal                     Stripe billing-portal URL (works while pending/suspended)
  *   POST   /billing/plan                       Change plan { tier, email? }: free→paid, upgrade now, downgrade/cancel at period end
@@ -69,7 +71,7 @@
  */
 
 import 'dotenv/config';
-import { readFileSync }  from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import express           from 'express';
@@ -90,6 +92,7 @@ import { getTierConfig, DEFAULT_TIER, TIERS } from './engine/billing/tiers.js';
 import { checkAllowance } from './engine/billing/allowance.js';
 import { createPortalSession } from './engine/billing/stripe-customer.js';
 import { changePlan } from './engine/billing/plan-change.js';
+import { getStatus } from './engine/status.js';
 import { getSpendStatus, addCredits } from './engine/billing/spend-guard.js';
 import { setByokKey, deleteByokKey, hasByok } from './engine/billing/byok.js';
 import { createCreditCheckout } from './engine/billing/credits.js';
@@ -103,8 +106,6 @@ import { startRetentionScheduler }          from './engine/retention-scheduler.j
 import { renderSubprocessorsPage, publicSubprocessors } from './engine/compliance-pages.js';
 import { webhookRouter }                     from './engine/webhook-receiver.js';
 import { repoRouter, githubAppWebhookRouter } from './engine/repo-routes.js';
-import { triggerRouter, triggerWebhookRouter } from './engine/trigger-routes.js';
-import { marketplaceRouter } from './engine/marketplace.js';
 import { stripeWebhookRouter }               from './engine/billing/stripe-webhook.js';
 import { startAnomalyDetector, anomalyHandler } from './engine/anomaly-detector.js';
 import { recordAuditEvent, queryAuditEvents, exportAuditEvents, verifyChain } from './engine/audit-log.js';
@@ -181,6 +182,16 @@ app.set('trust proxy', 1);
  */
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
+});
+
+/**
+ * GET /status
+ * Public dependency status for external monitors / a hosted status page.
+ * 503 when a dependency is down. No auth, no tenant data.
+ */
+app.get('/status', async (_req, res) => {
+  const { httpStatus, body } = await getStatus();
+  res.status(httpStatus).json(body);
 });
 
 // ─── Task submission ──────────────────────────────────────────────────────────
@@ -968,6 +979,8 @@ app.post('/billing/plan', taskRateLimiter, requireApiKey, requirePermission('ten
     tenantId: req.resolvedTenantId,
     tier: req.body?.tier,
     email: req.body?.email,
+    billingAddress: req.body?.billingAddress,
+    taxId: req.body?.taxId,
   });
   res.status(status).json(body);
 });
@@ -1421,8 +1434,6 @@ app.get('/events', requireApiKey, (req, res) => {
     // signature check (it needs the raw bytes) fail with 401.
     app.use('/webhooks', stripeWebhookRouter);
     app.use('/webhooks', githubAppWebhookRouter); // raw body — must precede webhookRouter
-    app.use('/webhooks', triggerWebhookRouter);   // Slack + Jira inbound triggers (raw body)
-    app.use('/webhooks', marketplaceRouter);      // GitHub Marketplace purchases (raw body)
 
 // ─── Inbound webhooks (GitHub / GitLab → trigger workflows) ──────────────────
     //
@@ -1435,7 +1446,22 @@ app.get('/events', requireApiKey, (req, res) => {
 
 app.use(authRouter);
 app.use(repoRouter);
-app.use(triggerRouter);
+
+// ─── React dashboard (dashboard/dist, built with `npm run build:dashboard`) ───
+// Mounted under /app because the SPA's own routes (/workflows, /tenants, …)
+// collide with API paths. Static assets are public; every data call the SPA
+// makes is authenticated by the API as usual.
+const DASHBOARD_DIST = join(__dirname, 'dashboard', 'dist');
+if (existsSync(join(DASHBOARD_DIST, 'index.html'))) {
+  app.use('/app', express.static(DASHBOARD_DIST, { index: false }));
+  app.get(['/app', '/app/*'], (req, res, next) => {
+    if (/\.[a-z0-9]+$/i.test(req.path)) return next(); // missing asset → 404, not index.html
+    res.set('Cache-Control', 'no-cache');
+    res.sendFile(join(DASHBOARD_DIST, 'index.html'));
+  });
+} else {
+  console.warn('[dashboard] dashboard/dist not found — /app is disabled. Run `npm run build:dashboard`.');
+}
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────
 
@@ -1475,6 +1501,7 @@ async function start() {
   app.listen(PORT, () => {
     console.info(`[server] Aegis API listening on port ${PORT}`);
     console.info(`[server] Dashboard → http://localhost:${PORT}/dashboard`);
+    if (existsSync(join(DASHBOARD_DIST, 'index.html'))) console.info(`[server] Usage & billing UI → http://localhost:${PORT}/app/`);
   });
 }
 

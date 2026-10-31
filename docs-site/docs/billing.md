@@ -121,6 +121,19 @@ If you build your own frontend instead, the tenant starts `pending`. Confirm the
 
 Static env API keys are never gated.
 
+## Tax (GST / VAT / sales tax)
+
+Off by default. Set `AEGIS_TAX_MODE`:
+
+- `stripe` — Stripe Tax (`automatic_tax`). Needs Stripe Tax set up with your registrations. In India Stripe Tax only supports non-resident sellers (IGST on OIDAR), so it does **not** cover an India-based seller.
+- `gst` — India-based seller. Set `AEGIS_TAX_HOME_STATE` (ISO 3166-2:IN, e.g. `KA`) and run `scripts/stripe-setup.js` to create the CGST 9% / SGST 9% / IGST 18% rates (`STRIPE_TAXRATE_IN_*`). Same-state customers get CGST+SGST, other states IGST, customers outside India no tax (zero-rating exports needs a valid LUT).
+
+When on, `POST /signup` and `POST /billing/plan` (free → paid) require `billingAddress: { country, state? }` (state required for `IN`) and accept an optional `taxId` (GSTIN). Existing paid customers keep the rates already on their subscription; add your GSTIN and invoice details in the Stripe dashboard. Verify rates and invoices in test mode, and confirm the 18% classification and USD invoicing with your tax adviser.
+
+## Status and SLA
+
+`GET /status` is a public dependency check (503 on outage). Point an external status page or uptime monitor at it; hosting the page on the service itself defeats its purpose. `monitoring/aegis-alerts.yml` has availability SLO and burn-rate alerts based on a blackbox probe of it. The SLA terms (target, credits, exclusions) are a commercial and legal decision and are not in `landing/terms.html`, which still says "as is".
+
 ## Changing plan
 
 `POST /billing/plan` (API key) with `{ "tier": "free" | "starter" | "pro", "email"?: string }`:

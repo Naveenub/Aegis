@@ -229,3 +229,35 @@ groups:
             This will delay metric writes, Redis operations, and HTTP responses.
             The process may be CPU-saturated or performing blocking operations.
           runbook: "https://docs.aegis.internal/runbooks/event-loop-lag"
+
+  # ── Availability SLO (external probe of GET /status) ────────────────────────
+  # Needs the Prometheus blackbox exporter probing https://<host>/status with
+  # job="aegis-status". Pick the target your SLA promises; 99.9% shown.
+  - name: aegis.slo
+    rules:
+
+      - record: aegis:availability:ratio_30d
+        expr: avg_over_time(probe_success{job="aegis-status"}[30d])
+
+      - alert: AegisAvailabilityBurnFast
+        expr: |
+          (1 - avg_over_time(probe_success{job="aegis-status"}[1h])) > (14.4 * 0.001)
+            and
+          (1 - avg_over_time(probe_success{job="aegis-status"}[5m])) > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Aegis burning the 99.9% monthly error budget ~14x too fast"
+          description: "/status probe is failing. At this rate the 30-day budget is gone in about two days."
+
+      - alert: AegisAvailabilityBelowTarget30d
+        expr: aegis:availability:ratio_30d < 0.999
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Aegis 30-day availability below 99.9%"
+          description: "Measured availability is {{ printf \"%.3f\" $value }}. Check SLA credit obligations."

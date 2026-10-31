@@ -22,6 +22,7 @@ import { createKey } from '../key-store.js';
 import { recordAuditEvent } from '../audit-log.js';
 import { getTierConfig, DEFAULT_TIER, SIGNUP_DEFAULT_TIER, TIERS, isPaidTier } from './tiers.js';
 import { provisionSubscription, cancelSubscription, getBasePrice } from './stripe-customer.js';
+import { taxInputError, taxMode } from './tax.js';
 
 /**
  * Paid signup runs tenant code, so self-serve signup is only enabled when an
@@ -90,7 +91,7 @@ export async function signupTenant(input) {
   if (unsandboxedSignupBlocked()) {
     return { status: 503, body: { error: signupBlockedReason() } };
   }
-  const { email, tenantId, label, tier } = input ?? {};
+  const { email, tenantId, label, tier, billingAddress, taxId } = input ?? {};
 
   if (!email || typeof email !== 'string' || !email.includes('@')) {
     return { status: 400, body: { error: '`email` (string) is required.' } };
@@ -105,6 +106,11 @@ export async function signupTenant(input) {
   const id = tenantId.trim();
   const resolvedTier = tier ?? DEFAULT_TIER;
 
+  if (isPaidTier(resolvedTier)) {
+    const taxError = taxInputError({ address: billingAddress, taxId });
+    if (taxError) return { status: 400, body: { error: taxError } };
+  }
+
   if (await getTenant(id)) {
     return { status: 409, body: { error: `Tenant "${id}" already exists.` } };
   }
@@ -115,7 +121,7 @@ export async function signupTenant(input) {
   let subscription = null;
   if (!free) {
     try {
-      subscription = await provisionSubscription({ email, tenantId: id, tier: resolvedTier });
+      subscription = await provisionSubscription({ email, tenantId: id, tier: resolvedTier, billingAddress, taxId });
     } catch (err) {
       console.error('[signup] Stripe provisioning failed', err);
       return { status: 502, body: { error: `Billing provisioning failed: ${err.message}` } };
@@ -214,6 +220,8 @@ export async function getSignupConfig() {
         price: isPaidTier(id) ? (prices[id] ?? null) : { amount: 0, currency: 'usd', interval: 'month' },
       })),
       defaultTier: SIGNUP_DEFAULT_TIER,
+      // Tells the page whether to ask for a billing country/state (and GSTIN).
+      taxMode: taxMode(),
     },
   };
 }

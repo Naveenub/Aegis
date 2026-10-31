@@ -17,7 +17,7 @@ metadata:
   name: aegis-server
   namespace: aegis
 spec:
-  replicas: 1 # HNSW fallback index is per-pod, in-memory — see k8s/README.md before scaling this
+  replicas: 2 # safe to scale: state is in Redis Stack (03-redis.yaml) and the shared /repo volume — see k8s/README.md
   selector:
     matchLabels:
       app: aegis-server

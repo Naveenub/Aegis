@@ -30,6 +30,7 @@ import Stripe from 'stripe';
 import { TIERS, PAID_TIERS } from '../engine/billing/tiers.js';
 import { EVENT_TYPES } from '../engine/usage-recorder.js';
 import { meterEventName } from '../engine/billing/stripe-reporter.js';
+import { taxMode } from '../engine/billing/tax.js';
 
 dotenv.config();
 const dryRun = process.argv.includes('--dry-run');
@@ -102,6 +103,7 @@ for (const [tier, cfg] of Object.entries(TIERS).filter(([t]) => PAID_TIERS.inclu
   const T = tier.toUpperCase();
   const bp = await call(`base ${tier}`, {
     currency: 'usd',
+    tax_behavior: 'exclusive',
     unit_amount_decimal: cents(base[tier]),
     recurring: { interval: 'month' },
     product_data: { name: `AEGIS ${cfg.label}` },
@@ -118,6 +120,7 @@ for (const [tier, cfg] of Object.entries(TIERS).filter(([t]) => PAID_TIERS.inclu
         ];
     const mp = await call(`metered ${tier} ${ev}`, {
       currency: 'usd',
+      tax_behavior: 'exclusive',
       billing_scheme: 'tiered',
       tiers_mode: 'graduated',
       tiers,
@@ -126,6 +129,21 @@ for (const [tier, cfg] of Object.entries(TIERS).filter(([t]) => PAID_TIERS.inclu
     }, (p) => stripe.prices.create(p));
     env.push(`STRIPE_PRICE_${T}_${ev.toUpperCase()}=${mp.id}`);
   }
+}
+
+// India-based seller (AEGIS_TAX_MODE=gst): fixed rates picked per customer by
+// engine/billing/tax.js. 18% is the standard GST rate; confirm it applies to
+// your service with your tax adviser before going live.
+if (taxMode() === 'gst') {
+  for (const [key, display_name, percentage, tax_type] of [
+    ['CGST', 'CGST', 9, 'gst'], ['SGST', 'SGST', 9, 'gst'], ['IGST', 'IGST', 18, 'igst'],
+  ]) {
+    const r = await call(`taxrate ${key}`, {
+      display_name, percentage, tax_type, inclusive: false, country: 'IN', jurisdiction: 'IN',
+    }, (p) => stripe.taxRates.create(p));
+    env.push(`STRIPE_TAXRATE_IN_${key}=${r.id}`);
+  }
+  env.push('# also set AEGIS_TAX_HOME_STATE=<your state, ISO 3166-2:IN e.g. KA>');
 }
 
 console.log('\n# ── add to .env / k8s secret ──');

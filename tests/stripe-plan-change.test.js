@@ -179,3 +179,18 @@ describe('scheduleCancelToFree / keepCurrentPlan', () => {
     expect(client.subscriptions.update).not.toHaveBeenCalled();
   });
 });
+
+describe('provisionSubscription tax', () => {
+  it('sends GST rates and address when AEGIS_TAX_MODE=gst', async () => {
+    Object.assign(process.env, {
+      AEGIS_TAX_MODE: 'gst', AEGIS_TAX_HOME_STATE: 'KA',
+      STRIPE_TAXRATE_IN_CGST: 'txr_c', STRIPE_TAXRATE_IN_SGST: 'txr_s', STRIPE_TAXRATE_IN_IGST: 'txr_i',
+    });
+    vi.resetModules();
+    sc = await import('../engine/billing/stripe-customer.js');
+    await sc.provisionSubscription({ email: 'a@b.co', tenantId: 'acme', tier: 'pro', billingAddress: { country: 'IN', state: 'MH' } });
+    expect(client.customers.create.mock.calls[0][0].address).toEqual({ country: 'IN', state: 'MH' });
+    expect(client.subscriptions.create.mock.calls[0][0].default_tax_rates).toEqual(['txr_i']);
+    for (const k of ['AEGIS_TAX_MODE', 'AEGIS_TAX_HOME_STATE', 'STRIPE_TAXRATE_IN_CGST', 'STRIPE_TAXRATE_IN_SGST', 'STRIPE_TAXRATE_IN_IGST']) delete process.env[k];
+  });
+});

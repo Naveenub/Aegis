@@ -12,15 +12,15 @@
    Just make sure `REDIS_URL` is actually set (`01-configmap.yaml` or
    `02-secret.yaml`) before applying.
 
-2. **`aegis-server` is pinned to 1 replica.** When Redis Stack isn't
-   present, `vector-memory.js` falls back to a local HNSW index
-   (hnswlib-node) held in-process and persisted to the container's
-   ephemeral disk — not Redis. Fixing item 1 makes the BM25/weights/age
-   metadata shared across pods, but the HNSW ANN index itself is still
-   pod-local, so a second replica would silently miss memories written to
-   the other pod. Scale past 1 only once Redis Stack (`FT.*` commands) is
-   guaranteed available, so `searchMemory` uses the shared `FT.SEARCH`
-   path instead of HNSW.
+2. **`aegis-server` runs 2 replicas.** Vector search uses RediSearch
+   (`FT.SEARCH`) on the Redis Stack in `03-redis.yaml`, shared by all pods, and
+   `vector-memory.js` refuses to start without it unless
+   `AEGIS_ALLOW_HNSW_FALLBACK=true`. **Never set that flag on k8s:** the
+   fallback HNSW index is pod-local, so extra replicas would silently miss
+   memories written elsewhere. Rate-limit counters also fall back to per-pod
+   memory if Redis is unreachable at pod start, so keep Redis healthy before
+   scaling. Redis itself stays a single StatefulSet replica (a real SPOF —
+   see "Not included").
 
 3. **Build and push the image.**
    ```bash
@@ -75,7 +75,7 @@ kubectl -n aegis get pods -w
 
 ## Not included
 
-No manifests for `.github/workflows/ci.yml`-triggered image builds, no
+Redis is a single replica with no failover (use a managed Redis Stack or Sentinel/cluster for an availability SLA). No manifests for `.github/workflows/ci.yml`-triggered image builds, no
 PodDisruptionBudget, no cert-manager Certificate for the Ingress, and no
 NetworkPolicy beyond the one guarding the sandbox runner in `06a-sandbox.yaml`.
 Add per your cluster's conventions.

@@ -16,6 +16,7 @@
 import Stripe from 'stripe';
 import { EVENT_TYPES } from '../usage-recorder.js';
 import { isPaidTier } from './tiers.js';
+import { taxFields } from './tax.js';
 
 let _client = null;
 function getClient() {
@@ -55,22 +56,32 @@ function priceIdsForTier(tier) {
  * @param {string} params.tenantId  - stored as customer/subscription metadata for support lookups
  * @param {string} params.tier      - 'starter' | 'pro' | 'enterprise'
  * @param {string} [params.customerId] - reuse an existing customer (free tenant upgrading)
+ * @param {{country?:string,state?:string,postal_code?:string}} [params.billingAddress] - used when AEGIS_TAX_MODE is on
+ * @param {string} [params.taxId]   - customer GSTIN (optional; printed on the invoice)
  * @returns {Promise<{ customerId: string, subscriptionId: string, status: string, clientSecret: string|null }>}
  */
-export async function provisionSubscription({ email, tenantId, tier, customerId }) {
+export async function provisionSubscription({ email, tenantId, tier, customerId, billingAddress, taxId }) {
   const client = getClient();
   // Per-tier prices: base + graduated metered (the tier's included allowance is
   // the free first band, overage is priced above it).
   const [basePrice, ...meteredPrices] = priceIdsForTier(tier);
 
-  const customer = customerId
-    ? { id: customerId }
-    : await client.customers.create({ email, metadata: { tenantId } });
+  // Tax inputs (AEGIS_TAX_MODE=off → empty objects, nothing extra is sent).
+  const tax = taxFields({ address: billingAddress, taxId });
+
+  let customer;
+  if (customerId) {
+    customer = { id: customerId };
+    if (tax.customer.address) await client.customers.update(customerId, { address: tax.customer.address });
+  } else {
+    customer = await client.customers.create({ email, metadata: { tenantId }, ...tax.customer });
+  }
 
   const subscription = await client.subscriptions.create({
     customer: customer.id,
     items: [{ price: basePrice }, ...meteredPrices.map((price) => ({ price }))],
     metadata: { tenantId, tier },
+    ...tax.subscription,
     // Gate on first payment: subscription stays 'incomplete' until the
     // client confirms the PaymentIntent with clientSecret (Stripe.js).
     payment_behavior: 'default_incomplete',

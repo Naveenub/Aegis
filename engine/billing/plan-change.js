@@ -28,6 +28,7 @@ import { getTier, getTenant, getStripeCustomerId, setStripeCustomerId } from '..
 import { recordAuditEvent } from '../audit-log.js';
 import { isPaidTier, tierRank, TIERS } from './tiers.js';
 import { SELF_SERVE_TIERS, unsandboxedSignupBlocked, signupBlockedReason } from './signup.js';
+import { taxInputError } from './tax.js';
 import {
   provisionSubscription, findLiveSubscription, cancelIncompleteSubscriptions,
   upgradeSubscription, scheduleDowngrade, scheduleCancelToFree, keepCurrentPlan,
@@ -38,7 +39,7 @@ const bad = (status, error) => ({ status, body: { error } });
 /**
  * @param {{ tenantId: string, tier: string, email?: string }} input
  */
-export async function changePlan({ tenantId, tier, email }) {
+export async function changePlan({ tenantId, tier, email, billingAddress, taxId }) {
   if (typeof tier !== 'string' || !TIERS[tier]) {
     return bad(400, `\`tier\` must be one of: ${SELF_SERVE_TIERS.join(', ')}.`);
   }
@@ -70,9 +71,11 @@ export async function changePlan({ tenantId, tier, email }) {
         return bad(400, '`email` is required to upgrade from the free plan.');
       }
     }
+    const taxError = taxInputError({ address: billingAddress, taxId });
+    if (taxError) return bad(400, taxError);
     try {
       if (customerId) await cancelIncompleteSubscriptions(customerId);
-      const sub = await provisionSubscription({ email, tenantId, tier, customerId });
+      const sub = await provisionSubscription({ email, tenantId, tier, customerId, billingAddress, taxId });
       if (!customerId) await setStripeCustomerId(tenantId, sub.customerId);
       recordAuditEvent(tenantId, {
         actorId: tenantId, action: 'tenant.plan_change', resourceType: 'tenant', resourceId: tenantId,
